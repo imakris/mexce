@@ -61,6 +61,7 @@
 #ifdef _WIN32
     #include <Windows.h>
 #elif defined(__linux__)
+    //#include <unistd.h>
     #include <sys/mman.h>
 #endif
 
@@ -122,8 +123,6 @@ private:
 
     std::list<impl::Numeral >::iterator find_numeral  (const std::string&);
     std::list<impl::Function>::iterator find_function (const std::string&);
-    void neutralize();
-
 };
 
 
@@ -692,9 +691,9 @@ inline
 evaluator::evaluator():
     m_buffer_size(0)
 {
-    neutralize();
     m_numerals.push_back(impl::Constant("3.141592653589793238462643383", "PI"));
     m_numerals.push_back(impl::Constant("2.718281828459045235360287471", "E" ));
+    assign_expression("0");
 }
 
 
@@ -751,24 +750,12 @@ bool evaluator::unbind(const std::string& s)
         if (pos->element_type != impl::CVAR)
             return false;
         if (pos->referenced) {
-            neutralize();
+            assign_expression("0");
         }
         m_numerals.erase(pos);
         return true;
     }
     return false;
-}
-
-
-inline
-void evaluator::neutralize()
-{
-    impl::free_executable_buffer(evaluate, m_buffer_size);
-    static uint8_t return0[] = { 0xd9, 0xee, 0xc3 };
-    m_buffer_size = sizeof(return0);
-    auto buffer = impl::get_executable_buffer(m_buffer_size);
-    memcpy(buffer, return0, m_buffer_size);
-    evaluate = impl::lock_executable_buffer(buffer, m_buffer_size);
 }
 
 
@@ -797,7 +784,7 @@ bool evaluator::assign_expression(std::string e)
         x->referenced = false;
 
     if (e.length() == 0){
-        neutralize();
+        assign_expression("0");
         return true;
     }
 
