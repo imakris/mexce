@@ -66,7 +66,7 @@ public:
     {}
 
     virtual ~mexce_parsing_exception() { }
-    virtual const char* what() const { return m_message.c_str(); }
+    virtual const char* what() const throw() { return m_message.c_str(); }
 
 protected:
     std::string  m_message;
@@ -146,7 +146,7 @@ double (*get_executable_buffer(uint8_t* code, size_t sz))()
 inline
 void free_executable_buffer(double (*buffer)())
 {
-    VirtualFree(buffer, 0, MEM_RELEASE);
+    VirtualFree( (void*) buffer, 0, MEM_RELEASE);
 }
 
 
@@ -394,11 +394,11 @@ inline Function Min()
 inline Function Floor()
 {
     static uint8_t code[] = {
-        0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x06,   // mov         word ptr [esp-4], 67fh 
-        0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]  
-        0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]  
-        0xd9, 0xfc,                                 // frndint  
-        0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]  
+        0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x06,   // mov         word ptr [esp-4], 67fh
+        0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]
+        0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]
+        0xd9, 0xfc,                                 // frndint
+        0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
     return Function("floor", "floor", 1, 0, sizeof(code), code);
 }
@@ -407,11 +407,11 @@ inline Function Floor()
 inline Function Ceil()
 {
     static uint8_t code[] = {
-        0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x0a,   // mov         word ptr [esp-4], a7fh 
-        0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]  
-        0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]  
-        0xd9, 0xfc,                                 // frndint  
-        0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]  
+        0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x0a,   // mov         word ptr [esp-4], a7fh
+        0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]
+        0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]
+        0xd9, 0xfc,                                 // frndint
+        0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
     return Function("ceil", "ceil", 1, 0, sizeof(code), code);
 }
@@ -423,11 +423,11 @@ inline Function Round()
 
         // NOTE: In this case, saving/restoring the control word is most likely redundant.
 
-        0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x02,   // mov         word ptr [esp-4], 27fh 
-        0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]  
-        0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]  
-        0xd9, 0xfc,                                 // frndint  
-        0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]  
+        0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x02,   // mov         word ptr [esp-4], 27fh
+        0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]
+        0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]
+        0xd9, 0xfc,                                 // frndint
+        0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
     return Function("round", "_round", 1, 0, sizeof(code), code);
 }
@@ -517,9 +517,9 @@ inline Function Div()
 
 inline Function Gain()
 {
-    //                            x                         
+    //                            x
     //                 ------------------------  if x < 0.5
-    //                 (1 / a - 2) (1 - 2x) + 1             
+    //                 (1 / a - 2) (1 - 2x) + 1
     // gain(x, a) =                                               for x, a in [0, 1]
     //                 (1 / a - 2) (1 - 2x) - x
     //                 ------------------------  if x >= 0.5
@@ -588,26 +588,26 @@ inline ::std::list<Function>& functions()
 
 struct Numeral: public Element
 {
+    void*          address;
     uint8_t        numeric_data_type;
     bool           referenced;
     double         referenced_variable;
     std::string    name;
-    void*          address;
 
     Numeral(void *address, uint8_t numeric_data_type, uint8_t element_type, std::string name, double constant_value = 0.0):
         Element               ( element_type      ),
         address               ( address           ),
         numeric_data_type     ( numeric_data_type ),
         referenced            ( false             ),
-        name                  ( name              ),
-        referenced_variable   ( constant_value    ) {}
+        referenced_variable   ( constant_value    ),
+        name                  ( name              ) {}
 
     Numeral(const Numeral &rhs):
         Element               ( rhs.element_type          ),
+        address               ( rhs.address               ),
         numeric_data_type     ( rhs.numeric_data_type     ),
         referenced            ( rhs.referenced            ),
         referenced_variable   ( rhs.referenced_variable   ),
-        address               ( rhs.address               ),
         name                  ( rhs.name                  )
     {
         if (element_type == CCONST)
@@ -1181,7 +1181,7 @@ bool evaluator::assign_expression(std::string e)
         0x48, 0xb8, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, // mov         rax, cdcdcdcdcdcdcdcdh
 
         // store the return value
-        0xdd, 0x18,                                                 // fstp        qword ptr [rax] 
+        0xdd, 0x18,                                                 // fstp        qword ptr [rax]
 
         // load from the return value to xmm0
         0xF3, 0x0F, 0x7E, 0x00,                                     // movq        xmm0, mmword ptr [rax]
