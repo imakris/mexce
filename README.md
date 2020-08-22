@@ -6,9 +6,9 @@ Mini Expression Compiler/Evaluator
 
 mexce is a small runtime compiler of mathematical expressions, written in C++. It generates machine code that primarily uses the x87 FPU and it is a single header with no dependencies.
 
-I wrote this back in 2003 as part of an application and then almost forgot its existence. The code was now updated with added support for Data Execution Prevention (which probably did not exist back then) and x64.
+I wrote this back in 2003 as part of an application and then its existence was almost forgotten. The code was now updated with added support for Data Execution Prevention (which probably did not exist back then) and x64.
 
-It currently supports Windows only, but Linux will be supported soon.
+It currently supports Windows and Linux.
 
 ## Usage
 

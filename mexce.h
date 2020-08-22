@@ -41,6 +41,7 @@
 #define MEXCE_INCLUDED
 
 #include <cassert>
+#include <cstring>
 #include <cinttypes>
 #include <deque>
 #include <exception>
@@ -49,8 +50,18 @@
 #include <vector>
 
 
+#if defined(_M_X64) || defined(__x86_64__)
+    #define MEXCE_64
+#elif defined(_M_IX86) || defined(__i386__)
+    #define MEXCE_32
+#else
+    #error Unknown CPU architecture
+#endif
+
 #ifdef _WIN32
-#include <Windows.h>
+    #include <Windows.h>
+#elif defined(__linux__)
+    #include <sys/mman.h>
 #endif
 
 
@@ -65,7 +76,7 @@ public:
         m_position(position)
     {}
 
-    virtual ~mexce_parsing_exception() { }
+    virtual ~mexce_parsing_exception()  { }
     virtual const char* what() const throw() { return m_message.c_str(); }
 
 protected:
@@ -92,16 +103,17 @@ public:
     bool unbind(const std::string&);
     bool assign_expression(std::string);
 
-    double (__cdecl * evaluate)();
+    double (* evaluate)();
 
     std::string get_c_expression() const { return m_c_expression; }
 
 private:
 
-#ifdef _WIN64
+#ifdef MEXCE_64
     volatile double             m_x64_return_var;
 #endif
 
+    size_t                      m_buffer_size;
     std::string                 m_expression;
     std::string                 m_c_expression;
 
@@ -118,6 +130,7 @@ private:
 namespace impl {
 
 
+#ifdef _WIN32
 inline
 size_t get_page_size()
 {
@@ -125,28 +138,47 @@ size_t get_page_size()
     GetSystemInfo(&system_info);
     return system_info.dwPageSize;
 }
+#endif
 
 
 inline
-double (*get_executable_buffer(uint8_t* code, size_t sz))()
+uint8_t* get_executable_buffer(size_t sz)
 {
+#ifdef _WIN32
     static auto const page_size = get_page_size();
-    auto const buffer = (uint8_t*)VirtualAlloc(nullptr, page_size, MEM_COMMIT, PAGE_READWRITE);
+    return (uint8_t*)VirtualAlloc(nullptr, page_size, MEM_COMMIT, PAGE_READWRITE);
+#elif defined(__linux__)
+    return (uint8_t*)mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#endif
+}
 
-    if (buffer != 0) {
-        memcpy(buffer, code, sz);
-        DWORD dummy;
-        VirtualProtect(buffer, sz, PAGE_EXECUTE_READ, &dummy);
+
+inline
+double (*lock_executable_buffer(uint8_t* buffer, size_t sz))()
+{
+#ifdef _WIN32
+    DWORD dummy;
+    VirtualProtect(buffer, sz, PAGE_EXECUTE_READ, &dummy);
+#elif defined(__linux__)
+    if (mprotect((void*) buffer, sz, PROT_EXEC) != 0) {
+        buffer = 0;
     }
-
+#endif
     return reinterpret_cast<double (*)()>(buffer);
 }
 
 
 inline
-void free_executable_buffer(double (*buffer)())
+void free_executable_buffer(double (*buffer)(), size_t sz)
 {
+    if (!buffer) {
+        return;
+    }
+#ifdef _WIN32
     VirtualFree( (void*) buffer, 0, MEM_RELEASE);
+#elif defined(__linux__)
+    munmap((void *) buffer, sz);
+#endif
 }
 
 
@@ -657,7 +689,8 @@ template <> inline Numeric_data_type get_ndt<int64_t>() { return M64INT; }
 
 
 inline
-evaluator::evaluator()
+evaluator::evaluator():
+    m_buffer_size(0)
 {
     neutralize();
     m_numerals.push_back(impl::Constant("3.141592653589793238462643383", "PI"));
@@ -668,7 +701,7 @@ evaluator::evaluator()
 inline
 evaluator::~evaluator()
 {
-    impl::free_executable_buffer(evaluate);
+    impl::free_executable_buffer(evaluate, m_buffer_size);
 }
 
 
@@ -730,9 +763,12 @@ bool evaluator::unbind(const std::string& s)
 inline
 void evaluator::neutralize()
 {
-    impl::free_executable_buffer(evaluate);
+    impl::free_executable_buffer(evaluate, m_buffer_size);
     static uint8_t return0[] = { 0xd9, 0xee, 0xc3 };
-    evaluate = impl::get_executable_buffer(return0, sizeof(return0));
+    m_buffer_size = sizeof(return0);
+    auto buffer = impl::get_executable_buffer(m_buffer_size);
+    memcpy(buffer, return0, m_buffer_size);
+    evaluate = impl::lock_executable_buffer(buffer, m_buffer_size);
 }
 
 
@@ -1158,7 +1194,7 @@ bool evaluator::assign_expression(std::string e)
     for (; y != elist.end(); y++) {
         if (((*y)->element_type == CVAR) ||
             ((*y)->element_type == CCONST))
-#ifdef _WIN64
+#ifdef MEXCE_64
             code_buffer_size += 12;   // mov rax, qword ptr (10 bytes) + fld [rax] (2 bytes)
 #else
             code_buffer_size += 6;    // fld dword ptr (6 bytes)
@@ -1168,7 +1204,7 @@ bool evaluator::assign_expression(std::string e)
     }
 
     const static uint8_t return_sequence[] = {
-#ifdef _WIN64
+#ifdef MEXCE_64
         // Right before the function returns, in 32-bit x86, the result is in
         // st(0), where it is expected to be. There is nothing further to do there
         // other than return.
@@ -1192,17 +1228,17 @@ bool evaluator::assign_expression(std::string e)
 
     code_buffer_size += sizeof(return_sequence);
 
-#ifdef _WIN64
+#ifdef MEXCE_64
     code_buffer_size += 1; //this is the initiation sequence, only applicable to x64, for pushing rax (1 byte)
 #endif
 
-    auto code_buffer = new uint8_t[code_buffer_size];
+    auto code_buffer = get_executable_buffer(code_buffer_size);
 
     //stage 5: generate executable code
     y = elist.begin();
     size_t idx = 0;
 
-#ifdef _WIN64
+#ifdef MEXCE_64
     // On x64 we are using rax to fetch/store addresses
     code_buffer[0] = 0x50; // push rax
     idx++;
@@ -1213,14 +1249,14 @@ bool evaluator::assign_expression(std::string e)
              ((*y)->element_type == CCONST)){
             Numeral * tn = (Numeral *) *y;
 
-#ifdef _WIN64
+#ifdef MEXCE_64
             *((uint16_t*)(code_buffer+idx)) = 0xb848;   // move input address to rax (only the opcode)
             memcpy(code_buffer + idx + 2, &(tn->address), 8);
             idx += 10;                                  // 2 for the opcode, 8 for the address
 #endif
 
             switch (tn->numeric_data_type) {
-#ifdef _WIN64
+#ifdef MEXCE_64
                 // On x64, variable addresses are already supplied in rax.
                 case M32FP:   *((uint16_t*)(code_buffer+idx)) = 0x00d9; break;
                 case M64FP:   *((uint16_t*)(code_buffer+idx)) = 0x00dd; break;
@@ -1238,7 +1274,7 @@ bool evaluator::assign_expression(std::string e)
             }
             idx += 2;
 
-#ifndef _WIN64
+#ifndef MEXCE_64
             memcpy(code_buffer + idx, &(tn->address), 4);
             idx += 4;
 #endif
@@ -1253,14 +1289,14 @@ bool evaluator::assign_expression(std::string e)
     // copy the return sequence
     memcpy(code_buffer+idx, return_sequence, sizeof(return_sequence));
 
-#ifdef _WIN64
+#ifdef MEXCE_64
     // load the intermediate variable's address to rax
     *((uint64_t*)(code_buffer+idx+2)) = (uint64_t)&m_x64_return_var;
 #endif
 
     idx +=sizeof(return_sequence);
 
-    evaluate = get_executable_buffer(code_buffer, code_buffer_size);
+    evaluate = lock_executable_buffer(code_buffer, code_buffer_size);
 
     return true;
 }
