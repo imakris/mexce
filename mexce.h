@@ -1,39 +1,39 @@
 //
 // Mini Expression Compiler/Evaluator
 // ==================================
-// 
+//
 // 14.09.2003 [updated 21.8.2020]
 // mexce.h
 // Ioannis Makris
-// 
+//
 // mexce can compile and evaluate a mathematical expression at runtime.
 // The generated machine code will mostly use the FPU.
-// 
+//
 // An example:
 // -----------
-// 
+//
 // float   x = 0.0f;
 // double  y = 0.1;
 // int     z = 200;
 // double  wv[200];
-// 
+//
 // mexce::evaluator eval;
 // eval.bind(x, "x");
 // eval.bind(y, "y");
 // eval.bind(z, "x");   // This will return false and will have no effect.
 //                      // That is because an "x" is already bound.
 // eval.bind(z, "z");
-// 
+//
 // eval.assign_expression("0.3f+(-sin(2.33f+x-log((.3*PI+(88/y)/E),3.2+z)))/98");
-// 
+//
 // for (int i = 0; i < 200; i++, x-=0.1f, y+=0.212, z+=2) {
 //     wv[i] = eval.evaluate(); // results will be different, depending on x, y, z
 // }
-// 
+//
 // eval.unbind("x");    // releasing a committed variable which is contained in the
 //                      // assigned expression will automatically invalidate the
 //                      // expression.
-// 
+//
 // wv[0] = eval.evaluate(); // Now it will return 0
 //
 
@@ -128,7 +128,7 @@ size_t get_page_size()
 
 
 inline
-double (*get_executable_buffer(uint8_t* code, size_t sz))() 
+double (*get_executable_buffer(uint8_t* code, size_t sz))()
 {
     static auto const page_size = get_page_size();
     auto const buffer = (uint8_t*)VirtualAlloc(nullptr, page_size, MEM_COMMIT, PAGE_READWRITE);
@@ -213,225 +213,363 @@ struct Function: public Element
 
 inline Function Sin()
 {
-    static uint8_t code[] = { 0xd9, 0xfe };
+    static uint8_t code[] = {
+        0xd9, 0xfe                                  // fsin
+    };
     return Function("sin", "sin", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Cos()
 {
-    static uint8_t code[] = { 0xd9, 0xff };
+    static uint8_t code[] = {
+        0xd9, 0xff                                  // fcos
+    };
     return Function("cos", "cos", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Tan()
 {
-    static uint8_t code[] = { 0xd9, 0xf2, 0xdd, 0xd8 };
+    static uint8_t code[] = {
+        0xd9, 0xf2,                                 // fptan
+        0xdd, 0xd8                                  // fstp        st(0)
+    };
     return Function("tan", "tan", 1, 1, sizeof(code), code);
 }
 
 
 inline Function Abs()
 {
-    static uint8_t code[] = { 0xd9, 0xe1 };
+    static uint8_t code[] = {
+        0xd9, 0xe1                                  // fabs
+    };
     return Function("abs", "_abs", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Sfc()
 {
-    static uint8_t code[] = { 0xd9, 0xf4, 0xdd, 0xd9 };
+    static uint8_t code[] = {
+        0xd9, 0xf4,                                 // fxtract
+        0xdd, 0xd9                                  // fstp        st(1)
+    };
     return Function("sfc", "_sfc", 1, 1, sizeof(code), code);
 }
 
 
 inline Function Expn()
 {
-    static uint8_t code[] = { 0xd9, 0xf4, 0xdd, 0xd8 };
+    static uint8_t code[] = {
+        0xd9, 0xf4,                                 // fxtract
+        0xdd, 0xd8                                  // fstp        st(0)
+    };
     return Function("expn", "_expn", 1, 1, sizeof(code), code);
 }
 
 
 inline Function Sign()
 {
-    static uint8_t code[]  =  { 0xd9, 0xee, 0xdf, 0xf1, 0xdd, 0xd8, 0xd9, 0xe8, 0xd9,
-        0xe8, 0xd9, 0xe0, 0xda, 0xc1, 0xdd, 0xd9 };
+    static uint8_t code[]  =  {
+        0xd9, 0xee,                                 // fldz
+        0xdf, 0xf1,                                 // fcomip      st, st(1)
+        0xdd, 0xd8,                                 // fstp        st(0)
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xe0,                                 // fchs
+        0xda, 0xc1,                                 // fcmovb      st, st(1)
+        0xdd, 0xd9                                  // fstp        st(1)
+    };
     return Function("sign", "_sign", 1, 1, sizeof(code), code);
 }
 
 
 inline Function Signp()
 {
-    static uint8_t code[]  =  { 0xd9, 0xe8, 0xd9, 0xee, 0xdb, 0xf2, 0xdd, 0xda, 0xdb,
-        0xc1, 0xdd, 0xd9 };
+    static uint8_t code[]  =  {
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xee,                                 // fldz
+        0xdb, 0xf2,                                 // fcomi       st, st(2)
+        0xdd, 0xda,                                 // fstp        st(2)
+        0xdb, 0xc1,                                 // fcmovnb     st, st(1)
+        0xdd, 0xd9                                  // fstp        st(1)
+    };
     return Function("signp", "_signp", 1, 2, sizeof(code), code);
 }
 
 
 inline Function Sqrt()
 {
-    static uint8_t code[] = { 0xd9, 0xfa };
+    static uint8_t code[] = {
+        0xd9, 0xfa                                  // fsqrt
+    };
     return Function("sqrt", "sqrt", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Pow()
 {
-    static uint8_t code[]  =  { 0xd9, 0xc9, 0xd9, 0xe4, 0x9b, 0xdf, 0xe0, 0x9e, 0x74,
-        0x14, 0xd9, 0xe1, 0xd9, 0xf1, 0xd9, 0xe8, 0xd9, 0xc1, 0xd9, 0xf8, 0xd9, 0xf0,
-        0xde, 0xc1, 0xd9, 0xfd, 0x77, 0x02, 0xd9, 0xe0, 0xdd, 0xd9 };
+    static uint8_t code[]  =  {
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xe4,                                 // ftst
+        0x9b,                                       // wait
+        0xdf, 0xe0,                                 // fnstsw      ax
+        0x9e,                                       // sahf
+        0x74, 0x14,                                 // je          00f8002a
+        0xd9, 0xe1,                                 // fabs
+        0xd9, 0xf1,                                 // fyl2x
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xc1,                                 // fld         st(1)
+        0xd9, 0xf8,                                 // fprem
+        0xd9, 0xf0,                                 // f2xm1
+        0xde, 0xc1,                                 // faddp       st(1), st
+        0xd9, 0xfd,                                 // fscale
+        0x77, 0x02,                                 // ja          00f8002a
+        0xd9, 0xe0,                                 // fchs
+        0xdd, 0xd9,                                 // fstp        st(1)
+    };
     return Function("pow", "pow", 2, 1, sizeof(code), code);
 }
 
 
 inline Function Log()
 {
-    static uint8_t code[]  =  { 0xd9, 0xe8, 0xd9, 0xc9, 0xd9, 0xf1, 0xd9, 0xc9, 0xd9,
-        0xe8, 0xd9, 0xc9, 0xd9, 0xf1, 0xde, 0xf9 };
+    static uint8_t code[]  =  {
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xf1,                                 // fyl2x
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xf1,                                 // fyl2x
+        0xde, 0xf9                                  // fdivp       st(1),st
+    };
     return Function("log", "_log", 2, 1, sizeof(code), code);
 }
 
 
 inline Function Log2()
 {
-    static uint8_t code[] = { 0xd9, 0xe8, 0xd9, 0xc9, 0xd9, 0xf1 };
+    static uint8_t code[] = {
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xf1                                  // fyl2x
+    };
     return Function("log2", "_log2", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Ylog2()
 {
-    static uint8_t code[] = { 0xd9, 0xf1 };
+    static uint8_t code[] = {
+        0xd9, 0xf1                                  // fyl2x
+    };
     return Function("ylog2", "_ylog2", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Max()
 {
-    static uint8_t code[] = { 0xdb, 0xf1, 0xda, 0xc1, 0xdd, 0xd9 };
+    static uint8_t code[] = {
+        0xdb, 0xf1,                                 // fcomi       st,st(1)
+        0xda, 0xc1,                                 // fcmovb      st,st(1)
+        0xdd, 0xd9                                  // fstp        st(1)
+    };
     return Function("max", "_max", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Min()
 {
-    static uint8_t code[] = { 0xdb, 0xf1, 0xd9, 0xc9, 0xda, 0xc1, 0xdd, 0xd9 };
+    static uint8_t code[] = {
+        0xdb, 0xf1,                                 // fcomi       st,st(1)
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xda, 0xc1,                                 // fcmovb      st,st(1)
+        0xdd, 0xd9                                  // fstp        st(1)
+    };
     return Function("min", "_min", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Floor()
 {
-    static uint8_t code[]  =  { 0xd9, 0x7c, 0x24, 0xfe, 0x66, 0x8b, 0x44, 0x24, 0xfe,
-        0x66, 0x25, 0xff, 0xf3, 0x66, 0x35, 0x00, 0x04, 0x66, 0x89, 0x44, 0x24, 0xfe,
-        0xd9, 0x6c, 0x24, 0xfe, 0xd9, 0xfc, 0xd9, 0x7c, 0x24, 0xfe, 0x66, 0x8b, 0x44,
-        0x24, 0xfe, 0x66, 0x0d, 0x00, 0x0c, 0x66, 0x89, 0x44, 0x24, 0xfe, 0xd9, 0x6c,
-        0x24, 0xfe };
+    static uint8_t code[] = {
+        0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x06,   // mov         word ptr [esp-4], 67fh 
+        0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]  
+        0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]  
+        0xd9, 0xfc,                                 // frndint  
+        0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]  
+    };
     return Function("floor", "floor", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Ceil()
 {
-    static uint8_t code[]  =  { 0xd9, 0x7c, 0x24, 0xfe, 0x66, 0x8b, 0x44, 0x24, 0xfe,
-        0x66, 0x25, 0xff, 0xf3, 0x66, 0x35, 0x00, 0x08, 0x66, 0x89, 0x44, 0x24, 0xfe,
-        0xd9, 0x6c, 0x24, 0xfe, 0xd9, 0xfc, 0xd9, 0x7c, 0x24, 0xfe, 0x66, 0x8b, 0x44,
-        0x24, 0xfe, 0x66, 0x0d, 0x00, 0x0c, 0x66, 0x89, 0x44, 0x24, 0xfe, 0xd9, 0x6c,
-        0x24, 0xfe };
+    static uint8_t code[] = {
+        0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x0a,   // mov         word ptr [esp-4], a7fh 
+        0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]  
+        0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]  
+        0xd9, 0xfc,                                 // frndint  
+        0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]  
+    };
     return Function("ceil", "ceil", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Round()
 {
-    static uint8_t code[]  =  { 0xd9, 0x7c, 0x24, 0xfe, 0x66, 0x8b, 0x44, 0x24, 0xfe,
-        0x66, 0x25, 0xff, 0xf3, 0x66, 0x89, 0x44, 0x24, 0xfe, 0xd9, 0x6c, 0x24, 0xfe,
-        0xd9, 0xfc, 0xd9, 0x7c, 0x24, 0xfe, 0x66, 0x8b, 0x44, 0x24, 0xfe, 0x66, 0x0d,
-        0x00, 0x0c, 0x66, 0x89, 0x44, 0x24, 0xfe, 0xd9, 0x6c, 0x24, 0xfe };
+    static uint8_t code[] = {
+
+        // NOTE: In this case, saving/restoring the control word is most likely redundant.
+
+        0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x02,   // mov         word ptr [esp-4], 27fh 
+        0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]  
+        0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]  
+        0xd9, 0xfc,                                 // frndint  
+        0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]  
+    };
     return Function("round", "_round", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Int()
 {
-    static uint8_t code[] = { 0xd9, 0xfc };
+    static uint8_t code[] = {
+        0xd9, 0xfc                                  // frndint
+    };
     return Function("int", "int", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Mod()
 {
-    static uint8_t code[] = { 0xd9, 0xc9, 0xd9, 0xf8, 0xdd, 0xd9 };
+    static uint8_t code[] = {
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xf8,                                 // fprem
+        0xdd, 0xd9                                  // fstp        st(1)
+    };
     return Function("mod", "fmod", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Bnd()
 {
-    static uint8_t code[]  =  { 0xd9, 0xc9, 0xd9, 0xf8, 0xd9, 0xc0, 0xdc, 0xc2, 0xd9,
-        0xee, 0xdf, 0xf1, 0xdd, 0xd8, 0xdb, 0xc1, 0xdd, 0xd9 };
+    static uint8_t code[] = {
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xf8,                                 // fprem
+        0xd9, 0xc0,                                 // fld         st(0)
+        0xdc, 0xc2,                                 // fadd        st(2), st
+        0xd9, 0xee,                                 // fldz
+        0xdf, 0xf1,                                 // fcomip      st,st(1)
+        0xdd, 0xd8,                                 // fstp        st(0)
+        0xdb, 0xc1,                                 // fcmovnb     st,st(1)
+        0xdd, 0xd9                                  // fstp        st(1)
+    };
     return Function("bnd", "_bnd", 2, 2, sizeof(code), code);
 }
 
 
 inline Function Add()
 {
-    static uint8_t code[] = { 0xde, 0xc1 };
+    static uint8_t code[] = {
+        0xde, 0xc1                                  // faddp       st(1), st
+    };
     return Function("+", "", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Sub()
 {
-    static uint8_t code[] = { 0xde, 0xe9 };
+    static uint8_t code[] = {
+        0xde, 0xe9                                  // fsubp       st(1), st
+    };
     return Function("-", "", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Neg()
 {
-    static uint8_t code[] = { 0xd9, 0xe0 };
+    static uint8_t code[] = {
+        0xd9, 0xe0                                  // fchs
+    };
     return Function("#", "", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Mul()
 {
-    static uint8_t code[] = { 0xde, 0xc9 };
+    static uint8_t code[] = {
+        0xde, 0xc9                                  // fmulp       st(1), st
+    };
     return Function("*", "", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Div()
 {
-    static uint8_t code[] = { 0xde, 0xf9 };
+    static uint8_t code[] = {
+        0xde, 0xf9                                  // fdivp       st(1), st
+    };
     return Function("/", "", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Gain()
 {
-    static uint8_t code[]  =  { 0xd9, 0xe8, 0xdc, 0xf1, 0xdc, 0xe9, 0xdc, 0xe9, 0xd8,
-        0xe2, 0xd8, 0xe2, 0xde, 0xc9,
+    //                            x                         
+    //                 ------------------------  if x < 0.5
+    //                 (1 / a - 2) (1 - 2x) + 1             
+    // gain(x, a) =                                               for x, a in [0, 1]
+    //                 (1 / a - 2) (1 - 2x) - x
+    //                 ------------------------  if x >= 0.5
+    //                 (1 / a - 2) (1 - 2x) - 1
 
-        0xd9, 0xe8, // fld1          // <= these lines will create a 2.0 in st(0)
-        0xd9, 0xe0, // fchs
-        0xd9, 0xe8, // fld1
-        0xd9, 0xfd, // fscale
-        0xdd, 0xd9, // fstp st(1)
-
-        0xdf, 0xf2,
-        0x0f, 0x82, 0x0b, 0x00, 0x00, 0x00, 0xd9, 0xe8, 0xde, 0xc1, 0xde, 0xf9, 0xe9,
-        0x08, 0x00, 0x00, 0x00, 0xdc, 0xe1, 0xd9, 0xe8, 0xde, 0xe9, 0xde, 0xf9 };
-    return Function("gain2", "_gain2", 2, 1, sizeof(code), code);
+    static uint8_t code[] = {
+        0xd9, 0xe8,                                 // fld1
+        0xdc, 0xf1,                                 // fdivr       st(1), st
+        0xdc, 0xe9,                                 // fsub        st(1), st
+        0xdc, 0xe9,                                 // fsub        st(1), st
+        0xd8, 0xe2,                                 // fsub        st, st(2)
+        0xd8, 0xe2,                                 // fsub        st, st(2)
+        0xde, 0xc9,                                 // fmulp       st(1), st
+        0xd9, 0xe8,                                 // fld1                   }
+        0xd9, 0xe0,                                 // fchs                   }
+        0xd9, 0xe8,                                 // fld1                   } <= these instructions will
+        0xd9, 0xfd,                                 // fscale                 }    create a 2.0 in st(0)
+        0xdd, 0xd9,                                 // fstp        st(1)      }
+        0xdf, 0xf2,                                 // fcomip      st, st(2)
+        0x0f, 0x82, 0x0b, 0x00, 0x00, 0x00,         // jb          00a80037
+        0xd9, 0xe8,                                 // fld1
+        0xde, 0xc1,                                 // faddp       st(1), st
+        0xde, 0xf9,                                 // fdivp       st(1), st
+        0xe9, 0x08, 0x00, 0x00, 0x00,               // jmp         00a8003f
+        0xdc, 0xe1,                                 // fsubr       st(1), st
+        0xd9, 0xe8,                                 // fld1
+        0xde, 0xe9,                                 // fsubp       st(1), st
+        0xde, 0xf9                                  // fdivp       st(1), st
+    };
+    return Function("gain", "_gain", 2, 1, sizeof(code), code);
 }
 
 
 inline Function Bias()
 {
-    static uint8_t code[]  =  { 0xd9, 0xe8, 0xdc, 0xf1, 0xdc, 0xe9, 0xdc, 0xe9, 0xd8,
-        0xe2, 0xde, 0xc9, 0xd9, 0xe8, 0xde, 0xc1, 0xde, 0xf9 };
+    //                         x
+    // bias(x, a) = -----------------------    for x, a in [0, 1]
+    //              (1 / a - 2) (1 - x) + 1
+
+    static uint8_t code[] = {
+        0xd9, 0xe8,                                 // fld1
+        0xdc, 0xf1,                                 // fdivr       st(1), st
+        0xdc, 0xe9,                                 // fsub        st(1), st
+        0xdc, 0xe9,                                 // fsub        st(1), st
+        0xd8, 0xe2,                                 // fsub        st, st(2)
+        0xde, 0xc9,                                 // fmulp       st(1), st
+        0xd9, 0xe8,                                 // fld1
+        0xde, 0xc1,                                 // faddp       st(1), st
+        0xde, 0xf9                                  // fdivp       st(1), st
+    };
     return Function("bias", "_bias", 2, 1, sizeof(code), code);
 }
 
@@ -614,21 +752,21 @@ bool evaluator::assign_expression(std::string e)
     deque<Token> tokens;
 
     m_c_expression = "";
-    
+
     while (m_numerals.back().name == "")
         m_numerals.pop_back();
 
     list<Numeral>::iterator x = m_numerals.begin();
     for (; x != m_numerals.end(); x++)
         x->referenced = false;
-    
+
     if (e.length() == 0){
         neutralize();
         return true;
     }
 
     e += ' ';
-    
+
     //stage 1: checking expression syntax
     Token temp;
     vector< pair<int, int> > bdarray(1);
@@ -848,7 +986,7 @@ bool evaluator::assign_expression(std::string e)
                         tokens.push_back(Token(RBRACKET, i, ')'));
                         bdarray.back().first--;
                     }
-                    else 
+                    else
                     if (fbrackets > 0) {
                         if (bdarray.back().second != 1)
                             throw (mexce_parsing_exception("Expected more arguments", i));
@@ -1039,9 +1177,14 @@ bool evaluator::assign_expression(std::string e)
         // result to memory and then load it to xmm0, which requires a temporary.
         // This code is used at the very end (see below), but its size must be known here.
 
-        0x48, 0xb8, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, // load return address to rax (last 8 bytes) 
-        0xdd, 0x18,                                                 // fstp the return value
-        0xF3, 0x0F, 0x7E, 0x00,                                     // load from the return value to xmm0
+        //  load return address to rax (last 8 bytes - address is uninitialized)
+        0x48, 0xb8, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, // mov         rax, cdcdcdcdcdcdcdcdh
+
+        // store the return value
+        0xdd, 0x18,                                                 // fstp        qword ptr [rax] 
+
+        // load from the return value to xmm0
+        0xF3, 0x0F, 0x7E, 0x00,                                     // movq        xmm0, mmword ptr [rax]
         0x58,                                                       // pop rax
 #endif
         0xc3                                                        // return
@@ -1086,7 +1229,7 @@ bool evaluator::assign_expression(std::string e)
                 case M64INT:  *((uint16_t*)(code_buffer+idx)) = 0x28df; break;
 #else
                 // On 32-bit x86, variable addresses are explicitly specified.
-                case M32FP:   *((uint16_t*)(code_buffer+idx)) = 0x05d9; break; 
+                case M32FP:   *((uint16_t*)(code_buffer+idx)) = 0x05d9; break;
                 case M64FP:   *((uint16_t*)(code_buffer+idx)) = 0x05dd; break;
                 case M16INT:  *((uint16_t*)(code_buffer+idx)) = 0x05df; break;
                 case M32INT:  *((uint16_t*)(code_buffer+idx)) = 0x05db; break;
