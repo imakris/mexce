@@ -27,7 +27,7 @@ eval.bind(z, "x");   // This will return false and will have no effect.
                      // That is because an "x" is already bound.
 eval.bind(z, "z");
 
-eval.assign_expression("0.3f+(-sin(2.33f+x-log((.3*PI+(88/y)/E),3.2+z)))/98");
+eval.assign_expression("0.3+(-sin(2.33+x-log((.3*pi+(88/y)/e),3.2+z)))/98");
 
 for (int i = 0; i < 200; i++, x-=0.1f, y+=0.212, z+=2) {
     wv[i] = eval.evaluate(); // results will be different, depending on x, y, z
