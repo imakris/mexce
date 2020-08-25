@@ -87,8 +87,11 @@ protected:
 
 
 namespace impl {
-     struct Numeral;
+     struct Value;
+     struct Constant;
+     struct Variable;
      struct Function;
+     struct Element;
 }
 
 
@@ -106,8 +109,6 @@ public:
 
     double (* evaluate)();
 
-    std::string get_c_expression() const { return m_c_expression; }
-
 private:
 
 #ifdef MEXCE_64
@@ -116,13 +117,19 @@ private:
 
     size_t                      m_buffer_size;
     std::string                 m_expression;
-    std::string                 m_c_expression;
 
-    std::list<impl::Numeral >   m_numerals;
+    std::list<impl::Constant>   m_literals;             // e.g. '5.88'
+    std::list<impl::Constant>   m_constants;            // e.g. pi (for now it's only pi and e)
+    std::list<impl::Constant>   m_constant_expressions; // e.g. 3^sin(2.13) - not searchable
+    std::list<impl::Variable>   m_variables;
     std::list<impl::Function>   m_functions;
 
-    std::list<impl::Numeral >::iterator find_numeral  (const std::string&);
-    std::list<impl::Function>::iterator find_function (const std::string&);
+    std::list<impl::Constant>::iterator find_literal (const std::string&);
+    std::list<impl::Constant>::iterator find_constant(const std::string&);
+    std::list<impl::Variable>::iterator find_variable(const std::string&);
+    std::list<impl::Function>::iterator find_function(const std::string&);
+
+    void compile_elist(std::list<impl::Element*>::iterator first, std::list<impl::Element*>::iterator last);
 };
 
 
@@ -190,56 +197,82 @@ enum Numeric_data_type
     M64FP,
 };
 
+
 enum Element_type
 {
-    CNUM,
     CCONST,
     CVAR,
     CFUNC
 };
 
+
 enum Token_type
 {
-    NULL_TOKEN,
-    CONSTANT,
-    VARIABLE,
-    FUNCTION,
-    ADDITIVE,
-    MULTIPLICATIVE,
-    RBRACKET,
-    LBRACKET,
+    UNDEFINED_TOKEN_TYPE,
+    NUMERIC_LITERAL,
+    CONSTANT_NAME,
+    VARIABLE_NAME,
+    FUNCTION_NAME,
+    INFIX_3,            // infix operator, with priority 3 ( '+' and '-' )
+    INFIX_2,            // infix operator, with priority 2 ( '*' and '/' )
+    INFIX_1,            // infix operator, with priority 1 ( '^', i.e. power )
+    RIGHT_PARENTHESIS,
+    LEFT_PARENTHESIS,
     COMMA,
-    FRBRACKET,
-    FLBRACKET,
-    MINUSSIGN
+    FUNCTION_RIGHT_PARENTHESIS,
+    FUNCTION_LEFT_PARENTHESIS,
+    UNARY
 };
 
 
 struct Element
 {
-    uint8_t    element_type;
-    Element(uint8_t ct): element_type(ct){}
+    uint8_t element_type;
+    Element(uint8_t ct): element_type(ct) {}
 };
 
 
 struct Function: public Element
 {
-    uint8_t        num_args;
     uint8_t        stack_req;
     size_t         code_size;
     const char*    name;
-    const char*    cname;
+    int            num_args;
     uint8_t *      code;
 
-    Function(const char* name, const char* cname, uint8_t args, uint8_t sreq, int size, uint8_t *code_buffer):
-        Element   ( CFUNC ),
-        num_args  ( args  ),
-        stack_req ( sreq  ),
-        code_size ( size  ),
-        name      ( name  ),
-        cname     ( cname ),
-        code      ( code_buffer  ){}
+    Function(
+        const char* name,
+        uint8_t num_args,
+        uint8_t sreq,
+        int size,
+        uint8_t *code_buffer)
+    :
+        Element   ( CFUNC       ),
+        stack_req ( sreq        ),
+        code_size ( size        ),
+        num_args  ( num_args    ),
+        name      ( name        ),
+        code      ( code_buffer ) {}
 };
+
+
+inline
+Token_type get_infix_rank(char infix_op)
+{
+    switch (infix_op) {
+    case '+':
+    case '-':
+        return INFIX_3;
+    case '*':
+    case '/':
+        return INFIX_2;
+    case '^':
+        return INFIX_1;
+    }
+
+    assert(false);
+    return UNDEFINED_TOKEN_TYPE;
+}
 
 
 inline Function Sin()
@@ -247,7 +280,7 @@ inline Function Sin()
     static uint8_t code[] = {
         0xd9, 0xfe                                  // fsin
     };
-    return Function("sin", "sin", 1, 0, sizeof(code), code);
+    return Function("sin", 1, 0, sizeof(code), code);
 }
 
 
@@ -256,7 +289,7 @@ inline Function Cos()
     static uint8_t code[] = {
         0xd9, 0xff                                  // fcos
     };
-    return Function("cos", "cos", 1, 0, sizeof(code), code);
+    return Function("cos", 1, 0, sizeof(code), code);
 }
 
 
@@ -266,7 +299,7 @@ inline Function Tan()
         0xd9, 0xf2,                                 // fptan
         0xdd, 0xd8                                  // fstp        st(0)
     };
-    return Function("tan", "tan", 1, 1, sizeof(code), code);
+    return Function("tan", 1, 1, sizeof(code), code);
 }
 
 
@@ -275,7 +308,7 @@ inline Function Abs()
     static uint8_t code[] = {
         0xd9, 0xe1                                  // fabs
     };
-    return Function("abs", "_abs", 1, 0, sizeof(code), code);
+    return Function("abs", 1, 0, sizeof(code), code);
 }
 
 
@@ -285,7 +318,7 @@ inline Function Sfc()
         0xd9, 0xf4,                                 // fxtract
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("sfc", "_sfc", 1, 1, sizeof(code), code);
+    return Function("sfc", 1, 1, sizeof(code), code);
 }
 
 
@@ -295,7 +328,7 @@ inline Function Expn()
         0xd9, 0xf4,                                 // fxtract
         0xdd, 0xd8                                  // fstp        st(0)
     };
-    return Function("expn", "_expn", 1, 1, sizeof(code), code);
+    return Function("expn", 1, 1, sizeof(code), code);
 }
 
 
@@ -311,7 +344,7 @@ inline Function Sign()
         0xda, 0xc1,                                 // fcmovb      st, st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("sign", "_sign", 1, 1, sizeof(code), code);
+    return Function("sign", 1, 1, sizeof(code), code);
 }
 
 
@@ -325,7 +358,7 @@ inline Function Signp()
         0xdb, 0xc1,                                 // fcmovnb     st, st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("signp", "_signp", 1, 2, sizeof(code), code);
+    return Function("signp", 1, 2, sizeof(code), code);
 }
 
 
@@ -334,7 +367,7 @@ inline Function Sqrt()
     static uint8_t code[] = {
         0xd9, 0xfa                                  // fsqrt
     };
-    return Function("sqrt", "sqrt", 1, 0, sizeof(code), code);
+    return Function("sqrt", 1, 0, sizeof(code), code);
 }
 
 
@@ -359,7 +392,7 @@ inline Function Pow()
         0xd9, 0xe0,                                 // fchs
         0xdd, 0xd9,                                 // fstp        st(1)
     };
-    return Function("pow", "pow", 2, 1, sizeof(code), code);
+    return Function("^", 2, 1, sizeof(code), code);
 }
 
 
@@ -375,7 +408,7 @@ inline Function Log()
         0xd9, 0xf1,                                 // fyl2x
         0xde, 0xf9                                  // fdivp       st(1),st
     };
-    return Function("log", "_log", 2, 1, sizeof(code), code);
+    return Function("log", 2, 1, sizeof(code), code);
 }
 
 
@@ -386,7 +419,7 @@ inline Function Log2()
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1                                  // fyl2x
     };
-    return Function("log2", "_log2", 1, 0, sizeof(code), code);
+    return Function("log2", 1, 0, sizeof(code), code);
 }
 
 
@@ -395,7 +428,7 @@ inline Function Ylog2()
     static uint8_t code[] = {
         0xd9, 0xf1                                  // fyl2x
     };
-    return Function("ylog2", "_ylog2", 2, 0, sizeof(code), code);
+    return Function("ylog2", 2, 0, sizeof(code), code);
 }
 
 
@@ -406,7 +439,7 @@ inline Function Max()
         0xda, 0xc1,                                 // fcmovb      st,st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("max", "_max", 2, 0, sizeof(code), code);
+    return Function("max", 2, 0, sizeof(code), code);
 }
 
 
@@ -418,7 +451,7 @@ inline Function Min()
         0xda, 0xc1,                                 // fcmovb      st,st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("min", "_min", 2, 0, sizeof(code), code);
+    return Function("min", 2, 0, sizeof(code), code);
 }
 
 
@@ -431,7 +464,7 @@ inline Function Floor()
         0xd9, 0xfc,                                 // frndint
         0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
-    return Function("floor", "floor", 1, 0, sizeof(code), code);
+    return Function("floor", 1, 0, sizeof(code), code);
 }
 
 
@@ -444,7 +477,7 @@ inline Function Ceil()
         0xd9, 0xfc,                                 // frndint
         0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
-    return Function("ceil", "ceil", 1, 0, sizeof(code), code);
+    return Function("ceil", 1, 0, sizeof(code), code);
 }
 
 
@@ -460,7 +493,7 @@ inline Function Round()
         0xd9, 0xfc,                                 // frndint
         0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
-    return Function("round", "_round", 1, 0, sizeof(code), code);
+    return Function("round", 1, 0, sizeof(code), code);
 }
 
 
@@ -469,7 +502,7 @@ inline Function Int()
     static uint8_t code[] = {
         0xd9, 0xfc                                  // frndint
     };
-    return Function("int", "int", 1, 0, sizeof(code), code);
+    return Function("int", 1, 0, sizeof(code), code);
 }
 
 
@@ -480,7 +513,7 @@ inline Function Mod()
         0xd9, 0xf8,                                 // fprem
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("mod", "fmod", 2, 0, sizeof(code), code);
+    return Function("mod", 2, 0, sizeof(code), code);
 }
 
 
@@ -497,7 +530,7 @@ inline Function Bnd()
         0xdb, 0xc1,                                 // fcmovnb     st,st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("bnd", "_bnd", 2, 2, sizeof(code), code);
+    return Function("bnd", 2, 2, sizeof(code), code);
 }
 
 
@@ -506,7 +539,7 @@ inline Function Add()
     static uint8_t code[] = {
         0xde, 0xc1                                  // faddp       st(1), st
     };
-    return Function("+", "", 2, 0, sizeof(code), code);
+    return Function("+", 2, 0, sizeof(code), code);
 }
 
 
@@ -515,7 +548,7 @@ inline Function Sub()
     static uint8_t code[] = {
         0xde, 0xe9                                  // fsubp       st(1), st
     };
-    return Function("-", "", 2, 0, sizeof(code), code);
+    return Function("-", 2, 0, sizeof(code), code);
 }
 
 
@@ -524,7 +557,7 @@ inline Function Neg()
     static uint8_t code[] = {
         0xd9, 0xe0                                  // fchs
     };
-    return Function("#", "", 1, 0, sizeof(code), code);
+    return Function("#", 1, 0, sizeof(code), code);
 }
 
 
@@ -533,7 +566,7 @@ inline Function Mul()
     static uint8_t code[] = {
         0xde, 0xc9                                  // fmulp       st(1), st
     };
-    return Function("*", "", 2, 0, sizeof(code), code);
+    return Function("*", 2, 0, sizeof(code), code);
 }
 
 
@@ -542,7 +575,7 @@ inline Function Div()
     static uint8_t code[] = {
         0xde, 0xf9                                  // fdivp       st(1), st
     };
-    return Function("/", "", 2, 0, sizeof(code), code);
+    return Function("/", 2, 0, sizeof(code), code);
 }
 
 
@@ -566,8 +599,8 @@ inline Function Gain()
         0xde, 0xc9,                                 // fmulp       st(1), st
         0xd9, 0xe8,                                 // fld1                   }
         0xd9, 0xe0,                                 // fchs                   }
-        0xd9, 0xe8,                                 // fld1                   } <= these instructions will
-        0xd9, 0xfd,                                 // fscale                 }    create a 2.0 in st(0)
+        0xd9, 0xe8,                                 // fld1                   } <= create a 2.0 in st(0)
+        0xd9, 0xfd,                                 // fscale                 }
         0xdd, 0xd9,                                 // fstp        st(1)      }
         0xdf, 0xf2,                                 // fcomip      st, st(2)
         0x0f, 0x82, 0x0b, 0x00, 0x00, 0x00,         // jb          00a80037
@@ -580,7 +613,7 @@ inline Function Gain()
         0xde, 0xe9,                                 // fsubp       st(1), st
         0xde, 0xf9                                  // fdivp       st(1), st
     };
-    return Function("gain", "_gain", 2, 1, sizeof(code), code);
+    return Function("gain", 2, 1, sizeof(code), code);
 }
 
 
@@ -601,7 +634,7 @@ inline Function Bias()
         0xde, 0xc1,                                 // faddp       st(1), st
         0xde, 0xf9                                  // fdivp       st(1), st
     };
-    return Function("bias", "_bias", 2, 1, sizeof(code), code);
+    return Function("bias", 2, 1, sizeof(code), code);
 }
 
 
@@ -617,47 +650,51 @@ inline ::std::list<Function>& functions()
 }
 
 
-struct Numeral: public Element
+struct Value: public Element
 {
-    void*          address;
+    volatile void* address;
     uint8_t        numeric_data_type;
-    bool           referenced;
-    double         referenced_variable;
     std::string    name;
 
-    Numeral(void *address, uint8_t numeric_data_type, uint8_t element_type, std::string name, double constant_value = 0.0):
+    Value(volatile void *address, uint8_t numeric_data_type, uint8_t element_type, std::string name):
         Element               ( element_type      ),
         address               ( address           ),
         numeric_data_type     ( numeric_data_type ),
-        referenced            ( false             ),
-        referenced_variable   ( constant_value    ),
         name                  ( name              ) {}
-
-    Numeral(const Numeral &rhs):
-        Element               ( rhs.element_type          ),
-        address               ( rhs.address               ),
-        numeric_data_type     ( rhs.numeric_data_type     ),
-        referenced            ( rhs.referenced            ),
-        referenced_variable   ( rhs.referenced_variable   ),
-        name                  ( rhs.name                  )
-    {
-        if (element_type == CCONST)
-            address = &referenced_variable;
-    }
 };
 
 
-struct Constant: public Numeral
+struct Constant: public Value
 {
     Constant(std::string num, std::string name = ""):
-        Numeral(&referenced_variable, M64FP, CCONST, name, atof(num.data())){}
+        Value( (volatile void *) &internal_constant, M64FP, CCONST, name),
+        internal_constant(atof(num.data()))
+    {}
+
+    Constant(double num):
+        Value( (volatile void *) &internal_constant, M64FP, CCONST, ""),
+        internal_constant(num)
+    {}
+
+    Constant(const Constant& rhs):
+        Value(rhs),
+        internal_constant(rhs.internal_constant)
+    {
+        address = (void*)&internal_constant;
+    }
+
+private:
+    const double        internal_constant;
 };
 
 
-struct Variable: public Numeral
+struct Variable: public Value
 {
-    Variable(void * addr, std::string name, int numFormat):
-        Numeral(addr, numFormat, CVAR, name){}
+    bool referenced;
+
+    Variable(volatile void * addr, std::string name, int numFormat):
+        Value(addr, numFormat, CVAR, name), referenced(false)
+    {}
 };
 
 
@@ -691,8 +728,8 @@ inline
 evaluator::evaluator():
     m_buffer_size(0)
 {
-    m_numerals.push_back(impl::Constant("3.141592653589793238462643383", "PI"));
-    m_numerals.push_back(impl::Constant("2.718281828459045235360287471", "E" ));
+    m_constants.push_back(impl::Constant("3.141592653589793238462643383", "pi"));
+    m_constants.push_back(impl::Constant("2.718281828459045235360287471", "e" ));
     assign_expression("0");
 }
 
@@ -707,10 +744,10 @@ evaluator::~evaluator()
 template <typename T>
 bool evaluator::bind(T& v, const std::string& s)
 {
-    if ((find_numeral(s) == m_numerals.end()) &&
+    if ((find_variable(s) == m_variables.end()) &&
         (find_function(s) == impl::functions().end()))
     {
-        m_numerals.push_back(impl::Variable(&v, s, impl::get_ndt<T>() ));
+        m_variables.push_back( impl::Variable(&v, s, impl::M64FP ) );
         return true;
     }
     return false;
@@ -718,10 +755,32 @@ bool evaluator::bind(T& v, const std::string& s)
 
 
 inline
-std::list<impl::Numeral>::iterator evaluator::find_numeral(const std::string& s)
+std::list<impl::Constant>::iterator evaluator::find_literal(const std::string& s)
 {
-    std::list<impl::Numeral>::iterator i = m_numerals.begin();
-    for (; i != m_numerals.end(); i++)
+    std::list<impl::Constant>::iterator i = m_literals.begin();
+    for (; i != m_literals.end(); i++)
+        if (i->name == s)
+            return i;
+    return i;
+}
+
+
+inline
+std::list<impl::Constant>::iterator evaluator::find_constant(const std::string& s)
+{
+    std::list<impl::Constant>::iterator i = m_constants.begin();
+    for (; i != m_constants.end(); i++)
+        if (i->name == s)
+            return i;
+    return i;
+}
+
+
+inline
+std::list<impl::Variable>::iterator evaluator::find_variable(const std::string& s)
+{
+    std::list<impl::Variable>::iterator i = m_variables.begin();
+    for (; i != m_variables.end(); i++)
         if (i->name == s)
             return i;
     return i;
@@ -745,42 +804,40 @@ bool evaluator::unbind(const std::string& s)
     if (s.length() == 0)
          return false;
 
-    std::list<impl::Numeral>::iterator pos = find_numeral(s);
-    if (pos != m_numerals.end()) {
+    std::list<impl::Variable>::iterator pos = find_variable(s);
+    if (pos != m_variables.end()) {
         if (pos->element_type != impl::CVAR)
             return false;
         if (pos->referenced) {
             assign_expression("0");
         }
-        m_numerals.erase(pos);
+        m_variables.erase(pos);
         return true;
     }
     return false;
 }
 
 
+inline bool is_operator(  char c) { return c=='+' || c=='-' || c=='*' || c=='/' || c=='^'; }
+inline bool is_alphabetic(char c) { return c>='A' && c<='Z' || c>='a' && c<='z' || c=='_'; }
+inline bool is_numeric(   char c) { return c>='0' && c<='9'; }
+
+
 inline
 bool evaluator::assign_expression(std::string e)
 {
     using namespace impl;
-
-    using std::deque;
     using std::list;
     using std::string;
-    using std::vector;
-    using std::pair;
+    using mpe = mexce_parsing_exception;
 
-    static char numbers[] = "0123456789", operators[] = "+-*/",
-    letters[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    deque<Token> tokens;
+    std::deque<Token> tokens;
 
-    m_c_expression = "";
+    m_literals.clear();
+    m_constant_expressions.clear();
 
-    while (m_numerals.back().name == "")
-        m_numerals.pop_back();
-
-    list<Numeral>::iterator x = m_numerals.begin();
-    for (; x != m_numerals.end(); x++)
+    list<Variable>::iterator x = m_variables.begin();
+    for (; x != m_variables.end(); x++)
         x->referenced = false;
 
     if (e.length() == 0){
@@ -792,248 +849,242 @@ bool evaluator::assign_expression(std::string e)
 
     //stage 1: checking expression syntax
     Token temp;
-    vector< pair<int, int> > bdarray(1);
-
-    list<Numeral >::iterator i_num;
+    std::vector< std::pair<int, int> > bdarray(1);
     list<Function>::iterator i_fnc;
     int state = 0;
     size_t i = 0;
-    int fbrackets = 0;
+    int function_parentheses = 0;
     for (; i < e.length(); i++) {
         switch(state) {
             case 0: //start of expression
-                if (e[i] == '+')
-                    break;
-                if (e[i] == '-') {
-                    tokens.push_back(Token(MINUSSIGN, i, e[i]));
+                if (e[i] == '-' || e[i] == '+') {
+                    tokens.push_back(Token(UNARY, i, e[i]));
                     state = 4;
                     break;
                 }
                 if (e[i] == ')') {
                     if (bdarray.back().first != 0)
-                        throw (mexce_parsing_exception("Expected an expression", i));
+                        throw (mpe("Expected an expression", i));
                     if (bdarray.back().second != 0)
-                        throw (mexce_parsing_exception("Expected more arguments", i));
-                    tokens.push_back(Token(FRBRACKET, i, ')'));
-                    fbrackets--;
+                        throw (mpe("Expected more arguments", i));
+                    tokens.push_back(Token(FUNCTION_RIGHT_PARENTHESIS, i, ')'));
+                    function_parentheses--;
                     bdarray.pop_back();
                     state = 5;
                     break;
                 }
-            case 4: //just read an operator
+            case 4: //just read an infix operator
                 if (e[i] == ' ')
                     break;
-                if (strchr(numbers, e[i]) != NULL) {
-                    temp = Token(CONSTANT, i, e[i]);
+                if (is_numeric(e[i])) {
+                    temp = Token(NUMERIC_LITERAL, i, e[i]);
                     state = 1;
                     break;
                 }
                 if (e[i] == '.') {
-                    temp = Token(CONSTANT, i, e[i]);
+                    temp = Token(NUMERIC_LITERAL, i, e[i]);
                     state = 2;
                     break;
                 }
-                if (strchr(letters, e[i]) != NULL) {
+                if (is_alphabetic(e[i])) {
                     temp = Token(0, i, e[i]);
                     state = 3;
                     break;
                 }
                 if (e[i] == '(') {
-                    tokens.push_back(Token(LBRACKET, i, '('));
+                    tokens.push_back(Token(LEFT_PARENTHESIS, i, '('));
                     bdarray.back().first++;
                     state = 0;
                     break;
                 }
-                else
-                    throw (mexce_parsing_exception((string("\"")+e[i])+"\" not expected", i));
-            case 1: //currently reading a constant
+                else {
+                    throw (mpe((string("\"")+e[i])+"\" not expected", i));
+                }
+            case 1: //currently reading a numeric literal
                 if (e[i] == '.') {
                     temp.content += e[i];
                     state = 2;
                     break;
                 }
-                goto case1or2;
-            case 2: //currently reading a constant, found dot
-                if (e[i] == 'f') {
-                    temp.type = CONSTANT;
-                    tokens.push_back(temp);
-                    state = 5;
+            case 2: //currently reading a numeric literal, found dot
+                if (is_numeric(e[i])) {
+                    temp.content += e[i];
                     break;
                 }
-            case1or2:
                 if (e[i] == ' ') {
                     tokens.push_back(temp);
                     state = 5;
                     break;
                 }
-                if (strchr(numbers, e[i]) != NULL) {
-                    temp.content += e[i];
-                    break;
-                }
                 if (e[i] == ')') {
                     tokens.push_back(temp);
                     if (bdarray.back().first > 0) {
-                        tokens.push_back(Token(RBRACKET, i, ')'));
+                        tokens.push_back(Token(RIGHT_PARENTHESIS, i, ')'));
                         bdarray.back().first--;
                     }
                     else {
-                        if (fbrackets <= 0)
-                            throw (mexce_parsing_exception("\")\" not expected", i));
+                        if (function_parentheses <= 0)
+                            throw (mpe("\")\" not expected", i));
                         if (bdarray.back().second != 1)
-                            throw (mexce_parsing_exception("Expected more arguments", i));
-                        tokens.push_back(Token(FRBRACKET, i, ')'));
-                        fbrackets--;
+                            throw (mpe("Expected more arguments", i));
+                        tokens.push_back(Token(FUNCTION_RIGHT_PARENTHESIS, i, ')'));
+                        function_parentheses--;
                         bdarray.pop_back();
                     }
                     state = 5;
                     break;
                 }
-                if (strchr(operators, e[i]) != NULL) {
+                if (is_operator(e[i])) {
                     tokens.push_back(temp);
-                    tokens.push_back(Token(((e[i]=='+')||(e[i]=='-'))?
-                        ADDITIVE:MULTIPLICATIVE, i, e[i]));
+                    tokens.push_back(Token( get_infix_rank(e[i]) , i, e[i]));
                     state = 4;
                     break;
                 }
                 if (e[i] == ',') {
                     tokens.push_back(temp);
                     if (bdarray.back().first != 0)
-                        throw (mexce_parsing_exception("Expected a \")\"", i));
+                        throw (mpe("Expected a \")\"", i));
                     if (bdarray.back().second-- < 2)
-                        throw (mexce_parsing_exception("Don\'t expect any arguments here", i));
-                    tokens.push_back(Token(COMMA, i, ','));
-                    state = 0;
-                    break;
-                }
-                else
-                    throw (mexce_parsing_exception((string("\"")+e[i])+"\" not expected", i));
-            case 3: //currently reading alphanumeric
-                if (e[i] == ' ') {
-                    if ((i_num = find_numeral(temp.content)) != m_numerals.end()) {
-                        temp.type = i_num->element_type;
-                        tokens.push_back(temp);
-                        state = 5;
-                    }
-                    else
-                    if ((i_fnc = find_function(temp.content)) != functions().end()) {
-                        temp.type = FUNCTION;
-                        tokens.push_back(temp);
-                        tokens.push_back(Token(FLBRACKET, i, '('));
-                        bdarray.push_back(std::make_pair(0, i_fnc->num_args));
-                        fbrackets++;
-                        state = 6;
-                    }
-                    else
-                        throw (mexce_parsing_exception(string(temp.content)+" is not a "
-                            "recognized variable or function name", i));
-                    break;
-                }
-                if ((strchr(letters, e[i]) != NULL) ||
-                    (strchr(numbers, e[i]) != NULL)) {
-                    temp.content += e[i];
-                    break;
-                }
-                if (e[i] == ')') {
-                    if ((i_num = find_numeral(temp.content)) == m_numerals.end())
-                        throw (mexce_parsing_exception(string(temp.content)+" is not a "
-                            "recognized variable name", i));
-                    temp.type = i_num->element_type;
-                    tokens.push_back(temp);
-                    if (bdarray.back().first > 0) {
-                        tokens.push_back(Token(RBRACKET, i, ')'));
-                        bdarray.back().first--;
-                    }
-                    else
-                    if (fbrackets > 0) {
-                        if (bdarray.back().second != 1)
-                            throw (mexce_parsing_exception("Expected more arguments", i));
-                        tokens.push_back(Token(FRBRACKET, i, ')'));
-                        fbrackets--;
-                        bdarray.pop_back();
-                    }
-                    else
-                        throw (mexce_parsing_exception("\")\" not expected", i));
-                    state = 5;
-                    break;
-                }
-                if (e[i] == '(') {
-                    if ((i_fnc = find_function(temp.content)) == functions().end())
-                        throw (mexce_parsing_exception(string(temp.content)+" is not a "
-                            "recognized function name", i));
-                    temp.type = FUNCTION;
-                    tokens.push_back(temp);
-                    tokens.push_back(Token(FLBRACKET, i, '('));
-                    bdarray.push_back(std::make_pair(0, i_fnc->num_args));
-                    fbrackets++;
-                    state = 0;
-                    break;
-                }
-                if (strchr(operators, e[i]) != NULL) {
-                    if ((i_num = find_numeral(temp.content)) == m_numerals.end())
-                        throw (mexce_parsing_exception(string(temp.content)+" is not a "
-                            "recognized variable name", i));
-                    temp.type = i_num->element_type;
-                    tokens.push_back(temp);
-                    tokens.push_back(Token(((e[i]=='+')||(e[i]=='-'))?
-                        ADDITIVE:MULTIPLICATIVE, i, e[i]));
-                    state = 4;
-                    break;
-                }
-                if (e[i] == ',') {
-                    if ((i_num = find_numeral(temp.content)) == m_numerals.end())
-                        throw (mexce_parsing_exception(string(temp.content)+" is not a "
-                            "recognized variable name", i));
-                    temp.type = i_num->element_type;
-                    tokens.push_back(temp);
-                    if (bdarray.back().first != 0)
-                        throw (mexce_parsing_exception("Expected a \")\"", i));
-                    if (bdarray.back().second-- < 2)
-                        throw (mexce_parsing_exception("Don\'t expect any arguments here", i));
-                    tokens.push_back(Token(COMMA, i, ','));
-                    state = 0;
-                    break;
-                }
-                else
-                    throw (mexce_parsing_exception((string("\"")+e[i])+"\" not expected", i));
-            case 5: //just read an expression (constant/variable/right bracket)
-                if (e[i] == ' ')
-                    break;
-                if (strchr(operators, e[i]) != NULL) {
-                    tokens.push_back(Token(((e[i]=='+')||(e[i]=='-'))?
-                        ADDITIVE:MULTIPLICATIVE, i, e[i]));
-                    state = 4;
-                    break;
-                }
-                if (e[i] == ')') {
-                    if (bdarray.back().first > 0) {
-                        tokens.push_back(Token(RBRACKET, i, ')'));
-                        bdarray.back().first--;
-                    }
-                    else
-                    if (fbrackets > 0) {
-                        if (bdarray.back().second != 1)
-                            throw (mexce_parsing_exception("Expected more arguments", i));
-                        tokens.push_back(Token(FRBRACKET, i, ')'));
-                        fbrackets--;
-                        bdarray.pop_back();
-                    }
-                    else {
-                        throw (mexce_parsing_exception("\")\" not expected", i));
-                    }
-                    state = 5;
-                    break;
-                }
-                if (e[i] == ',') {
-                    if (bdarray.back().first != 0)
-                        throw (mexce_parsing_exception("Expected a \")\"", i));
-                    if (bdarray.back().second-- < 2)
-                        throw (mexce_parsing_exception("Don\'t expect any arguments here", i));
+                        throw (mpe("Don\'t expect any arguments here", i));
                     tokens.push_back(Token(COMMA, i, ','));
                     state = 0;
                     break;
                 }
                 else {
-                    throw (mexce_parsing_exception((string("\"")+e[i])+"\" not expected", i));
+                    throw (mpe((string("\"")+e[i])+"\" not expected", i));
+                }
+            case 3: //currently reading alphanumeric
+                if (is_alphabetic(e[i]) || is_numeric(e[i])) {
+                    temp.content += e[i];
+                    break;
+                }
+                if (e[i] == ' ') {
+                    if (find_variable(temp.content) != m_variables.end()) {
+                        temp.type = VARIABLE_NAME;
+                        tokens.push_back(temp);
+                        state = 5;
+                    }
+                    else
+                    if (find_constant(temp.content) != m_constants.end()) {
+                        temp.type = CONSTANT_NAME;
+                        tokens.push_back(temp);
+                        state = 5;
+                    }
+                    else
+                    if ((i_fnc = find_function(temp.content)) != functions().end()) {
+                        temp.type = FUNCTION_NAME;
+                        tokens.push_back(temp);
+                        tokens.push_back(Token(FUNCTION_LEFT_PARENTHESIS, i, '('));
+                        bdarray.push_back(std::make_pair(0, i_fnc->num_args));
+                        function_parentheses++;
+                        state = 6;
+                    }
+                    else {
+                        throw (mpe(string(temp.content) +
+                            " is not a known constant, variable or function name", i));
+                    }
+                    break;
+                }
+                if (e[i] == ')') {
+                    temp.type = find_variable(temp.content) != m_variables.end() ? VARIABLE_NAME : 
+                                find_constant(temp.content) != m_constants.end() ? CONSTANT_NAME :
+                        throw (mpe(string(temp.content) +
+                            " is not a known constant or variable name", i));
+                    tokens.push_back(temp);
+                    if (bdarray.back().first > 0) {
+                        tokens.push_back(Token(RIGHT_PARENTHESIS, i, ')'));
+                        bdarray.back().first--;
+                    }
+                    else
+                    if (function_parentheses > 0) {
+                        if (bdarray.back().second != 1)
+                            throw (mpe("Expected more arguments", i));
+                        tokens.push_back(Token(FUNCTION_RIGHT_PARENTHESIS, i, ')'));
+                        function_parentheses--;
+                        bdarray.pop_back();
+                    }
+                    else
+                        throw (mpe("\")\" not expected", i));
+                    state = 5;
+                    break;
+                }
+                if (e[i] == '(') {
+                    if ((i_fnc = find_function(temp.content)) == functions().end()) {
+                        throw (mpe(string(temp.content) + " is not a known function name", i));
+                    }
+                    temp.type = FUNCTION_NAME;
+                    tokens.push_back(temp);
+                    tokens.push_back(Token(FUNCTION_LEFT_PARENTHESIS, i, '('));
+                    bdarray.push_back(std::make_pair(0, i_fnc->num_args));
+                    function_parentheses++;
+                    state = 0;
+                    break;
+                }
+                if (is_operator(e[i])) {
+                    temp.type = find_variable(temp.content) != m_variables.end() ? VARIABLE_NAME : 
+                                find_constant(temp.content) != m_constants.end() ? CONSTANT_NAME :
+                        throw (mpe(string(temp.content) +
+                            " is not a known constant or variable name", i));
+                    tokens.push_back(temp);
+                    tokens.push_back(Token(get_infix_rank(e[i]), i, e[i]));
+                    state = 4;
+                    break;
+                }
+                if (e[i] == ',') {
+                    temp.type = find_variable(temp.content) != m_variables.end() ? VARIABLE_NAME : 
+                                find_constant(temp.content) != m_constants.end() ? CONSTANT_NAME :
+                        throw (mpe(string(temp.content)+" is not a "
+                            "known constant or variable name", i));tokens.push_back(temp);
+                    tokens.push_back(temp);
+                    if (bdarray.back().first != 0)
+                        throw (mpe("Expected a \")\"", i));
+                    if (bdarray.back().second-- < 2)
+                        throw (mpe("Don\'t expect any arguments here", i));
+                    tokens.push_back(Token(COMMA, i, ','));
+                    state = 0;
+                    break;
+                }
+                else {
+                    throw (mpe((string("\"")+e[i])+"\" not expected", i));
+                }
+            case 5: //just read an expression (constant/variable/right parenthesis)
+                if (e[i] == ' ')
+                    break;
+                if (is_operator(e[i])) {
+                    tokens.push_back(Token(get_infix_rank(e[i]), i, e[i]));
+                    state = 4;
+                    break;
+                }
+                if (e[i] == ')') {
+                    if (bdarray.back().first > 0) {
+                        tokens.push_back(Token(RIGHT_PARENTHESIS, i, ')'));
+                        bdarray.back().first--;
+                    }
+                    else
+                    if (function_parentheses > 0) {
+                        if (bdarray.back().second != 1)
+                            throw (mpe("Expected more arguments", i));
+                        tokens.push_back(Token(FUNCTION_RIGHT_PARENTHESIS, i, ')'));
+                        function_parentheses--;
+                        bdarray.pop_back();
+                    }
+                    else {
+                        throw (mpe("\")\" not expected", i));
+                    }
+                    state = 5;
+                    break;
+                }
+                if (e[i] == ',') {
+                    if (bdarray.back().first != 0)
+                        throw (mpe("Expected a \")\"", i));
+                    if (bdarray.back().second-- < 2)
+                        throw (mpe("Don\'t expect any arguments here", i));
+                    tokens.push_back(Token(COMMA, i, ','));
+                    state = 0;
+                    break;
+                }
+                else {
+                    throw (mpe((string("\"")+e[i])+"\" not expected", i));
                 }
             case 6: //just read a function name
                 if (e[i] == '(') {
@@ -1041,34 +1092,36 @@ bool evaluator::assign_expression(std::string e)
                     break;
                 }
                 else {
-                    throw (mexce_parsing_exception("Expected a \"(\"", i));
+                    throw (mpe("Expected a \"(\"", i));
                 }
         }
     }
-    if ((bdarray.back().first > 0) || (fbrackets > 0)) {
-        throw (mexce_parsing_exception("Expected a \")\"", --i));
+    if ((bdarray.back().first > 0) || (function_parentheses > 0)) {
+        throw (mpe("Expected a \")\"", --i));
     }
     if (state != 5) {
-        throw (mexce_parsing_exception("Unexpected end of expression", --i));
+        throw (mpe("Unexpected end of expression", --i));
     }
 
     //stage 2: transform expression to postfix
-    deque<Token> postfix;
-    vector<Token> tstack;
+    std::deque<Token> postfix;
+    std::vector<Token> tstack;
     while (!tokens.empty()) {
         temp = tokens.front();
         tokens.pop_front();
         switch (temp.type) {
-            case CONSTANT:
-            case VARIABLE:
+            case NUMERIC_LITERAL:
+            case CONSTANT_NAME:
+            case VARIABLE_NAME:
                 postfix.push_back(temp);
-                m_c_expression += temp.content;
                 break;
-            case ADDITIVE:
+            case INFIX_3:
                 while(!tstack.empty()) {
-                    if ((tstack.back().type == ADDITIVE        ) ||
-                         (tstack.back().type == MINUSSIGN      ) ||
-                         (tstack.back().type == MULTIPLICATIVE)) {
+                    if (tstack.back().type == INFIX_3   ||
+                        tstack.back().type == INFIX_2   ||
+                        tstack.back().type == INFIX_1   ||
+                        tstack.back().type == UNARY)
+                    {
                         postfix.push_back(tstack.back());
                         tstack.pop_back();
                     }
@@ -1076,14 +1129,13 @@ bool evaluator::assign_expression(std::string e)
                         break;
                     }
                 }
-            case LBRACKET:
-            case MINUSSIGN:
+            case LEFT_PARENTHESIS:
+            case UNARY:
                 tstack.push_back(temp);
-                m_c_expression += temp.content;
                 break;
-            case MULTIPLICATIVE:
+            case INFIX_2:
                 while(!tstack.empty()) {
-                    if (tstack.back().type == MULTIPLICATIVE) {
+                    if (tstack.back().type == INFIX_2 || tstack.back().type == INFIX_1) {
                         postfix.push_back(tstack.back());
                         tstack.pop_back();
                     }
@@ -1092,38 +1144,44 @@ bool evaluator::assign_expression(std::string e)
                     }
                 }
                 tstack.push_back(temp);
-                m_c_expression += temp.content;
                 break;
-            case FUNCTION:
+            case INFIX_1:
+                while(!tstack.empty()) {
+                    if (tstack.back().type == INFIX_1) {
+                        postfix.push_back(tstack.back());
+                        tstack.pop_back();
+                    }
+                    else {
+                        break;
+                    }
+                }
                 tstack.push_back(temp);
-                m_c_expression += find_function(temp.content)->cname;
                 break;
-            case RBRACKET:
-                while(tstack.back().type != LBRACKET) {
+            case FUNCTION_NAME:
+                tstack.push_back(temp);
+                break;
+            case RIGHT_PARENTHESIS:
+                while(tstack.back().type != LEFT_PARENTHESIS) {
                     postfix.push_back(tstack.back());
                     tstack.pop_back();
                 }
                 postfix.push_back(tstack.back());
                 tstack.pop_back();
-                m_c_expression += temp.content;
                 break;
-            case FRBRACKET:
+            case FUNCTION_RIGHT_PARENTHESIS:
                 do {
                     postfix.push_back(tstack.back());
                     tstack.pop_back();
                 }
-                while(postfix.back().type != FUNCTION);
-                m_c_expression += temp.content;
+                while(postfix.back().type != FUNCTION_NAME);
                 break;
             case COMMA:
-                while(tstack.back().type != FUNCTION) {
+                while(tstack.back().type != FUNCTION_NAME) {
                     postfix.push_back(tstack.back());
                     tstack.pop_back();
                 }
-                m_c_expression += temp.content;
                 break;
-            case FLBRACKET:
-                m_c_expression += temp.content;
+            case FUNCTION_LEFT_PARENTHESIS:
                 break;
             default:
                 throw(mexce_parsing_exception("Something went terribly wrong...", 0));
@@ -1140,45 +1198,84 @@ bool evaluator::assign_expression(std::string e)
         temp = postfix.front();
         postfix.pop_front();
         switch (temp.type) {
-            case ADDITIVE:
-                elist.push_back(&(*find_function( temp.content == "+" ? "+" : "-" )));
+            case INFIX_3:
+            case INFIX_2:
+            case INFIX_1:
+                elist.push_back(&(*find_function( temp.content )));
                 break;
-            case MULTIPLICATIVE:
-                elist.push_back(&(*find_function( temp.content == "*" ? "*" : "/" )));
+            case UNARY:
+                if (temp.content == "-") { // unary '+' is ignored
+                    elist.push_back(&(*find_function("#")));
+                }
                 break;
-            case MINUSSIGN:
-                elist.push_back(&(*find_function("#")));
-                break;
-            case FUNCTION:
+            case FUNCTION_NAME:
                 elist.push_back(&(*find_function(temp.content)));
                 break;
-            case CONSTANT: {
-                list<Numeral>::iterator x;
-                if ((x = find_numeral(temp.content)) != m_numerals.end()) {
-                    x->referenced = true;
+            case NUMERIC_LITERAL: {
+                list<Constant>::iterator x;
+                if ((x = find_literal(temp.content)) != m_literals.end()) {
                     elist.push_back(&(*x));
                 }
                 else {
-                    m_numerals.push_back(Constant(temp.content));
-                    elist.push_back(&(m_numerals.back()));
+                    m_literals.push_back(Constant(temp.content, temp.content));
+                    elist.push_back(&(m_literals.back()));
                 }
                 break;
             }
-            case VARIABLE: {
-                list<Numeral>::iterator x = find_numeral(temp.content);
-                assert(x != m_numerals.end());
+            case CONSTANT_NAME: {
+                elist.push_back(&(* find_constant(temp.content) ));
+                break;
+            }
+            case VARIABLE_NAME: {
+                list<Variable>::iterator x = find_variable(temp.content);
+                assert(x != m_variables.end());
                 x->referenced = true;
-                elist.push_back(&(*find_numeral(temp.content)));
+                elist.push_back(&(*x));
                 break;
             }
         }
     }
 
+    // stage 4: precompute constant expressions
+    for (list<Element *>::iterator y = elist.begin(); y != elist.end(); y++) {
+        if ((*y)->element_type == CFUNC) {
+            // check if its dependents are const
+            list<Element *>::iterator yt = y;
+            Function* fp = (Function*)(*y);
+            int dc = fp->num_args;
+            while (true) {
+                if (!(dc--)) {
+                    // the loop reached the end, it is a constant function
+                    list<Element *>::iterator ynext = std::next(y);
+                    compile_elist(yt, ynext);
+                    elist.erase(yt, ynext);
+                    m_constant_expressions.push_back( Constant(evaluate()) );
+                    y = elist.insert(ynext, &m_constant_expressions.back() );
+                    break;
+                }
+                yt--;
+                if ((*yt)->element_type != CCONST) { // either CVAR, or non-const CFUNC
+                    break;
+                }
+            }
+        }
+    }
 
-    //stage 4: calculate code size
-    list<Element *>::iterator y = elist.begin();
+    compile_elist(elist.begin(), elist.end());
+    return true;
+}
+
+
+
+inline
+void evaluator::compile_elist(std::list<impl::Element*>::iterator first, std::list<impl::Element*>::iterator last)
+{
+    using namespace impl;
+
+    // step 1: calculate code size
+    std::list<impl::Element*>::iterator y = first;
     size_t code_buffer_size = 0;
-    for (; y != elist.end(); y++) {
+    for (; y != last; y++) {
         if (((*y)->element_type == CVAR) ||
             ((*y)->element_type == CCONST))
 #ifdef MEXCE_64
@@ -1221,8 +1318,8 @@ bool evaluator::assign_expression(std::string e)
 
     auto code_buffer = get_executable_buffer(code_buffer_size);
 
-    //stage 5: generate executable code
-    y = elist.begin();
+    //step 2: generate executable code
+    y = first;
     size_t idx = 0;
 
 #ifdef MEXCE_64
@@ -1231,10 +1328,10 @@ bool evaluator::assign_expression(std::string e)
     idx++;
 #endif
 
-    for (; y != elist.end(); y++) {
+    for (; y != last; y++) {
         if (((*y)->element_type == CVAR) ||
              ((*y)->element_type == CCONST)){
-            Numeral * tn = (Numeral *) *y;
+            Value * tn = (Value *) *y;
 
 #ifdef MEXCE_64
             *((uint16_t*)(code_buffer+idx)) = 0xb848;   // move input address to rax (only the opcode)
@@ -1282,10 +1379,7 @@ bool evaluator::assign_expression(std::string e)
 #endif
 
     idx +=sizeof(return_sequence);
-
     evaluate = lock_executable_buffer(code_buffer, code_buffer_size);
-
-    return true;
 }
 
 }
