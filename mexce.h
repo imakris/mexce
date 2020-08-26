@@ -396,19 +396,54 @@ inline Function Pow()
 }
 
 
-inline Function Log()
+//inline Function Log()  // old implementation, with base
+//{
+//    static uint8_t code[]  =  {
+//        0xd9, 0xe8,                                 // fld1
+//        0xd9, 0xc9,                                 // fxch        st(1)
+//        0xd9, 0xf1,                                 // fyl2x
+//        0xd9, 0xc9,                                 // fxch        st(1)
+//        0xd9, 0xe8,                                 // fld1
+//        0xd9, 0xc9,                                 // fxch        st(1)
+//        0xd9, 0xf1,                                 // fyl2x
+//        0xde, 0xf9                                  // fdivp       st(1),st
+//    };
+//    return Function("log", 2, 1, sizeof(code), code);
+//}
+
+
+inline Function Ln()
 {
     static uint8_t code[]  =  {
         0xd9, 0xe8,                                 // fld1
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1,                                 // fyl2x
-        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xea,                                 // fldl2e
+        0xde, 0xf9                                  // fdivp       st(1),st
+    };
+    return Function("ln", 1, 1, sizeof(code), code);
+}
+
+
+// this is an alias, because of C's math.h
+inline Function Log()
+{
+    Function f = Ln();
+    f.name="log";
+    return f;
+}
+
+
+inline Function Log10()
+{
+    static uint8_t code[]  =  {
         0xd9, 0xe8,                                 // fld1
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1,                                 // fyl2x
+        0xd9, 0xe9,                                 // fldl2t
         0xde, 0xf9                                  // fdivp       st(1),st
     };
-    return Function("log", 2, 1, sizeof(code), code);
+    return Function("log10", 1, 1, sizeof(code), code);
 }
 
 
@@ -642,7 +677,7 @@ inline ::std::list<Function>& functions()
 {
     static Function f[] = {
         Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(),
-        Log(), Log2(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
+        Log(), Log2(), Ln(), Log10(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
         Bnd(), Add(), Sub(), Neg(), Mul(), Div(), Bias(), Gain()
     };
     static ::std::list<Function> ret(f, f + sizeof(f) / sizeof(*f));
@@ -889,6 +924,11 @@ bool evaluator::assign_expression(std::string e)
                 if (is_alphabetic(e[i])) {
                     temp = Token(0, i, e[i]);
                     state = 3;
+                    break;
+                }
+                if (e[i] == '-' || e[i] == '+') {
+                    tokens.push_back(Token(UNARY, i, e[i]));
+                    state = 4;
                     break;
                 }
                 if (e[i] == '(') {
