@@ -374,25 +374,83 @@ inline Function Sqrt()
 inline Function Pow()
 {
     static uint8_t code[]  =  {
-        0xd9, 0xc9,                                 // fxch        st(1)
-        0xd9, 0xe4,                                 // ftst
-        0x9b,                                       // wait
-        0xdf, 0xe0,                                 // fnstsw      ax
-        0x9e,                                       // sahf
-        0x74, 0x14,                                 // je          00f8002a
-        0xd9, 0xe1,                                 // fabs
-        0xd9, 0xf1,                                 // fyl2x
-        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xc0,                                 // fld         st(0)                    }
+        0xd9, 0xfc,                                 // frndint                              }
+        0xd8, 0xd1,                                 // fcom        st(1)                    } if (abs(exponent) != round(abs(exponent)))
+        0xdf, 0xe0,                                 // fnstsw      ax                       }    goto generic_pow;
+        0x9e,                                       // sahf                                 }
+        0x75, 0x3c,                                 // jne         pop_before_generic_pow   }
+
+        0xd9, 0xe1,                                 // fabs                                 }
+        0x66, 0xc7, 0x44, 0x24, 0xfe, 0xff, 0xff,   // mov         word ptr [esp-2],0ffffh  }
+        0xdf, 0x5c, 0x24, 0xfe,                     // fistp       word ptr [esp-2]         }
+        0x66, 0x8b, 0x44, 0x24, 0xfe,               // mov         ax, word ptr [esp-2]     } if (abs(exponent) > 32)
+        0x66, 0x83, 0xe8, 0x01,                     // sub         ax, 1                    }    goto generic_pow;
+        0x66, 0x83, 0xf8, 0x21,                     // cmp         ax, 1fh                  } 
+        0x77, 0x22,                                 // ja          generic_pow              }
+
         0xd9, 0xc1,                                 // fld         st(1)
-        0xd9, 0xf8,                                 // fprem
-        0xd9, 0xf0,                                 // f2xm1
-        0xde, 0xc1,                                 // faddp       st(1), st
-        0xd9, 0xfd,                                 // fscale
-        0x77, 0x02,                                 // ja          00f8002a
+// loop_start:
+        0x66, 0x85, 0xc0,                           // test        ax, ax  
+        0x74, 0x08,                                 // je          loop_end
+        0xdc, 0xca,                                 // fmul        st(2), st  
+        0x66, 0x83, 0xe8, 0x01,                     // sub         ax, 1
+        0xeb, 0xf3,                                 // jmp         loop_start
+
+// loop_end:
+
+        0xdd, 0xd8,                                 // fstp        st(0)                    }
+        0xd9, 0xe4,                                 // ftst                                 }
+        0xdf, 0xe0,                                 // fnstsw      ax                       } if the exponent was NOT negative
+        0x9e,                                       // sahf                                 }     goto exit_point
+        0xdd, 0xd8,                                 // fstp        st(0)                    }
+        0x77, 0x28,                                 // ja          exit_point               }
+
+        0xd9, 0xe8,                                 // fld1                                 }
+        0xde, 0xf1,                                 // fdivrp      st(1),st                 } inverse
+        0xeb, 0x22,                                 // jmp         exit_point               }
+
+// pop_before_generic_pow:
+        0xdd, 0xd8,                                 // fstp        st(0)
+// generic_pow:
+        0xd9, 0xc9,                                 // fxch                                 }
+        0xd9, 0xe4,                                 // ftst                                 }
+        0x9b,                                       // wait                                 } if base is 0, leave it in st(0)
+        0xdf, 0xe0,                                 // fnstsw      ax                       } and exit
+        0x9e,                                       // sahf                                 }
+        0x74, 0x14,                                 // je          store_and_exit           }
+        0xd9, 0xe1,                                 // fabs
+        0xd9, 0xf1,                                 // fyl2x                                }
+        0xd9, 0xe8,                                 // fld1                                 }
+        0xd9, 0xc1,                                 // fld         st(1)                    }
+        0xd9, 0xf8,                                 // fprem                                } b^n = 2^(n*log2(b))
+        0xd9, 0xf0,                                 // f2xm1                                }
+        0xde, 0xc1,                                 // faddp       st(1), st                }
+        0xd9, 0xfd,                                 // fscale                               }
+        0x77, 0x02,                                 // ja          store_and_exit
         0xd9, 0xe0,                                 // fchs
+// store_and_exit:
         0xdd, 0xd9,                                 // fstp        st(1)
+// exit_point:
     };
     return Function("^", 2, 1, sizeof(code), code);
+}
+
+
+inline Function Exp()
+{
+    static uint8_t code[]  =  {
+        0xd9, 0xea,                                 // fldl2e  
+        0xde, 0xc9,                                 // fmulp       st(1), st  
+        0xd9, 0xe8,                                 // fld1  
+        0xd9, 0xc1,                                 // fld         st(1)  
+        0xd9, 0xf8,                                 // fprem  
+        0xd9, 0xf0,                                 // f2xm1  
+        0xde, 0xc1,                                 // faddp       st(1), st  
+        0xd9, 0xfd,                                 // fscale  
+        0xdd, 0xd9,                                 // fstp        st(1)
+    };
+    return Function("exp", 1, 1, sizeof(code), code);
 }
 
 
@@ -676,7 +734,7 @@ inline Function Bias()
 inline ::std::list<Function>& functions()
 {
     static Function f[] = {
-        Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(),
+        Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(),
         Log(), Log2(), Ln(), Log10(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
         Bnd(), Add(), Sub(), Neg(), Mul(), Div(), Bias(), Gain()
     };
@@ -1074,7 +1132,7 @@ bool evaluator::assign_expression(std::string e)
                     temp.type = find_variable(temp.content) != m_variables.end() ? VARIABLE_NAME : 
                                 find_constant(temp.content) != m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content)+" is not a "
-                            "known constant or variable name", i));tokens.push_back(temp);
+                            "known constant or variable name", i));
                     tokens.push_back(temp);
                     if (bdarray.back().first != 0)
                         throw (mpe("Expected a \")\"", i));
@@ -1175,7 +1233,8 @@ bool evaluator::assign_expression(std::string e)
                 break;
             case INFIX_2:
                 while(!tstack.empty()) {
-                    if (tstack.back().type == INFIX_2 || tstack.back().type == INFIX_1) {
+                    if (tstack.back().type == INFIX_2 ||
+                        tstack.back().type == INFIX_1) {
                         postfix.push_back(tstack.back());
                         tstack.pop_back();
                     }
@@ -1186,15 +1245,17 @@ bool evaluator::assign_expression(std::string e)
                 tstack.push_back(temp);
                 break;
             case INFIX_1:
-                while(!tstack.empty()) {
-                    if (tstack.back().type == INFIX_1) {
-                        postfix.push_back(tstack.back());
-                        tstack.pop_back();
-                    }
-                    else {
-                        break;
-                    }
-                }
+                //// the only INFIX_1 is ^, which should be evaluated
+                //// right to left, thus we leave the op in the stack
+                //while(!tstack.empty()) {
+                //    if (tstack.back().type == INFIX_1) {
+                //        postfix.push_back(tstack.back());
+                //        tstack.pop_back();
+                //    }
+                //    else {
+                //        break;
+                //    }
+                //}
                 tstack.push_back(temp);
                 break;
             case FUNCTION_NAME:
@@ -1224,7 +1285,7 @@ bool evaluator::assign_expression(std::string e)
             case FUNCTION_LEFT_PARENTHESIS:
                 break;
             default:
-                throw(mexce_parsing_exception("Something went terribly wrong...", 0));
+                throw(mpe("internal error", 0));
         }
     }
     while(!tstack.empty()) {
@@ -1368,9 +1429,19 @@ void evaluator::compile_elist(std::list<impl::Element*>::iterator first, std::li
     idx++;
 #endif
 
+    size_t fpu_stack_size = 0;
+
     for (; y != last; y++) {
-        if (((*y)->element_type == CVAR) ||
-             ((*y)->element_type == CCONST)){
+        if ((*y)->element_type == CVAR  ||
+            (*y)->element_type == CCONST)
+        {
+            if (++fpu_stack_size > 8) {
+                // The caller is expected to supply this function with element lists
+                // that have been adjusted accordingly, to mitigate this problem.
+                // Therefore, this should be unreachable code.
+                throw mexce_parsing_exception("FPU stack limit exceeded (internal error)", 0);
+            }
+
             Value * tn = (Value *) *y;
 
 #ifdef MEXCE_64
@@ -1405,6 +1476,9 @@ void evaluator::compile_elist(std::list<impl::Element*>::iterator first, std::li
         }
         else {
             Function * tf = (Function *)*y;
+
+            fpu_stack_size -= tf->num_args-1;
+
             memcpy(code_buffer+idx, tf->code, tf->code_size);
             idx += tf->code_size;
         }
