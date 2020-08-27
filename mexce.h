@@ -1034,7 +1034,7 @@ bool evaluator::assign_expression(std::string e)
                     temp.type = find_variable(temp.content) != m_variables.end() ? VARIABLE_NAME : 
                                 find_constant(temp.content) != m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content)+" is not a "
-                            "known constant or variable name", i));tokens.push_back(temp);
+                            "known constant or variable name", i));
                     tokens.push_back(temp);
                     if (bdarray.back().first != 0)
                         throw (mpe("Expected a \")\"", i));
