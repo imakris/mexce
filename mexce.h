@@ -213,9 +213,10 @@ enum Token_type
     CONSTANT_NAME,
     VARIABLE_NAME,
     FUNCTION_NAME,
-    INFIX_3,            // infix operator, with priority 3 ( '+' and '-' )
-    INFIX_2,            // infix operator, with priority 2 ( '*' and '/' )
     INFIX_1,            // infix operator, with priority 1 ( '^', i.e. power )
+    INFIX_2,            // infix operator, with priority 2 ( '*' and '/' )
+    INFIX_3,            // infix operator, with priority 3 ( '+' and '-' )
+    INFIX_4,            // infix operator, with priority 4 ( '<' )
     RIGHT_PARENTHESIS,
     LEFT_PARENTHESIS,
     COMMA,
@@ -260,6 +261,8 @@ inline
 Token_type get_infix_rank(char infix_op)
 {
     switch (infix_op) {
+    case '<':
+        return INFIX_4;
     case '+':
     case '-':
         return INFIX_3;
@@ -610,6 +613,20 @@ inline Function Mod()
 }
 
 
+inline Function Less_than()
+{
+    static uint8_t code[] = {
+        0xdf, 0xf1,                                 // fcomip      st,st(1)  
+        0xdd, 0xd8,                                 // fstp        st(0)  
+        0xd9, 0xe8,                                 // fld1  
+        0xd9, 0xee,                                 // fldz  
+        0xdb, 0xd1,                                 // fcmovnb     st,st(1)  
+        0xdd, 0xd9,                                 // fstp        st(1)  
+    };
+    return Function("<", 2, 0, sizeof(code), code);
+}
+
+
 inline Function Bnd()
 {
     static uint8_t code[] = {
@@ -734,7 +751,7 @@ inline Function Bias()
 inline ::std::list<Function>& functions()
 {
     static Function f[] = {
-        Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(),
+        Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(), Less_than(),
         Log(), Log2(), Ln(), Log10(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
         Bnd(), Add(), Sub(), Neg(), Mul(), Div(), Bias(), Gain()
     };
@@ -794,13 +811,16 @@ struct Variable: public Value
 struct Token
 {
     int            type;
+    int            priority;
     size_t         position;
     std::string    content;
     Token():
         type      ( 0 ),
+        priority  ( 0 ),
         position  ( 0 ) {}
     Token(int type, size_t position, char content):
         type      ( type                      ),
+        priority  ( type                      ),
         position  ( position                  ),
         content   ( std::string() + content   ) {}
 };
@@ -911,7 +931,7 @@ bool evaluator::unbind(const std::string& s)
 }
 
 
-inline bool is_operator(  char c) { return c=='+' || c=='-' || c=='*' || c=='/' || c=='^'; }
+inline bool is_operator(  char c) { return c=='+' || c=='-' || c=='*' || c=='/' || c=='^' || c=='<'; }
 inline bool is_alphabetic(char c) { return c>='A' && c<='Z' || c>='a' && c<='z' || c=='_'; }
 inline bool is_numeric(   char c) { return c>='0' && c<='9'; }
 
@@ -1208,58 +1228,31 @@ bool evaluator::assign_expression(std::string e)
         temp = tokens.front();
         tokens.pop_front();
         switch (temp.type) {
+            case INFIX_4:
+            case INFIX_3:
+            case INFIX_2:
+                while(!tstack.empty()) {
+                    int sp = tstack.back().priority;
+                    if (sp < INFIX_1 || sp > temp.type) {
+                        break;
+                    }
+                    postfix.push_back(tstack.back());
+                    tstack.pop_back();
+                }
+            case INFIX_1:
+            case LEFT_PARENTHESIS:
+            case FUNCTION_NAME:
+                tstack.push_back(temp);
+                break;
+            case UNARY:
+                temp.priority = (!tstack.empty() && tstack.back().priority == INFIX_1) ?
+                    INFIX_1 : INFIX_3;
+                tstack.push_back(temp);
+                break;
             case NUMERIC_LITERAL:
             case CONSTANT_NAME:
             case VARIABLE_NAME:
                 postfix.push_back(temp);
-                break;
-            case INFIX_3:
-                while(!tstack.empty()) {
-                    if (tstack.back().type == INFIX_3   ||
-                        tstack.back().type == INFIX_2   ||
-                        tstack.back().type == INFIX_1   ||
-                        tstack.back().type == UNARY)
-                    {
-                        postfix.push_back(tstack.back());
-                        tstack.pop_back();
-                    }
-                    else {
-                        break;
-                    }
-                }
-            case LEFT_PARENTHESIS:
-            case UNARY:
-                tstack.push_back(temp);
-                break;
-            case INFIX_2:
-                while(!tstack.empty()) {
-                    if (tstack.back().type == INFIX_2 ||
-                        tstack.back().type == INFIX_1) {
-                        postfix.push_back(tstack.back());
-                        tstack.pop_back();
-                    }
-                    else {
-                        break;
-                    }
-                }
-                tstack.push_back(temp);
-                break;
-            case INFIX_1:
-                //// the only INFIX_1 is ^, which should be evaluated
-                //// right to left, thus we leave the op in the stack
-                //while(!tstack.empty()) {
-                //    if (tstack.back().type == INFIX_1) {
-                //        postfix.push_back(tstack.back());
-                //        tstack.pop_back();
-                //    }
-                //    else {
-                //        break;
-                //    }
-                //}
-                tstack.push_back(temp);
-                break;
-            case FUNCTION_NAME:
-                tstack.push_back(temp);
                 break;
             case RIGHT_PARENTHESIS:
                 while(tstack.back().type != LEFT_PARENTHESIS) {
@@ -1299,6 +1292,7 @@ bool evaluator::assign_expression(std::string e)
         temp = postfix.front();
         postfix.pop_front();
         switch (temp.type) {
+            case INFIX_4:
             case INFIX_3:
             case INFIX_2:
             case INFIX_1:
