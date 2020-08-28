@@ -700,29 +700,34 @@ inline Function Gain()
     //                 ------------------------  if x >= 0.5
     //                 (1 / a - 2) (1 - 2x) - 1
 
-    static uint8_t code[] = {
-        0xd9, 0xe8,                                 // fld1
-        0xdc, 0xf1,                                 // fdivr       st(1), st
-        0xdc, 0xe9,                                 // fsub        st(1), st
-        0xdc, 0xe9,                                 // fsub        st(1), st
-        0xd8, 0xe2,                                 // fsub        st, st(2)
-        0xd8, 0xe2,                                 // fsub        st, st(2)
-        0xde, 0xc9,                                 // fmulp       st(1), st
-        0xd9, 0xe8,                                 // fld1                   }
-        0xd9, 0xe0,                                 // fchs                   }
-        0xd9, 0xe8,                                 // fld1                   } <= create a 2.0 in st(0)
-        0xd9, 0xfd,                                 // fscale                 }
-        0xdd, 0xd9,                                 // fstp        st(1)      }
-        0xdf, 0xf2,                                 // fcomip      st, st(2)
-        0x0f, 0x82, 0x0b, 0x00, 0x00, 0x00,         // jb          00a80037
-        0xd9, 0xe8,                                 // fld1
-        0xde, 0xc1,                                 // faddp       st(1), st
-        0xde, 0xf9,                                 // fdivp       st(1), st
-        0xe9, 0x08, 0x00, 0x00, 0x00,               // jmp         00a8003f
-        0xdc, 0xe1,                                 // fsubr       st(1), st
-        0xd9, 0xe8,                                 // fld1
-        0xde, 0xe9,                                 // fsubp       st(1), st
-        0xde, 0xf9                                  // fdivp       st(1), st
+    static uint8_t code[] = {                       //                       ; FPU stack
+        0xd9, 0xc1,                                 // fld         st(1)     ; x, a, x
+        0xd8, 0xc2,                                 // fadd        st,st(2)  ; 2x, a, x
+        0xd9, 0xe8,                                 // fld1                  ; 1, 2x, a, x
+        0xdf, 0xf1,                                 // fcomip      st,st(1)  ; 2x, a, x
+        0xdd, 0xd8,                                 // fstp        st(0)     ; a, x
+        0xd9, 0xc0,                                 // fld         st(0)     ; a, a, x
+        0xd8, 0xc1,                                 // fadd        st,st(1)  ; 2a, a, x
+        0xd9, 0xe8,                                 // fld1                  ; 1, 2a, a, x
+        0xde, 0xe9,                                 // fsubp       st(1),st  ; 2a-1, a, x
+        0xde, 0xf1,                                 // fdivrp      st(1),st  ; (2a-1)/a, x
+        0xd9, 0xc1,                                 // fld         st(1)     ; x, (2a-1)/a, x
+        0xdc, 0xc0,                                 // fadd        st(0),st  ; 2x, (2a-1)/a, x 
+        0xd9, 0xe8,                                 // fld1                  ; 1, 2x, (2a-1)/a, x
+        0xde, 0xe9,                                 // fsubp       st(1),st  ; 2x-1, (2a-1)/a, x
+        0xde, 0xc9,                                 // fmulp       st(1),st  ; (2x-1)*(2a-1)/a, x
+        0xd9, 0xe8,                                 // fld1                  ; 1, (2x-1)*(2a-1)/a, x
+        0x72, 0x06,                                 // jb          x_ge_half
+        0xde, 0xc1,                                 // faddp       st(1),st  ; (2x-1)*(2a-1)/a+1, x
+        0xde, 0xf9,                                 // fdivp       st(1),st  ; x/((2x-1)*(2a-1)/a+1) [result]
+        0xeb, 0x0a,                                 // jmp         gain_exit
+// x_ge_half:
+        0xd9, 0xc1,                                 // fld         st(1)     ; (2x-1)*(2a-1)/a, 1, (2x-1)*(2a-1)/a, x
+        0xde, 0xe9,                                 // fsubp       st(1),st  ; 1-(2x-1)*(2a-1)/a, (2x-1)*(2a-1)/a, x
+        0xd9, 0xc9,                                 // fxch        st(1)     ; (2x-1)*(2a-1)/a, 1-(2x-1)*(2a-1)/a, x
+        0xde, 0xea,                                 // fsubp       st(2),st  ; 1-(2x-1)*(2a-1)/a, x-(2x-1)*(2a-1)/a
+        0xde, 0xf9,                                 // fdivp       st(1),st  ; (x-(2x-1)*(2a-1)/a)/(1-(2x-1)*(2a-1)/a)  [result]
+// gain_exit:
     };
     return Function("gain", 2, 1, sizeof(code), code);
 }
