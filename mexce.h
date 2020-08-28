@@ -41,11 +41,12 @@
 #define MEXCE_INCLUDED
 
 #include <cassert>
-#include <cstring>
 #include <cinttypes>
+#include <cstring>
 #include <deque>
 #include <exception>
 #include <list>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -834,6 +835,15 @@ template <> inline Numeric_data_type get_ndt<int32_t>() { return M32INT; }
 template <> inline Numeric_data_type get_ndt<int64_t>() { return M64INT; }
 
 
+inline bool is_operator(  char c) { return c=='+' || c=='-' || c=='*' || c=='/' || c=='^' || c=='<'; }
+inline bool is_alphabetic(char c) { return c>='A' && c<='Z' || c>='a' && c<='z' || c=='_'; }
+inline bool is_numeric(   char c) { return c>='0' && c<='9'; }
+
+template<typename T>
+void write_to_stream(std::stringstream &s, T data) {
+    s.write((char*)&data, sizeof(T));
+}
+
 } // mexce_impl
 
 
@@ -929,11 +939,6 @@ bool evaluator::unbind(const std::string& s)
     }
     return false;
 }
-
-
-inline bool is_operator(  char c) { return c=='+' || c=='-' || c=='*' || c=='/' || c=='^' || c=='<'; }
-inline bool is_alphabetic(char c) { return c>='A' && c<='Z' || c>='a' && c<='z' || c=='_'; }
-inline bool is_numeric(   char c) { return c>='0' && c<='9'; }
 
 
 inline
@@ -1292,6 +1297,7 @@ bool evaluator::assign_expression(std::string e)
         temp = postfix.front();
         postfix.pop_front();
         switch (temp.type) {
+            case FUNCTION_NAME:
             case INFIX_4:
             case INFIX_3:
             case INFIX_2:
@@ -1302,9 +1308,6 @@ bool evaluator::assign_expression(std::string e)
                 if (temp.content == "-") { // unary '+' is ignored
                     elist.push_back(&(*find_function("#")));
                 }
-                break;
-            case FUNCTION_NAME:
-                elist.push_back(&(*find_function(temp.content)));
                 break;
             case NUMERIC_LITERAL: {
                 list<Constant>::iterator x;
@@ -1361,26 +1364,10 @@ bool evaluator::assign_expression(std::string e)
 }
 
 
-
 inline
 void evaluator::compile_elist(std::list<impl::Element*>::iterator first, std::list<impl::Element*>::iterator last)
 {
     using namespace impl;
-
-    // step 1: calculate code size
-    std::list<impl::Element*>::iterator y = first;
-    size_t code_buffer_size = 0;
-    for (; y != last; y++) {
-        if (((*y)->element_type == CVAR) ||
-            ((*y)->element_type == CCONST))
-#ifdef MEXCE_64
-            code_buffer_size += 12;   // mov rax, qword ptr (10 bytes) + fld [rax] (2 bytes)
-#else
-            code_buffer_size += 6;    // fld dword ptr (6 bytes)
-#endif
-        else
-            code_buffer_size += ((Function *)*y)->code_size;
-    }
 
     const static uint8_t return_sequence[] = {
 #ifdef MEXCE_64
@@ -1405,22 +1392,12 @@ void evaluator::compile_elist(std::list<impl::Element*>::iterator first, std::li
         0xc3                                                        // return
     };
 
-    code_buffer_size += sizeof(return_sequence);
-
-#ifdef MEXCE_64
-    code_buffer_size += 1; //this is the initiation sequence, only applicable to x64, for pushing rax (1 byte)
-#endif
-
-    auto code_buffer = get_executable_buffer(code_buffer_size);
-
-    //step 2: generate executable code
-    y = first;
-    size_t idx = 0;
+    std::stringstream code_buffer;    
+    std::list<impl::Element*>::iterator y = first;
 
 #ifdef MEXCE_64
     // On x64 we are using rax to fetch/store addresses
-    code_buffer[0] = 0x50; // push rax
-    idx++;
+    write_to_stream(code_buffer, uint8_t(0x50)); // push rax
 #endif
 
     size_t fpu_stack_size = 0;
@@ -1439,33 +1416,31 @@ void evaluator::compile_elist(std::list<impl::Element*>::iterator first, std::li
             Value * tn = (Value *) *y;
 
 #ifdef MEXCE_64
-            *((uint16_t*)(code_buffer+idx)) = 0xb848;   // move input address to rax (only the opcode)
-            memcpy(code_buffer + idx + 2, &(tn->address), 8);
-            idx += 10;                                  // 2 for the opcode, 8 for the address
+            write_to_stream(code_buffer, (uint16_t)0xb848);   // move input address to rax (opcode)
+            write_to_stream(code_buffer, (void*)tn->address);
 #endif
 
             switch (tn->numeric_data_type) {
 #ifdef MEXCE_64
                 // On x64, variable addresses are already supplied in rax.
-                case M32FP:   *((uint16_t*)(code_buffer+idx)) = 0x00d9; break;
-                case M64FP:   *((uint16_t*)(code_buffer+idx)) = 0x00dd; break;
-                case M16INT:  *((uint16_t*)(code_buffer+idx)) = 0x00df; break;
-                case M32INT:  *((uint16_t*)(code_buffer+idx)) = 0x00db; break;
-                case M64INT:  *((uint16_t*)(code_buffer+idx)) = 0x28df; break;
+                case M32FP:   write_to_stream(code_buffer, uint16_t(0x00d9)); break;
+                case M64FP:   write_to_stream(code_buffer, uint16_t(0x00dd)); break;
+                case M16INT:  write_to_stream(code_buffer, uint16_t(0x00df)); break;
+                case M32INT:  write_to_stream(code_buffer, uint16_t(0x00db)); break;
+                case M64INT:  write_to_stream(code_buffer, uint16_t(0x28df)); break;
 #else
                 // On 32-bit x86, variable addresses are explicitly specified.
-                case M32FP:   *((uint16_t*)(code_buffer+idx)) = 0x05d9; break;
-                case M64FP:   *((uint16_t*)(code_buffer+idx)) = 0x05dd; break;
-                case M16INT:  *((uint16_t*)(code_buffer+idx)) = 0x05df; break;
-                case M32INT:  *((uint16_t*)(code_buffer+idx)) = 0x05db; break;
-                case M64INT:  *((uint16_t*)(code_buffer+idx)) = 0x2ddf; break;
+                case M32FP:   write_to_stream(code_buffer, uint16_t(0x05d9)); break;
+                case M64FP:   write_to_stream(code_buffer, uint16_t(0x05dd)); break;
+                case M16INT:  write_to_stream(code_buffer, uint16_t(0x05df)); break;
+                case M32INT:  write_to_stream(code_buffer, uint16_t(0x05db)); break;
+                case M64INT:  write_to_stream(code_buffer, uint16_t(0x2ddf)); break;
 #endif
             }
-            idx += 2;
 
 #ifndef MEXCE_64
-            memcpy(code_buffer + idx, &(tn->address), 4);
-            idx += 4;
+            //code_buffer.write((const char*)tn->address, 4);
+            write_to_stream(code_buffer, (void*)(tn->address));
 #endif
         }
         else {
@@ -1473,23 +1448,25 @@ void evaluator::compile_elist(std::list<impl::Element*>::iterator first, std::li
 
             fpu_stack_size -= tf->num_args-1;
 
-            memcpy(code_buffer+idx, tf->code, tf->code_size);
-            idx += tf->code_size;
+            code_buffer.write((const char*)tf->code, tf->code_size);
         }
     }
 
     // copy the return sequence
-    memcpy(code_buffer+idx, return_sequence, sizeof(return_sequence));
+    code_buffer.write((const char*)return_sequence, sizeof(return_sequence));
+
+    auto code = code_buffer.str();
+    auto buffer = get_executable_buffer(code.size());
+    memcpy(buffer, &code[0], code.size());
 
 #ifdef MEXCE_64
     // load the intermediate variable's address to rax
-    *((uint64_t*)(code_buffer+idx+2)) = (uint64_t)&m_x64_return_var;
+    *((uint64_t*)(buffer+code.size()-16)) = (uint64_t)&m_x64_return_var;
 #endif
 
-    idx +=sizeof(return_sequence);
-    evaluate = lock_executable_buffer(code_buffer, code_buffer_size);
+    evaluate = lock_executable_buffer(buffer, code.size());
 }
 
-}
+} // mexce
 
 #endif
