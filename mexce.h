@@ -49,6 +49,9 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <memory>
+#include <map>
+#include <cmath>
 
 
 #if defined(_M_X64) || defined(__x86_64__)
@@ -64,6 +67,12 @@
 #elif defined(__linux__)
     //#include <unistd.h>
     #include <sys/mman.h>
+#endif
+
+
+// adjust, if functions with more than 2 arguments are introduced
+#ifndef MEXCE_NUM_FUNCTION_ARGS_MAX
+#define MEXCE_NUM_FUNCTION_ARGS_MAX 2
 #endif
 
 
@@ -93,6 +102,10 @@ namespace impl {
      struct Variable;
      struct Function;
      struct Element;
+
+     using elist_t = std::list<std::shared_ptr<impl::Element> >;
+     using elist_it_t = elist_t::iterator;
+
 }
 
 
@@ -119,18 +132,19 @@ private:
     size_t                      m_buffer_size;
     std::string                 m_expression;
 
-    std::list<impl::Constant>   m_literals;             // e.g. '5.88'
-    std::list<impl::Constant>   m_constants;            // e.g. pi (for now it's only pi and e)
-    std::list<impl::Constant>   m_constant_expressions; // e.g. 3^sin(2.13) - not searchable
-    std::list<impl::Variable>   m_variables;
-    std::list<impl::Function>   m_functions;
+    using constant_map_t = std::map<std::string, std::shared_ptr<impl::Constant> >;
+    using variable_map_t = std::map<std::string, std::shared_ptr<impl::Variable> >;
+    constant_map_t   m_literals;             // e.g. '5.88'
+    constant_map_t   m_constants;            // e.g. pi (for now it's only pi and e)
+    variable_map_t   m_variables;
 
-    std::list<impl::Constant>::iterator find_literal (const std::string&);
-    std::list<impl::Constant>::iterator find_constant(const std::string&);
-    std::list<impl::Variable>::iterator find_variable(const std::string&);
-    std::list<impl::Function>::iterator find_function(const std::string&);
+    std::list<std::shared_ptr<impl::Constant>>   m_intermediate_constants;
 
-    void compile_elist(std::list<impl::Element*>::iterator first, std::list<impl::Element*>::iterator last);
+    void compile_elist(impl::elist_it_t first, impl::elist_it_t last);
+
+public:
+    std::list< std::string >    m_intermediate;
+
 };
 
 
@@ -227,6 +241,10 @@ enum Token_type
 };
 
 
+using std::list;
+using std::string;
+
+
 struct Element
 {
     uint8_t element_type;
@@ -234,28 +252,114 @@ struct Element
 };
 
 
+struct Value: public Element
+{
+    volatile void* address;
+    uint8_t        numeric_data_type;
+    string         name;
+
+    Value(volatile void *address, uint8_t numeric_data_type, uint8_t element_type, string name):
+        Element               ( element_type      ),
+        address               ( address           ),
+        numeric_data_type     ( numeric_data_type ),
+        name                  ( name              ) {}
+};
+
+
+struct Constant: public Value
+{
+    Constant(string num, string name = ""):
+        Value( (volatile void *) &internal_constant, M64FP, CCONST, name),
+        internal_constant(atof(num.data()))
+    {}
+
+    Constant(double num):
+        Value( (volatile void *) &internal_constant, M64FP, CCONST, ""),
+        internal_constant(num)
+    {}
+
+    Constant(const Constant& rhs):
+        Value(rhs),
+        internal_constant(rhs.internal_constant)
+    {
+        address = (void*)&internal_constant;
+    }
+
+    double get_data_as_double() const {
+        switch (this->numeric_data_type) {
+            case M16INT: return (double)*((int16_t*)address);
+            case M32INT: return (double)*((int32_t*)address);
+            case M64INT: return (double)*((int64_t*)address);
+            case M32FP:  return (double)*((float*)address);
+            case M64FP:  return         *((double*)address);
+            default: assert(false);
+        }
+    }
+
+private:
+    const double   internal_constant;
+};
+
+
+struct Variable: public Value
+{
+    bool referenced;
+
+    Variable(volatile void * addr, string name, int numFormat):
+        Value(addr, numFormat, CVAR, name), referenced(false)
+    {}
+};
+
+
 struct Function: public Element
 {
-    uint8_t        stack_req;
-    size_t         code_size;
-    const char*    name;
-    int            num_args;
-    uint8_t *      code;
+    using optimizer_t = std::shared_ptr<Function> (*)(std::shared_ptr<Function>, evaluator*, elist_t*);
+
+    uint8_t         stack_req;
+    size_t          code_size;
+    const char*     name;
+    size_t          num_args;
+    elist_it_t      args[MEXCE_NUM_FUNCTION_ARGS_MAX];
+    uint8_t*        code;
+    optimizer_t     optimizer;
+    bool            var_ref;   // true if the function's code has a direct reference
+                               // to an external variable. This may only happen if the
+                               // function is optimized.
 
     Function(
         const char* name,
-        uint8_t num_args,
-        uint8_t sreq,
-        int size,
-        uint8_t *code_buffer)
+        uint8_t     num_args,
+        uint8_t     sreq,
+        size_t      size,
+        uint8_t    *code_buffer,
+        optimizer_t optimizer = 0,
+        bool        var_ref = false)
     :
         Element   ( CFUNC       ),
         stack_req ( sreq        ),
         code_size ( size        ),
-        num_args  ( num_args    ),
         name      ( name        ),
-        code      ( code_buffer ) {}
+        num_args  ( num_args    ),
+        code      ( code_buffer ),
+        optimizer ( optimizer   ),
+        var_ref   ( var_ref     ) {}
 };
+
+
+struct mexce_charstream { std::stringstream s; };
+
+template<typename T>
+mexce_charstream& operator << (mexce_charstream &s, T data) {
+    s.s.write((char*)&data, sizeof(T));
+    return s;
+}
+
+inline
+mexce_charstream& operator < (mexce_charstream &s, int v) {
+    char ch = (char)v;
+    s.s.write(&ch, 1);
+    return s;
+}
 
 
 inline
@@ -375,6 +479,101 @@ inline Function Sqrt()
 }
 
 
+inline
+std::shared_ptr<Function> pow_optimizer(std::shared_ptr<Function> f, evaluator* ev, elist_t* elist)
+{
+    // If one of the two arguments is CCONST or CVAR (i.e. loaded from memory),
+    // it will be applied directly, thus dropping FPU stack requirements by 1.
+
+    if ((*f->args[0])->element_type == CCONST) {
+        auto v = std::static_pointer_cast<Constant>(*f->args[0]);
+
+        double v_d = v->get_data_as_double();
+        double r_d = round(v_d);
+        double a_d = abs(v_d);
+        if (r_d == v_d && a_d <= 32.0) {
+            mexce_charstream s;
+
+            if (v_d == 0.0) {
+                s < 0xdd < 0xd8     // fstp st(0)
+                  < 0xd9 < 0xe8;    // fld1
+            }
+            else
+            if (v_d == 1.0) {
+                // do nothing
+            }
+            else
+            if (v_d == 2.0) {
+                s < 0xdc < 0xc8;    // fmul st(0)
+            }
+            else
+            if (v_d == 3.0) {
+                s < 0xd9 < 0xc0     // fld  st(0)
+                  < 0xdc < 0xc8     // fmul st(0)
+                  < 0xde < 0xc9;    // fmulpst(1), st(0)
+            }
+            else
+            if (v_d == 4.0) {
+                s < 0xdc < 0xc8 < 0xdc < 0xc8;
+            }
+            else
+            if (v_d == 5.0) {
+                s < 0xd9 < 0xc0     // fld  st(0)
+                  < 0xdc < 0xc8 < 0xdc < 0xc8
+                  < 0xde < 0xc9;    // fmulp st(1), st(0)
+            }
+            else
+            if (v_d == 6.0) {
+                s < 0xd9 < 0xc0     // fld  st(0)
+                  < 0xdc < 0xc8 < 0xdc < 0xc8
+                  < 0xd8 < 0xc9     // fmul  st(0), st(1)
+                  < 0xde < 0xc9;    // fmulp st(1), st(0)
+            }
+            else
+            if (v_d == 7.0) {
+                s < 0xd9 < 0xc0     // fld  st(0)
+                  < 0xdc < 0xc8 < 0xdc < 0xc8
+                  < 0xd8 < 0xc9     // fmul  st(0), st(1)
+                  < 0xd8 < 0xc9     // fmul  st(0), st(1)
+                  < 0xde < 0xc9;    // fmulp st(1), st(0)
+            }
+            else
+            if (v_d == 8.0) {
+                s < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8;
+            }
+            else
+            if (v_d == 16.0) {
+                s < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8;
+            }
+            else
+            if (v_d == 32.0) {
+                s < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8;
+            }
+            else {
+                return f;
+            }
+
+            if (a_d < 0) {
+                s < 0xd9 < 0xe8     // fld1
+                  < 0xde < 0xf1;    // fdivrp  st(1),st   // inverse
+            }
+
+            ev->m_intermediate.push_back(std::string());
+            ev->m_intermediate.back() = s.s.str();
+            uint8_t* cc = (uint8_t*)&ev->m_intermediate.back()[0];
+
+            auto f_opt = std::make_shared<Function>("", 1, 0, ev->m_intermediate.back().size(), cc, nullptr);
+            f_opt->args[0] = f->args[1];
+
+            elist->erase(f->args[0]);
+
+            return f_opt;
+        }
+    }
+    return f;
+}
+
+
 inline Function Pow()
 {
     static uint8_t code[]  =  {
@@ -437,7 +636,7 @@ inline Function Pow()
         0xdd, 0xd9,                                 // fstp        st(1)
 // exit_point:
     };
-    return Function("^", 2, 1, sizeof(code), code);
+    return Function("pow", 2, 1, sizeof(code), code, pow_optimizer);
 }
 
 
@@ -624,7 +823,7 @@ inline Function Less_than()
         0xdb, 0xd1,                                 // fcmovnb     st,st(1)  
         0xdd, 0xd9,                                 // fstp        st(1)  
     };
-    return Function("<", 2, 0, sizeof(code), code);
+    return Function("less_than", 2, 0, sizeof(code), code);
 }
 
 
@@ -645,12 +844,55 @@ inline Function Bnd()
 }
 
 
+template <uint8_t OP0, uint8_t OP1 = OP0>
+std::shared_ptr<Function> asmd_optimizer(std::shared_ptr<Function> f, evaluator* ev, elist_t* elist)
+{
+    // If one of the two arguments is CCONST or CVAR (i.e. loaded from memory),
+    // it will be applied directly, thus dropping FPU stack requirements by 1.
+
+    for (int i=0; i<2; i++) {
+        if ((*f->args[i])->element_type == CCONST || (*f->args[i])->element_type == CVAR) {
+            auto v = std::static_pointer_cast<Value>(*f->args[i]);
+
+            uint8_t opcode = (i==0) ? OP0 : OP1;
+
+            mexce_charstream s;
+#ifdef MEXCE_64
+            s < 0x48 < 0xb8;                            // mov            rax, qword ptr
+#else
+            s < 0xb8;                                   // mov            eax, dword ptr
+#endif
+            s << v->address;                            //                   [the address]
+            switch(v->numeric_data_type) {
+                case M16INT: s < 0xde < opcode; break;  // (instruction)  word  ptr [eax/rax]  
+                case M32INT: s < 0xda < opcode; break;  // (instruction)  dword ptr [eax/rax]  
+                case M32FP:  s < 0xd8 < opcode; break;  // (instruction)  dword ptr [eax/rax]
+                case M64FP:  s < 0xdc < opcode; break;  // (instruction)  qword ptr [eax/rax]
+            }
+
+            ev->m_intermediate.push_back(std::string());
+            ev->m_intermediate.back() = s.s.str();
+            uint8_t* cc = (uint8_t*)&ev->m_intermediate.back()[0];
+            bool var_ref = (*f->args[i])->element_type == CVAR;
+
+            auto f_opt = std::make_shared<Function>("", 1, 0, ev->m_intermediate.back().size(), cc, nullptr, var_ref);
+            f_opt->args[0] = f->args[(int)(i==0)];
+
+            elist->erase(f->args[i]);
+
+            return f_opt;
+        }
+    }
+    return f;
+}
+
+
 inline Function Add()
 {
     static uint8_t code[] = {
         0xde, 0xc1                                  // faddp       st(1), st
     };
-    return Function("+", 2, 0, sizeof(code), code);
+    return Function("add", 2, 0, sizeof(code), code, asmd_optimizer<0x00>);
 }
 
 
@@ -659,16 +901,7 @@ inline Function Sub()
     static uint8_t code[] = {
         0xde, 0xe9                                  // fsubp       st(1), st
     };
-    return Function("-", 2, 0, sizeof(code), code);
-}
-
-
-inline Function Neg()
-{
-    static uint8_t code[] = {
-        0xd9, 0xe0                                  // fchs
-    };
-    return Function("#", 1, 0, sizeof(code), code);
+    return Function("sub", 2, 0, sizeof(code), code, asmd_optimizer<0x20, 0x28>);
 }
 
 
@@ -677,7 +910,7 @@ inline Function Mul()
     static uint8_t code[] = {
         0xde, 0xc9                                  // fmulp       st(1), st
     };
-    return Function("*", 2, 0, sizeof(code), code);
+    return Function("mul", 2, 0, sizeof(code), code, asmd_optimizer<0x08>);
 }
 
 
@@ -686,7 +919,16 @@ inline Function Div()
     static uint8_t code[] = {
         0xde, 0xf9                                  // fdivp       st(1), st
     };
-    return Function("/", 2, 0, sizeof(code), code);
+    return Function("div", 2, 0, sizeof(code), code, asmd_optimizer<0x30, 0x38>);
+}
+
+
+inline Function Neg()
+{
+    static uint8_t code[] = {
+        0xd9, 0xe0                                  // fchs
+    };
+    return Function("neg", 1, 0, sizeof(code), code);
 }
 
 
@@ -754,81 +996,54 @@ inline Function Bias()
 }
 
 
-inline ::std::list<Function>& functions()
+inline const ::std::map<string, Function>& make_function_map()
 {
     static Function f[] = {
         Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(), Less_than(),
         Log(), Log2(), Ln(), Log10(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
         Bnd(), Add(), Sub(), Neg(), Mul(), Div(), Bias(), Gain()
     };
-    static ::std::list<Function> ret(f, f + sizeof(f) / sizeof(*f));
+
+    static ::std::map<string, Function> ret;
+    for (auto& e : f) {
+        if (e.name) {
+            assert(ret.find(e.name) == ret.end());
+            ret.insert(std::make_pair(e.name, e));
+        }
+
+    }
     return ret;
 }
 
 
-struct Value: public Element
+inline const ::std::map<string, Function>& function_map()
 {
-    volatile void* address;
-    uint8_t        numeric_data_type;
-    std::string    name;
-
-    Value(volatile void *address, uint8_t numeric_data_type, uint8_t element_type, std::string name):
-        Element               ( element_type      ),
-        address               ( address           ),
-        numeric_data_type     ( numeric_data_type ),
-        name                  ( name              ) {}
-};
+    static const ::std::map<string, Function>& name_set = make_function_map();
+    return name_set;
+}
 
 
-struct Constant: public Value
-{
-    Constant(std::string num, std::string name = ""):
-        Value( (volatile void *) &internal_constant, M64FP, CCONST, name),
-        internal_constant(atof(num.data()))
-    {}
-
-    Constant(double num):
-        Value( (volatile void *) &internal_constant, M64FP, CCONST, ""),
-        internal_constant(num)
-    {}
-
-    Constant(const Constant& rhs):
-        Value(rhs),
-        internal_constant(rhs.internal_constant)
-    {
-        address = (void*)&internal_constant;
-    }
-
-private:
-    const double        internal_constant;
-};
-
-
-struct Variable: public Value
-{
-    bool referenced;
-
-    Variable(volatile void * addr, std::string name, int numFormat):
-        Value(addr, numFormat, CVAR, name), referenced(false)
-    {}
-};
+inline std::shared_ptr<Function> make_function(const std::string& name) {
+    auto fn = function_map().find(name);
+    return std::make_shared<Function>(fn->second);
+}
 
 
 struct Token
 {
-    int            type;
-    int            priority;
-    size_t         position;
-    std::string    content;
+    int             type;
+    int             priority;
+    size_t          position;
+    string          content;
     Token():
         type      ( 0 ),
         priority  ( 0 ),
         position  ( 0 ) {}
     Token(int type, size_t position, char content):
-        type      ( type                      ),
-        priority  ( type                      ),
-        position  ( position                  ),
-        content   ( std::string() + content   ) {}
+        type      ( type               ),
+        priority  ( type               ),
+        position  ( position           ),
+        content   ( string() + content ) {}
 };
 
 
@@ -840,13 +1055,25 @@ template <> inline Numeric_data_type get_ndt<int32_t>() { return M32INT; }
 template <> inline Numeric_data_type get_ndt<int64_t>() { return M64INT; }
 
 
-inline bool is_operator(  char c) { return c=='+' || c=='-' || c=='*' || c=='/' || c=='^' || c=='<'; }
-inline bool is_alphabetic(char c) { return c>='A' && c<='Z' || c>='a' && c<='z' || c=='_'; }
-inline bool is_numeric(   char c) { return c>='0' && c<='9'; }
+inline bool is_operator(  char c) { return  c=='+' || c=='-'  ||  c=='*' || c=='/'  || c=='^' || c=='<'; }
+inline bool is_alphabetic(char c) { return (c>='A' && c<='Z') || (c>='a' && c<='z') || c=='_'; }
+inline bool is_numeric(   char c) { return  c>='0' && c<='9'; }
 
-template<typename T>
-void write_to_stream(std::stringstream &s, T data) {
-    s.write((char*)&data, sizeof(T));
+
+inline const char* operator_to_function_name(const std::string& op, bool unary = false) {
+    if (!unary) {
+        if (op == "+") return "add";
+        if (op == "-") return "sub";
+        if (op == "*") return "mul";
+        if (op == "/") return "div";
+        if (op == "^") return "pow";
+        if (op == "<") return "less_than";
+    }
+    else {
+        if (op == "-") return "neg";
+    }
+    assert(false);
+    return 0;
 }
 
 } // mexce_impl
@@ -856,8 +1083,10 @@ inline
 evaluator::evaluator():
     m_buffer_size(0)
 {
-    m_constants.push_back(impl::Constant("3.141592653589793238462643383", "pi"));
-    m_constants.push_back(impl::Constant("2.718281828459045235360287471", "e" ));
+    // register functions
+    using namespace impl;
+    m_constants["pi"] = (std::make_shared<Constant>("3.141592653589793238462643383", "pi"));
+    m_constants["e" ] = (std::make_shared<Constant>("2.718281828459045235360287471", "e" ));
     assign_expression("0");
 }
 
@@ -872,57 +1101,14 @@ evaluator::~evaluator()
 template <typename T>
 bool evaluator::bind(T& v, const std::string& s)
 {
-    if ((find_variable(s) == m_variables.end()) &&
-        (find_function(s) == impl::functions().end()))
+    using namespace impl;
+    if ((m_variables.find(s) == m_variables.end()) &&
+        (function_map().find(s) == function_map().end()))
     {
-        m_variables.push_back( impl::Variable(&v, s, impl::M64FP ) );
+        m_variables[s] = std::make_shared<Variable>(&v, s, get_ndt<T>());
         return true;
     }
     return false;
-}
-
-
-inline
-std::list<impl::Constant>::iterator evaluator::find_literal(const std::string& s)
-{
-    std::list<impl::Constant>::iterator i = m_literals.begin();
-    for (; i != m_literals.end(); i++)
-        if (i->name == s)
-            return i;
-    return i;
-}
-
-
-inline
-std::list<impl::Constant>::iterator evaluator::find_constant(const std::string& s)
-{
-    std::list<impl::Constant>::iterator i = m_constants.begin();
-    for (; i != m_constants.end(); i++)
-        if (i->name == s)
-            return i;
-    return i;
-}
-
-
-inline
-std::list<impl::Variable>::iterator evaluator::find_variable(const std::string& s)
-{
-    std::list<impl::Variable>::iterator i = m_variables.begin();
-    for (; i != m_variables.end(); i++)
-        if (i->name == s)
-            return i;
-    return i;
-}
-
-
-inline
-std::list<impl::Function>::iterator evaluator::find_function(const std::string& s)
-{
-    std::list<impl::Function>::iterator i = impl::functions().begin();
-    for (; i != impl::functions().end(); i++)
-        if (i->name == s)
-            return i;
-    return i;
 }
 
 
@@ -932,14 +1118,14 @@ bool evaluator::unbind(const std::string& s)
     if (s.length() == 0)
          return false;
 
-    std::list<impl::Variable>::iterator pos = find_variable(s);
-    if (pos != m_variables.end()) {
-        if (pos->element_type != impl::CVAR)
+    auto it = m_variables.find(s);
+    if (it != m_variables.end()) {
+        if (it->second->element_type != impl::CVAR)
             return false;
-        if (pos->referenced) {
+        if (it->second->referenced) {
             assign_expression("0");
         }
-        m_variables.erase(pos);
+        m_variables.erase(it);
         return true;
     }
     return false;
@@ -957,11 +1143,11 @@ bool evaluator::assign_expression(std::string e)
     std::deque<Token> tokens;
 
     m_literals.clear();
-    m_constant_expressions.clear();
+    m_intermediate_constants.clear();
 
-    list<Variable>::iterator x = m_variables.begin();
+    auto x = m_variables.begin();
     for (; x != m_variables.end(); x++)
-        x->referenced = false;
+        x->second->referenced = false;
 
     if (e.length() == 0){
         assign_expression("0");
@@ -973,7 +1159,7 @@ bool evaluator::assign_expression(std::string e)
     //stage 1: checking expression syntax
     Token temp;
     std::vector< std::pair<int, int> > bdarray(1);
-    list<Function>::iterator i_fnc;
+    std::map<string, Function>::const_iterator i_fnc;
     int state = 0;
     size_t i = 0;
     int function_parentheses = 0;
@@ -1087,23 +1273,23 @@ bool evaluator::assign_expression(std::string e)
                     break;
                 }
                 if (e[i] == ' ') {
-                    if (find_variable(temp.content) != m_variables.end()) {
+                    if (m_variables.find(temp.content) != m_variables.end()) {
                         temp.type = VARIABLE_NAME;
                         tokens.push_back(temp);
                         state = 5;
                     }
                     else
-                    if (find_constant(temp.content) != m_constants.end()) {
+                    if (m_constants.find(temp.content) != m_constants.end()) {
                         temp.type = CONSTANT_NAME;
                         tokens.push_back(temp);
                         state = 5;
                     }
                     else
-                    if ((i_fnc = find_function(temp.content)) != functions().end()) {
+                    if ((i_fnc = function_map().find(temp.content)) != function_map().end()) {
                         temp.type = FUNCTION_NAME;
                         tokens.push_back(temp);
                         tokens.push_back(Token(FUNCTION_LEFT_PARENTHESIS, i, '('));
-                        bdarray.push_back(std::make_pair(0, i_fnc->num_args));
+                        bdarray.push_back(std::make_pair(0, i_fnc->second.num_args));
                         function_parentheses++;
                         state = 6;
                     }
@@ -1114,8 +1300,8 @@ bool evaluator::assign_expression(std::string e)
                     break;
                 }
                 if (e[i] == ')') {
-                    temp.type = find_variable(temp.content) != m_variables.end() ? VARIABLE_NAME : 
-                                find_constant(temp.content) != m_constants.end() ? CONSTANT_NAME :
+                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME : 
+                                m_constants.find(temp.content) != m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content) +
                             " is not a known constant or variable name", i));
                     tokens.push_back(temp);
@@ -1137,20 +1323,20 @@ bool evaluator::assign_expression(std::string e)
                     break;
                 }
                 if (e[i] == '(') {
-                    if ((i_fnc = find_function(temp.content)) == functions().end()) {
+                    if ((i_fnc = function_map().find(temp.content)) == function_map().end()) {
                         throw (mpe(string(temp.content) + " is not a known function name", i));
                     }
                     temp.type = FUNCTION_NAME;
                     tokens.push_back(temp);
                     tokens.push_back(Token(FUNCTION_LEFT_PARENTHESIS, i, '('));
-                    bdarray.push_back(std::make_pair(0, i_fnc->num_args));
+                    bdarray.push_back(std::make_pair(0, i_fnc->second.num_args));
                     function_parentheses++;
                     state = 0;
                     break;
                 }
                 if (is_operator(e[i])) {
-                    temp.type = find_variable(temp.content) != m_variables.end() ? VARIABLE_NAME : 
-                                find_constant(temp.content) != m_constants.end() ? CONSTANT_NAME :
+                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME : 
+                                m_constants.find(temp.content) != m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content) +
                             " is not a known constant or variable name", i));
                     tokens.push_back(temp);
@@ -1159,8 +1345,8 @@ bool evaluator::assign_expression(std::string e)
                     break;
                 }
                 if (e[i] == ',') {
-                    temp.type = find_variable(temp.content) != m_variables.end() ? VARIABLE_NAME : 
-                                find_constant(temp.content) != m_constants.end() ? CONSTANT_NAME :
+                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME : 
+                                m_constants.find(temp.content) != m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content)+" is not a "
                             "known constant or variable name", i));
                     tokens.push_back(temp);
@@ -1297,63 +1483,104 @@ bool evaluator::assign_expression(std::string e)
     }
 
     //stage 3: convert "Token" expression primitives to "Element *"
-    list<Element *> elist;
+    list< std::shared_ptr<Element> > elist;
     while (!postfix.empty()) {
         temp = postfix.front();
         postfix.pop_front();
         switch (temp.type) {
-            case FUNCTION_NAME:
             case INFIX_4:
             case INFIX_3:
             case INFIX_2:
-            case INFIX_1:
-                elist.push_back(&(*find_function( temp.content )));
+            case INFIX_1: {
+                auto name = operator_to_function_name(temp.content);
+                elist.push_back( make_function(name) );
+                break;
+            }
+            case FUNCTION_NAME:
+                elist.push_back(make_function(temp.content));
                 break;
             case UNARY:
                 if (temp.content == "-") { // unary '+' is ignored
-                    elist.push_back(&(*find_function("#")));
+                    elist.push_back( make_function("neg") );
                 }
                 break;
             case NUMERIC_LITERAL: {
-                list<Constant>::iterator x;
-                if ((x = find_literal(temp.content)) != m_literals.end()) {
-                    elist.push_back(&(*x));
+                auto it = m_literals.find(temp.content);
+                if (it != m_literals.end()) {
+                    elist.push_back(it->second);
                 }
                 else {
-                    m_literals.push_back(Constant(temp.content, temp.content));
-                    elist.push_back(&(m_literals.back()));
+                    m_literals[temp.content] = std::make_shared<Constant>(temp.content, temp.content);
+                    elist.push_back(m_literals[temp.content]);
                 }
                 break;
             }
             case CONSTANT_NAME: {
-                elist.push_back(&(* find_constant(temp.content) ));
+                elist.push_back(m_constants.find(temp.content)->second);
                 break;
             }
             case VARIABLE_NAME: {
-                list<Variable>::iterator x = find_variable(temp.content);
-                assert(x != m_variables.end());
-                x->referenced = true;
-                elist.push_back(&(*x));
+                auto it = m_variables.find(temp.content);
+                assert(it != m_variables.end());
+                it->second->referenced = true;
+                elist.push_back(it->second);
                 break;
             }
         }
     }
 
-    // stage 4: precompute constant expressions
-    for (list<Element *>::iterator y = elist.begin(); y != elist.end(); y++) {
+    // link functions to their arguments (1)
+    std::vector< elist_it_t > evec;
+    for (auto y = elist.begin(); y != elist.end(); y++) {
+        if ((*y)->element_type == CFUNC) {
+            auto fp = std::static_pointer_cast<Function>(*y);
+            for (size_t i = 0; i < fp->num_args; i++) {
+                fp->args[i] = evec.back();
+                evec.pop_back();
+            }
+        }
+        evec.push_back(y);
+    }
+
+    // TODO: Rearrange chains of same level operators, so that dependents are last
+    // ...
+
+    // choose more suitable functions, where applicable
+    for (auto y = elist.begin(); y != elist.end(); y++) {
+        if ((*y)->element_type == CFUNC) {
+            auto fp = std::static_pointer_cast<Function>(*y);
+            if (fp->optimizer != 0) {
+                auto xx = fp->optimizer(fp, this, &elist);
+                *y = xx;
+            }
+        }
+    }
+
+    assert(evec.size() == 1);
+
+    // precompute constant expressions
+    for (auto y = elist.begin(); y != elist.end(); y++) {
         if ((*y)->element_type == CFUNC) {
             // check if its dependents are const
-            list<Element *>::iterator yt = y;
-            Function* fp = (Function*)(*y);
+            auto yt = y;
+            Function* fp = (Function*)(y->get());
+
+            if (fp->var_ref) {
+                continue;
+            }
+
             int dc = fp->num_args;
             while (true) {
                 if (!(dc--)) {
                     // the loop reached the end, it is a constant function
-                    list<Element *>::iterator ynext = std::next(y);
+                    auto ynext = std::next(y);
                     compile_elist(yt, ynext);
                     elist.erase(yt, ynext);
-                    m_constant_expressions.push_back( Constant(evaluate()) );
-                    y = elist.insert(ynext, &m_constant_expressions.back() );
+                    auto ic = std::make_shared<Constant>(evaluate());
+                    m_intermediate_constants.push_back(ic);
+                    y = elist.insert(ynext, ic);
+                    
+                    
                     break;
                 }
                 yt--;
@@ -1370,7 +1597,7 @@ bool evaluator::assign_expression(std::string e)
 
 
 inline
-void evaluator::compile_elist(std::list<impl::Element*>::iterator first, std::list<impl::Element*>::iterator last)
+void evaluator::compile_elist(impl::elist_it_t first, impl::elist_it_t last)
 {
     using namespace impl;
 
@@ -1397,12 +1624,13 @@ void evaluator::compile_elist(std::list<impl::Element*>::iterator first, std::li
         0xc3                                                        // return
     };
 
-    std::stringstream code_buffer;    
-    std::list<impl::Element*>::iterator y = first;
+    mexce_charstream code_buffer;    
+    elist_it_t y = first;
 
 #ifdef MEXCE_64
     // On x64 we are using rax to fetch/store addresses
-    write_to_stream(code_buffer, uint8_t(0x50)); // push rax
+    code_buffer < 0x50; // push rax
+
 #endif
 
     size_t fpu_stack_size = 0;
@@ -1415,52 +1643,51 @@ void evaluator::compile_elist(std::list<impl::Element*>::iterator first, std::li
                 // The caller is expected to supply this function with element lists
                 // that have been adjusted accordingly, to mitigate this problem.
                 // Therefore, this should be unreachable code.
-                throw mexce_parsing_exception("FPU stack limit exceeded (internal error)", 0);
+                //throw mexce_parsing_exception("FPU stack limit exceeded (internal error)", 0);
             }
 
-            Value * tn = (Value *) *y;
+            Value * tn = (Value *) y->get();
 
 #ifdef MEXCE_64
-            write_to_stream(code_buffer, (uint16_t)0xb848);   // move input address to rax (opcode)
-            write_to_stream(code_buffer, (void*)tn->address);
+            code_buffer << (uint16_t)0xb848;   // move input address to rax (opcode)
+            code_buffer << (void*)tn->address;
 #endif
 
             switch (tn->numeric_data_type) {
 #ifdef MEXCE_64
                 // On x64, variable addresses are already supplied in rax.
-                case M32FP:   write_to_stream(code_buffer, uint16_t(0x00d9)); break;
-                case M64FP:   write_to_stream(code_buffer, uint16_t(0x00dd)); break;
-                case M16INT:  write_to_stream(code_buffer, uint16_t(0x00df)); break;
-                case M32INT:  write_to_stream(code_buffer, uint16_t(0x00db)); break;
-                case M64INT:  write_to_stream(code_buffer, uint16_t(0x28df)); break;
+                case M32FP:   code_buffer < 0xd9 < 0x00; break;
+                case M64FP:   code_buffer < 0xdd < 0x00; break;
+                case M16INT:  code_buffer < 0xdf < 0x00; break;
+                case M32INT:  code_buffer < 0xdb < 0x00; break;
+                case M64INT:  code_buffer < 0xdf < 0x28; break;
 #else
                 // On 32-bit x86, variable addresses are explicitly specified.
-                case M32FP:   write_to_stream(code_buffer, uint16_t(0x05d9)); break;
-                case M64FP:   write_to_stream(code_buffer, uint16_t(0x05dd)); break;
-                case M16INT:  write_to_stream(code_buffer, uint16_t(0x05df)); break;
-                case M32INT:  write_to_stream(code_buffer, uint16_t(0x05db)); break;
-                case M64INT:  write_to_stream(code_buffer, uint16_t(0x2ddf)); break;
+                case M32FP:   code_buffer < 0xd9 < 0x05; break;
+                case M64FP:   code_buffer < 0xdd < 0x05; break;
+                case M16INT:  code_buffer < 0xdf < 0x05; break;
+                case M32INT:  code_buffer < 0xdb < 0x05; break;
+                case M64INT:  code_buffer < 0xdf < 0x2d; break;
 #endif
             }
 
 #ifndef MEXCE_64
-            //code_buffer.write((const char*)tn->address, 4);
-            write_to_stream(code_buffer, (void*)(tn->address));
+            code_buffer << (void*)(tn->address);
 #endif
         }
         else {
-            Function * tf = (Function *)*y;
+            Function * tf = (Function *) y->get();
 
             fpu_stack_size -= tf->num_args-1;
 
-            code_buffer.write((const char*)tf->code, tf->code_size);
+            code_buffer.s.write((const char*)tf->code, tf->code_size);
         }
     }
 
     // copy the return sequence
-    code_buffer.write((const char*)return_sequence, sizeof(return_sequence));
+    code_buffer.s.write((const char*)return_sequence, sizeof(return_sequence));
 
-    auto code = code_buffer.str();
+    auto code = code_buffer.s.str();
     auto buffer = get_executable_buffer(code.size());
     memcpy(buffer, &code[0], code.size());
 
