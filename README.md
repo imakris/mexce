@@ -45,7 +45,7 @@ wv[0] = eval.evaluate(); //Now it will return 0
 Apparently, mexce is quite fast.
 Here is how it compares in the [math-parser-benchmark-project](https://github.com/ArashPartow/math-parser-benchmark-project) on an AMD Zen2:
 
-Scores:
+
 | #   | Parser               |  Type        |   Points  |Score  |Failures
   ----|----------------------|--------------|-----------|-------|--------
   00  | ExprTk               |  double      |     2689  |  100  |  0
@@ -62,6 +62,8 @@ Scores:
   11  | MTParser             |  double      |      906  |   30  |  9
   12  | Lepton               |  double      |      458  |    9  |  4
   13  | muparserx            |  double      |      236  |    5  |  0
+
+Full results [here](https://github.com/imakris/mexce/blob/master/bench_expr_all_results.txt)
 
 ## License
 
