@@ -2,9 +2,8 @@
 // Mini Expression Compiler/Evaluator
 // ==================================
 //
-// 14.09.2003 [updated 21.8.2020]
 // mexce.h
-// Ioannis Makris
+// Author: Ioannis Makris
 //
 // mexce can compile and evaluate a mathematical expression at runtime.
 // The generated machine code will mostly use the FPU.
@@ -12,46 +11,42 @@
 // An example:
 // -----------
 //
-// float   x = 0.0f;
-// double  y = 0.1;
-// int     z = 200;
-// double  wv[200];
-//
+// float   x  = 0.0f;
+// double  y  = 0.1;
+// int     z  = 200;
+// 
 // mexce::evaluator eval;
+// 
 // eval.bind(x, "x");
 // eval.bind(y, "y");
-// eval.bind(z, "x");   // This will return false and will have no effect.
-//                      // That is because an "x" is already bound.
 // eval.bind(z, "z");
-//
-// eval.assign_expression("0.3+(-sin(2.33+x-log((.3*pi+(88/y)/e),3.2+z)))/98");
-//
-// for (int i = 0; i < 200; i++, x-=0.1f, y+=0.212, z+=2) {
-//     wv[i] = eval.evaluate(); // results will be different, depending on x, y, z
+// 
+// eval.assign_expression("0.3+(-sin(2.33+x-logb((.3*pi+(88/y)/e),3.2+z)))/98");
+// 
+// cout << endl << "Evaluation results:" << endl;
+// for (int i = 0; i < 10; i++, x-=0.1f, y+=0.212, z+=2) {
+//     cout << "  " << eval.evaluate() << endl; // evaluation will use bound variables x, y and z
 // }
-//
-// eval.unbind("x");    // releasing a committed variable which is contained in the
-//                      // assigned expression will automatically invalidate the
-//                      // expression.
-//
-// wv[0] = eval.evaluate(); // Now it will return 0
 //
 
 #ifndef MEXCE_INCLUDED
 #define MEXCE_INCLUDED
 
+#include <algorithm>
 #include <cassert>
 #include <cinttypes>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <iomanip>
 #include <list>
+#include <map>
+#include <memory>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
-#include <memory>
-#include <map>
-#include <cmath>
 
 
 #if defined(_M_X64) || defined(__x86_64__)
@@ -70,13 +65,93 @@
 #endif
 
 
-// adjust, if functions with more than 2 arguments are introduced
-#ifndef MEXCE_NUM_FUNCTION_ARGS_MAX
-#define MEXCE_NUM_FUNCTION_ARGS_MAX 2
-#endif
-
 
 namespace mexce {
+
+
+class evaluator;
+
+
+namespace impl {
+
+    struct Element;
+    struct Value;
+    struct Constant;
+    struct Variable;
+    struct Function;
+    struct mexce_charstream;
+
+    using std::abs;
+    using std::deque;
+    using std::exception;
+    using std::get;
+    using std::list;
+    using std::logic_error;
+    using std::make_pair;
+    using std::make_shared;
+    using std::make_tuple;
+    using std::map;
+    using std::next;
+    using std::pair;
+    using std::shared_ptr;
+    using std::static_pointer_cast;
+    using std::string;
+    using std::stringstream;
+    using std::vector;
+
+    using constant_map_t    = map<string, shared_ptr<Constant> >;
+    using variable_map_t    = map<string, shared_ptr<Variable> >;
+    using elist_t           = list<shared_ptr<Element> >;
+    using elist_it_t        = elist_t::iterator;
+    using elist_const_it_t  = elist_t::const_iterator;
+
+    std::shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v);
+    uint8_t* push_intermediate_code(evaluator* ev, const std::string& s);
+}
+
+
+
+class evaluator
+{
+public:
+
+    evaluator();
+    ~evaluator();
+
+    template <typename T>
+    void bind(T& v, const std::string& s);
+
+    void unbind(const std::string&);
+    void assign_expression(std::string);
+    double evaluate();
+
+private:
+
+    bool                    is_constant_expression      = false;
+    double                  constant_expression_value   = 0.0;
+    size_t                  m_buffer_size               = 0;
+    std::string             m_expression;
+    impl::elist_t           m_elist;
+    std::list<std::string>  m_intermediate_code;
+    impl::constant_map_t    m_intermediate_constants;  // produced during expression simplification
+    impl::variable_map_t    m_variables;
+    impl::constant_map_t    m_constants;
+
+    double                (*evaluate_fptr)();
+
+#ifdef MEXCE_64
+    volatile double         m_x64_return_var;
+#endif
+
+    void compile_and_finalize_elist(impl::elist_it_t first, impl::elist_it_t last);
+
+    friend
+    std::shared_ptr<impl::Constant> impl::make_intermediate_constant(evaluator* ev, double v);
+
+    friend
+    uint8_t* impl::push_intermediate_code(evaluator* ev, const std::string& s);
+};
+
 
 
 class mexce_parsing_exception: public std::exception
@@ -91,61 +166,10 @@ public:
     virtual const char* what() const throw() { return m_message.c_str(); }
 
 protected:
-    std::string  m_message;
-    size_t       m_position;
+    std::string             m_message;
+    size_t                  m_position;
 };
 
-
-namespace impl {
-     struct Value;
-     struct Constant;
-     struct Variable;
-     struct Function;
-     struct Element;
-
-     using elist_t = std::list<std::shared_ptr<impl::Element> >;
-     using elist_it_t = elist_t::iterator;
-
-}
-
-
-class evaluator
-{
-public:
-    evaluator();
-    ~evaluator();
-
-    template <typename T>
-    bool bind(T& v, const std::string& s);
-
-    bool unbind(const std::string&);
-    bool assign_expression(std::string);
-
-    double (* evaluate)();
-
-private:
-
-#ifdef MEXCE_64
-    volatile double             m_x64_return_var;
-#endif
-
-    size_t                      m_buffer_size;
-    std::string                 m_expression;
-
-    using constant_map_t = std::map<std::string, std::shared_ptr<impl::Constant> >;
-    using variable_map_t = std::map<std::string, std::shared_ptr<impl::Variable> >;
-    constant_map_t   m_literals;             // e.g. '5.88'
-    constant_map_t   m_constants;            // e.g. pi (for now it's only pi and e)
-    variable_map_t   m_variables;
-
-    std::list<std::shared_ptr<impl::Constant>>   m_intermediate_constants;
-
-    void compile_elist(impl::elist_it_t first, impl::elist_it_t last);
-
-public:
-    std::list< std::string >    m_intermediate;
-
-};
 
 
 namespace impl {
@@ -241,40 +265,55 @@ enum Token_type
 };
 
 
-using std::list;
-using std::string;
+
+inline
+string double_to_hex( double v )
+{
+    uint64_t* u64p = (uint64_t*)&v;
+
+    stringstream stream;
+    stream << "0x" 
+        << std::setfill ('0') << std::setw(sizeof(*u64p)*2) 
+        << std::hex << *u64p;
+    return stream.str();
+}
+
 
 
 struct Element
 {
-    uint8_t element_type;
-    Element(uint8_t ct): element_type(ct) {}
+    Element_type element_type;
+    Element(Element_type ct): element_type(ct) {}
 };
 
 
 struct Value: public Element
 {
-    volatile void* address;
-    uint8_t        numeric_data_type;
-    string         name;
+    volatile void*          address;
+    Numeric_data_type       numeric_data_type;
+    string                  name;
 
-    Value(volatile void *address, uint8_t numeric_data_type, uint8_t element_type, string name):
-        Element               ( element_type      ),
-        address               ( address           ),
-        numeric_data_type     ( numeric_data_type ),
-        name                  ( name              ) {}
+    Value(volatile void *   address,
+        Numeric_data_type   numeric_data_type,
+        Element_type        element_type,
+        string              name)
+    :
+        Element             ( element_type      ),
+        address             ( address           ),
+        numeric_data_type   ( numeric_data_type ),
+        name                ( name              ) {}
 };
 
 
 struct Constant: public Value
 {
-    Constant(string num, string name = ""):
+    Constant(string num, string name):
         Value( (volatile void *) &internal_constant, M64FP, CCONST, name),
         internal_constant(atof(num.data()))
     {}
 
     Constant(double num):
-        Value( (volatile void *) &internal_constant, M64FP, CCONST, ""),
+        Value( (volatile void *) &internal_constant, M64FP, CCONST, double_to_hex(num)),
         internal_constant(num)
     {}
 
@@ -290,9 +329,9 @@ struct Constant: public Value
             case M16INT: return (double)*((int16_t*)address);
             case M32INT: return (double)*((int32_t*)address);
             case M64INT: return (double)*((int64_t*)address);
-            case M32FP:  return (double)*((float*)address);
-            case M64FP:  return         *((double*)address);
-            default: assert(false);
+            case M32FP:  return (double)*((float*  )address);
+            case M64FP:  return         *((double* )address);
+            default: return 0.0;
         }
     }
 
@@ -305,48 +344,50 @@ struct Variable: public Value
 {
     bool referenced;
 
-    Variable(volatile void * addr, string name, int numFormat):
-        Value(addr, numFormat, CVAR, name), referenced(false)
+    Variable(volatile void * addr, string name, Numeric_data_type numeric_data_type):
+        Value(addr, numeric_data_type, CVAR, name), referenced(false)
     {}
 };
 
 
 struct Function: public Element
 {
-    using optimizer_t = std::shared_ptr<Function> (*)(std::shared_ptr<Function>, evaluator*, elist_t*);
+    using optimizer_t = void (*)(elist_it_t, evaluator*, elist_t*);
 
-    uint8_t         stack_req;
-    size_t          code_size;
-    const char*     name;
-    size_t          num_args;
-    elist_it_t      args[MEXCE_NUM_FUNCTION_ARGS_MAX];
-    uint8_t*        code;
-    optimizer_t     optimizer;
-    bool            var_ref;   // true if the function's code has a direct reference
-                               // to an external variable. This may only happen if the
-                               // function is optimized.
+    size_t              stack_req;
+    string              name;
+    size_t              num_args;
+    
+    vector<elist_it_t>  args;
+    elist_it_t          parent;
+    size_t              parent_arg_index = ~0; // index in postfix order (inverted), i.e. arg1-arg0
+
+    list<elist_t>       absorbed[2];
+
+    string              code;
+    optimizer_t         optimizer;
+
+    bool                force_not_constant = false;
 
     Function(
-        const char* name,
-        uint8_t     num_args,
-        uint8_t     sreq,
+        const string& name,
+        size_t      num_args,
+        size_t      sreq,
         size_t      size,
         uint8_t    *code_buffer,
-        optimizer_t optimizer = 0,
-        bool        var_ref = false)
+        optimizer_t optimizer = 0)
     :
-        Element   ( CFUNC       ),
-        stack_req ( sreq        ),
-        code_size ( size        ),
-        name      ( name        ),
-        num_args  ( num_args    ),
-        code      ( code_buffer ),
-        optimizer ( optimizer   ),
-        var_ref   ( var_ref     ) {}
+        Element   ( CFUNC                        ),
+        stack_req ( sreq                         ),
+        name      ( name                         ),
+        num_args  ( num_args                     ),
+        args      ( vector<elist_it_t>(num_args) ),
+        code      ( (char*)code_buffer, size     ),
+        optimizer ( optimizer                    ) {}
 };
 
 
-struct mexce_charstream { std::stringstream s; };
+struct mexce_charstream { stringstream s; };
 
 template<typename T>
 mexce_charstream& operator << (mexce_charstream &s, T data) {
@@ -362,20 +403,67 @@ mexce_charstream& operator < (mexce_charstream &s, int v) {
 }
 
 
+
+inline
+shared_ptr<mexce::impl::Constant> make_intermediate_constant(evaluator* ev, double v)
+{
+    auto sc = make_shared<impl::Constant>(v);
+    auto it = ev->m_intermediate_constants.find(sc->name);
+    if (it == ev->m_intermediate_constants.end()) {
+        ev->m_intermediate_constants[sc->name] = sc;
+    }
+    else {
+        sc = it->second; // releases the constant we just created
+    }
+    return sc;
+}
+
+
+
+inline
+uint8_t* push_intermediate_code(evaluator* ev, const string& s)
+{
+    ev->m_intermediate_code.push_back(string());
+    ev->m_intermediate_code.back() = s;
+    return (uint8_t*)&ev->m_intermediate_code.back()[0];
+}
+
+
+
+inline
+void link_arguments(elist_t& elist)
+{
+    vector<elist_it_t > evec;
+    for (auto y = elist.begin(); y != elist.end(); y++) {
+        if ((*y)->element_type == CFUNC) {
+            auto f = static_pointer_cast<Function>(*y);
+            f->parent = elist.end();
+            for (size_t i = 0; i < f->num_args; i++) {
+                f->args[i] = evec.back();
+
+                if ((*f->args[i])->element_type == CFUNC) {
+                    auto cf = static_pointer_cast<Function>(*f->args[i]);
+                    cf->parent = y;
+                    cf->parent_arg_index = i; // postfix order (inverted)
+                }
+                evec.pop_back();
+            }
+        }
+        evec.push_back(y);
+    }
+}
+
+
 inline
 Token_type get_infix_rank(char infix_op)
 {
     switch (infix_op) {
-    case '<':
-        return INFIX_4;
-    case '+':
-    case '-':
-        return INFIX_3;
-    case '*':
-    case '/':
-        return INFIX_2;
-    case '^':
-        return INFIX_1;
+        case '<': return INFIX_4;
+        case '+':
+        case '-': return INFIX_3;
+        case '*':
+        case '/': return INFIX_2;
+        case '^': return INFIX_1;
     }
 
     assert(false);
@@ -480,97 +568,139 @@ inline Function Sqrt()
 
 
 inline
-std::shared_ptr<Function> pow_optimizer(std::shared_ptr<Function> f, evaluator* ev, elist_t* elist)
+void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
-    // If one of the two arguments is CCONST or CVAR (i.e. loaded from memory),
-    // it will be applied directly, thus dropping FPU stack requirements by 1.
+    auto f = static_pointer_cast<Function>(*it);
 
     if ((*f->args[0])->element_type == CCONST) {
-        auto v = std::static_pointer_cast<Constant>(*f->args[0]);
+        auto v = static_pointer_cast<Constant>(*f->args[0]);
 
         double v_d = v->get_data_as_double();
         double r_d = round(v_d);
         double a_d = abs(v_d);
-        if (r_d == v_d && a_d <= 32.0) {
-            mexce_charstream s;
 
-            if (v_d == 0.0) {
-                s < 0xdd < 0xd8     // fstp st(0)
-                  < 0xd9 < 0xe8;    // fld1
+        bool matched = true;
+        mexce_charstream s;
+
+        // a special case, that the exponent is 0.5
+        if (v_d == 0.5) {
+            s < 0xd9 < 0xfa;                // fsqrt
+        }
+        else
+        if (r_d == v_d && a_d <= 65536.0) {
+
+            // find the closest power of two
+            uint32_t npo2 = (uint32_t)a_d;
+            npo2--;
+            npo2 |= npo2 >> 1;
+            npo2 |= npo2 >> 2;
+            npo2 |= npo2 >> 4;
+            npo2 |= npo2 >> 8;
+            npo2 |= npo2 >> 16;
+            npo2++;
+            npo2>>=1;
+
+            double diff_high = npo2*2 - a_d;
+            double diff_low  = a_d - npo2;
+
+            if (a_d == 0.0) {
+                s < 0xdd < 0xd8             // fstp st(0)
+                  < 0xd9 < 0xe8;            // fld1
             }
             else
-            if (v_d == 1.0) {
+            if (a_d == 1.0) {
                 // do nothing
             }
             else
-            if (v_d == 2.0) {
-                s < 0xdc < 0xc8;    // fmul st(0)
-            }
-            else
-            if (v_d == 3.0) {
-                s < 0xd9 < 0xc0     // fld  st(0)
-                  < 0xdc < 0xc8     // fmul st(0)
-                  < 0xde < 0xc9;    // fmulpst(1), st(0)
-            }
-            else
-            if (v_d == 4.0) {
-                s < 0xdc < 0xc8 < 0xdc < 0xc8;
-            }
-            else
-            if (v_d == 5.0) {
-                s < 0xd9 < 0xc0     // fld  st(0)
-                  < 0xdc < 0xc8 < 0xdc < 0xc8
-                  < 0xde < 0xc9;    // fmulp st(1), st(0)
-            }
-            else
-            if (v_d == 6.0) {
-                s < 0xd9 < 0xc0     // fld  st(0)
-                  < 0xdc < 0xc8 < 0xdc < 0xc8
-                  < 0xd8 < 0xc9     // fmul  st(0), st(1)
-                  < 0xde < 0xc9;    // fmulp st(1), st(0)
-            }
-            else
-            if (v_d == 7.0) {
-                s < 0xd9 < 0xc0     // fld  st(0)
-                  < 0xdc < 0xc8 < 0xdc < 0xc8
-                  < 0xd8 < 0xc9     // fmul  st(0), st(1)
-                  < 0xd8 < 0xc9     // fmul  st(0), st(1)
-                  < 0xde < 0xc9;    // fmulp st(1), st(0)
-            }
-            else
-            if (v_d == 8.0) {
-                s < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8;
-            }
-            else
-            if (v_d == 16.0) {
-                s < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8;
-            }
-            else
-            if (v_d == 32.0) {
-                s < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8 < 0xdc < 0xc8;
+            if (diff_high < 28 &&  diff_low < 28) {
+                if (diff_high && diff_low) {
+                    // the exponent is not an exact po2, thus we will have to multiply
+                    // or divide to get to the result, thus we keep the base in st(1)
+                    s < 0xd9 < 0xc0;        // fld  st(0)
+                }
+                while (npo2 >>= 1) {        // multiply to reach npo2
+                    s < 0xdc < 0xc8;        // fmul st(0)
+                }
+
+                if (diff_high < diff_low) {
+                    s < 0xdc < 0xc8;        // fmul st(0)
+
+                    // divide as many times as the difference
+                    // and then get rid of the temporary
+                    if (diff_high > 0.0) {
+                        while (--diff_high) {
+                            s < 0xd8 < 0xf1;    // fdivr  st(0), st(1)
+                        }
+                        s < 0xde < 0xf1;        // fdivrp st(1), st(0)
+                    }
+                }
+                else {
+                    // multiply as many times as the difference
+                    // and then get rid of the temporary
+                    if (diff_low > 0) {
+                        while (--diff_low) {
+                            s < 0xd8 < 0xc9;    // fmul  st(0), st(1)
+                        }
+                        s < 0xde < 0xc9;        // fmulp st(1), st(0)
+                    }
+                }
+
+                if (diff_high &&  diff_low) {
+                    // now we get rid of the temporary we used earlier
+                    s < 0xde < 0xc9;            // fmulpst(1), st(0)
+                }
             }
             else {
-                return f;
+                matched = false;
             }
 
-            if (a_d < 0) {
-                s < 0xd9 < 0xe8     // fld1
-                  < 0xde < 0xf1;    // fdivrp  st(1),st   // inverse
+            if (matched && v_d < 0) {
+                s < 0xd9 < 0xe8                 // fld1
+                  < 0xde < 0xf1;                // fdivrp  st(1),st   // inverse
             }
-
-            ev->m_intermediate.push_back(std::string());
-            ev->m_intermediate.back() = s.s.str();
-            uint8_t* cc = (uint8_t*)&ev->m_intermediate.back()[0];
-
-            auto f_opt = std::make_shared<Function>("", 1, 0, ev->m_intermediate.back().size(), cc, nullptr);
-            f_opt->args[0] = f->args[1];
-
-            elist->erase(f->args[0]);
-
-            return f_opt;
         }
+        else {
+            matched = false;
+        }
+
+        if (!matched) {
+            // this is almost the generic pow, except that it does not try to figure out
+            // if the exponent is an integer
+
+            s < 0xd9 < 0xc9                         // fxch                                 }
+              < 0xd9 < 0xe4                         // ftst                                 }
+              < 0x9b                                // wait                                 } if base is 0, leave it in st(0)
+              < 0xdf < 0xe0                         // fnstsw      ax                       } and exit
+              < 0x9e                                // sahf                                 }
+              < 0x74 < 0x14                         // je          store_and_exit           }
+              < 0xd9 < 0xe1                         // fabs
+              < 0xd9 < 0xf1                         // fyl2x                                }
+              < 0xd9 < 0xe8                         // fld1                                 }
+              < 0xd9 < 0xc1                         // fld         st(1)                    }
+              < 0xd9 < 0xf8                         // fprem                                } b^n = 2^(n*log2(b))
+              < 0xd9 < 0xf0                         // f2xm1                                }
+              < 0xde < 0xc1                         // faddp       st(1), st                }
+              < 0xd9 < 0xfd                         // fscale                               }
+              < 0x77 < 0x02                         // ja          store_and_exit
+              < 0xd9 < 0xe0                         // fchs
+// store_and_exit:
+              < 0xdd < 0xd9;                        // fstp        st(1)
+        }
+
+
+        uint8_t* cc = push_intermediate_code(ev, s.s.str());
+        auto f_opt = make_shared<Function>("pow_opt", 2-matched, 0, s.s.str().size(), cc, nullptr);
+
+        if (matched) {
+            f_opt->args[0] = f->args[1];
+            elist->erase(f->args[0]);
+        }
+        else {
+            f_opt->args[0] = f->args[0];
+            f_opt->args[1] = f->args[1];
+        }
+        *it = f_opt;
     }
-    return f;
 }
 
 
@@ -657,20 +787,20 @@ inline Function Exp()
 }
 
 
-//inline Function Log()  // old implementation, with base
-//{
-//    static uint8_t code[]  =  {
-//        0xd9, 0xe8,                                 // fld1
-//        0xd9, 0xc9,                                 // fxch        st(1)
-//        0xd9, 0xf1,                                 // fyl2x
-//        0xd9, 0xc9,                                 // fxch        st(1)
-//        0xd9, 0xe8,                                 // fld1
-//        0xd9, 0xc9,                                 // fxch        st(1)
-//        0xd9, 0xf1,                                 // fyl2x
-//        0xde, 0xf9                                  // fdivp       st(1),st
-//    };
-//    return Function("log", 2, 1, sizeof(code), code);
-//}
+inline Function Logb()  // implementation with base
+{
+    static uint8_t code[]  =  {
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xf1,                                 // fyl2x
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xf1,                                 // fyl2x
+        0xde, 0xf9                                  // fdivp       st(1),st
+    };
+    return Function("logb", 2, 1, sizeof(code), code);
+}
 
 
 inline Function Ln()
@@ -844,46 +974,593 @@ inline Function Bnd()
 }
 
 
-template <uint8_t OP0, uint8_t OP1 = OP0>
-std::shared_ptr<Function> asmd_optimizer(std::shared_ptr<Function> f, evaluator* ev, elist_t* elist)
+inline
+pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it)
 {
-    // If one of the two arguments is CCONST or CVAR (i.e. loaded from memory),
-    // it will be applied directly, thus dropping FPU stack requirements by 1.
+    auto it_end = next(it);
+    while ( (*it) ->element_type == CFUNC) {
+        shared_ptr<Function> f = static_pointer_cast<Function>( *it );
+        if (!f->args.size()) {
+            break;
+        }
+        it = f->args[f->args.size()-1];
+    }
+    return make_pair(it, it_end);
+}
 
-    for (int i=0; i<2; i++) {
-        if ((*f->args[i])->element_type == CCONST || (*f->args[i])->element_type == CVAR) {
-            auto v = std::static_pointer_cast<Value>(*f->args[i]);
 
-            uint8_t opcode = (i==0) ? OP0 : OP1;
+struct elist_comparison {
+    bool operator()(const elist_t& a, const elist_t& b) const {
 
-            mexce_charstream s;
-#ifdef MEXCE_64
-            s < 0x48 < 0xb8;                            // mov            rax, qword ptr
-#else
-            s < 0xb8;                                   // mov            eax, dword ptr
-#endif
-            s << v->address;                            //                   [the address]
-            switch(v->numeric_data_type) {
-                case M16INT: s < 0xde < opcode; break;  // (instruction)  word  ptr [eax/rax]  
-                case M32INT: s < 0xda < opcode; break;  // (instruction)  dword ptr [eax/rax]  
-                case M32FP:  s < 0xd8 < opcode; break;  // (instruction)  dword ptr [eax/rax]
-                case M64FP:  s < 0xdc < opcode; break;  // (instruction)  qword ptr [eax/rax]
+        // empty element lists cannot exist
+        assert(a.size() && b.size());
+
+        // if their size differs, we use that for comparison
+        if (a.size() != b.size()) {
+            return a.size() > b.size();
+        }
+
+        // they are the same size, thus we need to traverse both
+        auto ita = a.begin();
+        auto itb = b.begin();
+        for (; ita != a.end(); ita++, itb++) {
+            // start by comparing element types
+            if ((*ita)->element_type != (*itb)->element_type) {
+                return (*ita)->element_type > (*itb)->element_type;
             }
 
-            ev->m_intermediate.push_back(std::string());
-            ev->m_intermediate.back() = s.s.str();
-            uint8_t* cc = (uint8_t*)&ev->m_intermediate.back()[0];
-            bool var_ref = (*f->args[i])->element_type == CVAR;
+            // if they are constants, we compare the values
+            if ((*ita)->element_type == CCONST) {
+                double da = static_pointer_cast<Constant>(*ita)->get_data_as_double();
+                double db = static_pointer_cast<Constant>(*itb)->get_data_as_double();
+                if (da != da && db != db) { // i.e. if both of them are NaN
+                    // not all NaNs are the same, we compare binary
+                    auto mcr = memcmp(&da, &db, sizeof(double));
+                    if (mcr != 0) {
+                        return mcr < 0;
+                    }
+                }
+                else
+                if (da != db) {
+                    return da < db;
+                }
+                continue; // it is the same... move on
+            }
 
-            auto f_opt = std::make_shared<Function>("", 1, 0, ev->m_intermediate.back().size(), cc, nullptr, var_ref);
-            f_opt->args[0] = f->args[(int)(i==0)];
+            // if they are variables, we compare addresses
+            if ((*ita)->element_type == CVAR) {
+                volatile void* aa = static_pointer_cast<Variable>(*ita)->address;
+                volatile void* ab = static_pointer_cast<Variable>(*itb)->address;
+                if (aa != ab) {
+                    return aa < ab;
+                }
+                continue; // it is the same... move on
+            }
 
-            elist->erase(f->args[i]);
+            // if they are functions, we compare their code
+            if ((*ita)->element_type == CFUNC) {
+                string fna = static_pointer_cast<Function>(*ita)->code;
+                string fnb = static_pointer_cast<Function>(*itb)->code;
 
-            return f_opt;
+                if (fna != fnb) {
+                    return fna < fnb;
+                }
+                continue; // it is the same... move on [this one is not really required]
+            }
+        }
+
+        return false; // they are equal
+    }
+};
+
+
+
+template <uint8_t OP>
+void emit_apply_op_with_value(impl::mexce_charstream& s, shared_ptr<impl::Value> v)
+{
+    using namespace impl;
+#ifdef MEXCE_64
+    s < 0x48 < 0xb8;                        // mov            rax, qword ptr
+#else
+    s < 0xb8;                               // mov            eax, dword ptr
+#endif
+    s << v->address;                        //                   [the address]
+    switch(v->numeric_data_type) {
+        case M16INT: s < 0xde < OP; break;  // f[OP]  word  ptr [eax/rax]  
+        case M32INT: s < 0xda < OP; break;  // f[OP]  dword ptr [eax/rax]  
+        case M32FP:  s < 0xd8 < OP; break;  // f[OP]  dword ptr [eax/rax]
+        case M64FP:  s < 0xdc < OP; break;  // f[OP]  qword ptr [eax/rax]
+
+        // the FPU has limited support for 64-bit integers and M64INT cannot be supported here
+        default: assert(false);
+    }
+}
+
+
+template <uint8_t OP>
+void emit_apply_op_with_constant(evaluator* ev, impl::mexce_charstream& s, double v)
+{
+    emit_apply_op_with_value<OP>(s, impl::make_intermediate_constant(ev, v));
+}
+
+
+
+inline
+void emit_load_constant(evaluator* ev, impl::mexce_charstream& s, double v)
+{
+    using namespace impl;
+
+    double av = abs(v);
+    bool hit = false;
+
+    if (av == 0.0)                         { s < 0xd9 < 0xee; hit = true; } else  // fldz
+    if (av == 1.0)                         { s < 0xd9 < 0xe8; hit = true; } else  // fld1
+    if (av == 3.1415926535897932384626433) { s < 0xd9 < 0xeb; hit = true; } else  // fldpi
+    if (av == 3.32192809488736234787)      { s < 0xd9 < 0xe9; hit = true; } else  // fldl2t
+    if (av == 1.44269504088896340736)      { s < 0xd9 < 0xea; hit = true; } else  // fldl2e
+    if (av == 0.3010299956639811952137)    { s < 0xd9 < 0xec; hit = true; } else  // fldlg2
+    if (av == 0.6931471805599453094172)    { s < 0xd9 < 0xed; hit = true; }       // fldln2
+
+    if (hit) {
+        if (v < 0) {
+            s < 0xd9 < 0xe0;  // fchs
+        }
+        return;
+    }
+
+    auto sc = make_intermediate_constant(ev, v);
+
+#ifdef MEXCE_64
+    s < 0x48 < 0xb8;                            // mov            rax, qword ptr
+    s << (void*)(sc->address);
+    s < 0xdd < 0x00;                            // fld            [rax]
+#else
+    s < 0xdd < 0x05;                            // fld            [immediate address]
+    s << (void*)(sc->address);
+#endif
+}
+
+
+
+inline
+void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last)
+{
+    using namespace impl;
+
+    elist_const_it_t it = first;
+
+    for (; it != last; it++) {
+        if ((*it)->element_type == CVAR  ||
+            (*it)->element_type == CCONST)
+        {
+            Value * tn = (Value *) it->get();
+
+#ifdef MEXCE_64
+            code_buffer << (uint16_t)0xb848;   // move input address to rax (opcode)
+            code_buffer << (void*)tn->address;
+#endif
+
+            switch (tn->numeric_data_type) {
+#ifdef MEXCE_64
+                // On x64, variable addresses are already supplied in rax.
+                case M32FP:   code_buffer < 0xd9 < 0x00; break;
+                case M64FP:   code_buffer < 0xdd < 0x00; break;
+                case M16INT:  code_buffer < 0xdf < 0x00; break;
+                case M32INT:  code_buffer < 0xdb < 0x00; break;
+                case M64INT:  code_buffer < 0xdf < 0x28; break;
+#else
+                // On 32-bit x86, variable addresses are explicitly specified.
+                case M32FP:   code_buffer < 0xd9 < 0x05; break;
+                case M64FP:   code_buffer < 0xdd < 0x05; break;
+                case M16INT:  code_buffer < 0xdf < 0x05; break;
+                case M32INT:  code_buffer < 0xdb < 0x05; break;
+                case M64INT:  code_buffer < 0xdf < 0x2d; break;
+#endif
+            }
+
+#ifndef MEXCE_64
+            code_buffer << (void*)(tn->address);
+#endif
+        }
+        else {
+            Function * tf = (Function *) it->get();
+            code_buffer.s.write(tf->code.data(), tf->code.size());
         }
     }
-    return f;
+}
+
+
+
+inline shared_ptr<Function> make_function(const string& name);
+
+
+inline string infix_operator_to_function_name(const string& op)
+{
+    static map<string, string> op_map = {
+        { "+", "add" },
+        { "-", "sub" },
+        { "*", "mul" },
+        { "/", "div" },
+        { "^", "pow" },
+        { "<", "less_than" }
+    };
+    auto it = op_map.find(op);
+    assert(it != op_map.end());
+    return it->second;
+}
+
+
+inline string function_name_to_infix_operator(const string& fn)
+{
+    static map<string, string> op_map = {
+        { "add", "+" },
+        { "sub", "-" },
+        { "mul", "*" },
+        { "div", "/" },
+        { "pow", "^" },
+        { "less_than", "<" }
+    };
+    auto it = op_map.find(fn);
+    if (it == op_map.end()) {
+        return "";
+    }
+    return it->second;
+}
+
+
+inline string function_name_to_unary_operator(const string& fn)
+{
+    if (fn == "neg")
+        return "-";
+    return "";
+}
+
+
+inline
+string double_to_pretty_string(double v)
+{
+    stringstream ss;
+    ss << v;
+    return ss.str();
+}
+
+
+inline
+string elist_to_string(const elist_t& elist)
+{
+
+    deque<std::tuple<string, size_t, vector<string>>> st;
+
+    // root element appears as an unnamed function of 1 argument
+    st.push_back(make_tuple(string(), 2, vector<string>{""}));
+
+    for (auto it = elist.rbegin(); it != elist.rend(); it++) {
+        auto e = *it;
+        if (e->element_type == CFUNC) {
+            auto f = static_pointer_cast<Function>(e);
+            st.push_back(make_tuple(string(), f->args.size() + 1, vector<string>{f->name} ));
+        }
+        else
+        if (e->element_type == CCONST) {
+            auto c = static_pointer_cast<Constant>(e);
+            get<2>(st.back()).push_back( double_to_pretty_string(c->get_data_as_double()) );
+        }
+        else
+        if (e->element_type == CVAR) {
+            auto v = static_pointer_cast<Variable>(e);
+            get<2>(st.back()).push_back( v->name );
+        }
+
+        while ( get<2>(st.back()).size() ==  get<1>(st.back()) ) {
+            string& lrs = get<0>(st.back());
+            vector<string>& lrv = get<2>(st.back());
+
+            string symbolic_op;
+            if ( (get<1>(st.back()) == 2) && !(symbolic_op = function_name_to_unary_operator(lrv[0])).empty() ) {
+                lrs = string("(") + symbolic_op + lrv.back() + ")";
+            }
+            else
+            if ( (get<1>(st.back()) == 3) && !(symbolic_op = function_name_to_infix_operator(lrv[0])).empty() ) {
+                lrs = string("(") + lrv.back() + symbolic_op;
+                lrv.pop_back();
+                lrs += lrv.back() + ")";
+            }
+            else {
+                lrs += lrv[0] + "(";
+                if (lrv.size() != 1) {
+                    while (true) {
+                        lrs += lrv.back();
+                        lrv.pop_back();
+                        if (lrv.size() == 1) {
+                            break;
+                        }
+                        lrs += ", ";
+                    }
+                }
+                lrs += ")";
+            }
+
+            if (st.size()!=1) {
+                string tmp = lrs;
+                st.pop_back();
+                get<2>(st.back()).push_back(tmp);
+            }
+        }
+    }
+
+    assert(st.size() == 1);
+    string ret = get<0>(st.back());
+    return ret.substr(1, ret.size()-2);
+}
+
+
+inline
+void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
+{
+    auto f = static_pointer_cast<Function>(*it);
+    auto fname = string(f->name);
+    int fclass = (fname == "add" || fname == "sub") ? 1 : (fname == "mul" || fname == "div") ? 2 : 0;
+    assert(fclass);
+
+    double neutral = fclass==1 ? 0.0 : 1.0;
+
+
+    bool arg2_inv = (fname == "sub" || fname == "div");
+
+    if (f->parent != elist->end() &&  (*f->parent)->element_type == CFUNC) {
+        shared_ptr<Function> pf = static_pointer_cast<Function>(*f->parent);
+        auto pname = string(pf->name);
+        int pclass = (pname == "add" || pname == "sub") ? 1 : (pname == "mul" || pname == "div") ? 2 : 0;
+        bool parg2_inv = (pname == "sub" || pname == "div");
+
+        if (pclass && pclass == fclass) {
+
+            // the function will be absorbed by its parent
+
+            bool parent_inv_op = f->parent_arg_index == 0 && parg2_inv; // arg 0 in postfix, is the second infix argument
+
+            // this is the first infix argument (postfix order is inverse)
+            auto arg1_chunk = get_dependent_chunk(f->args[1]);
+            pf->absorbed[parent_inv_op           ].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
+            elist->erase(arg1_chunk.first, arg1_chunk.second);
+
+            // the second infix argument
+            auto arg0_chunk = get_dependent_chunk(f->args[0]);
+            pf->absorbed[parent_inv_op ^ arg2_inv].push_back(elist_t(arg0_chunk.first, arg0_chunk.second));
+            elist->erase(arg0_chunk.first, arg0_chunk.second);
+
+            pf->absorbed[ parent_inv_op].insert(pf->absorbed[ parent_inv_op].end(),
+                f->absorbed[0].begin(), f->absorbed[0].end() );
+            pf->absorbed[!parent_inv_op].insert(pf->absorbed[!parent_inv_op].end(),
+                f->absorbed[1].begin(), f->absorbed[1].end() );
+
+            pf->force_not_constant = true;
+
+            *it = make_shared<Constant>( neutral );
+
+            return;
+        }
+    }
+
+    // end of chain - simplify and generate code
+
+    // accumulate own args
+
+    // first infix argument
+    auto arg1_chunk = get_dependent_chunk(f->args[1]);
+    f->absorbed[0       ].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
+    elist->erase(arg1_chunk.first, arg1_chunk.second);
+
+    // second infix argument
+    auto arg0_chunk = get_dependent_chunk(f->args[0]);
+    f->absorbed[arg2_inv].push_back(elist_t(arg0_chunk.first, arg0_chunk.second));
+    elist->erase(arg0_chunk.first, arg0_chunk.second);
+
+    // at this point, this is a function of 0 arguments, all of them were absorbed
+    f->args.clear();
+
+    // reduce constants
+    double ac[2] = {neutral, neutral};
+    for (int i=0; i<2; i++) {
+        for (auto e = f->absorbed[i].begin(); e!=f->absorbed[i].end(); ) {
+            auto next_e = next(e);
+            if (e->size()==1 && e->front()->element_type == CCONST) {
+                auto v = static_pointer_cast<Constant>(e->front());
+                if (fclass==1) {
+                    ac[i] += *((double*)v->address);
+                }
+                else {
+                    ac[i] *= *((double*)v->address);
+                }
+                f->absorbed[i].erase(e);
+            }
+            e = next_e;
+        }
+    }
+    double ac_final = (fclass==1) ? (ac[0] -ac[1]) : (ac[0] * 1.0/ac[1]);
+
+    // sort and gather chunks
+    map<elist_t, int, elist_comparison> sig_map;
+    for (auto &e : f->absorbed[0]) { sig_map[e]++; }
+    for (auto &e : f->absorbed[1]) { sig_map[e]--; }
+
+    mexce_charstream s;
+
+    // TODO: assert that none of the values are constant
+
+    if (fclass==1) {    // NOTE: children can be mul/div, but they cannot be add/sub
+
+        bool constant_added = false;
+        bool fpu_stack_empty = true;
+
+        for (auto &e : sig_map) {
+
+            if (e.second == 0) {
+                // factor 0 in add_sum means 0*a and in multiplications
+                // it means a^0, in both of which cases it has no effect.
+                continue;
+            }
+
+            // if the stack is not empty and the elist is only one element and the
+            // factor in e.second is 1 or -1,
+            // we can multiply directly from memory, to save one place in the FPU
+            // stack. This is a tradeoff, as it might be slightly slower to do so.
+
+            if (!fpu_stack_empty && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0 &&
+                (e.first.front()->element_type == CCONST || e.first.front()->element_type == CVAR) )
+            {
+                auto v = static_pointer_cast<Value>(e.first.front());
+                if (v->numeric_data_type != M64INT) { // see emit_apply_op_with_value implementation
+                    if (e.second == 1) {
+                        emit_apply_op_with_value<0x00>(s, v);
+                    }
+                    else {
+                        emit_apply_op_with_value<0x20>(s, v);
+                    }
+                    continue;
+                }
+            }
+
+            compile_elist(s, e.first.begin(), e.first.end());
+            fpu_stack_empty = false;
+
+            if (e.second == 1) {
+                // 1*a == a
+                // we loaded the expression, there is nothing further to do                
+            }
+            else
+            if (e.second == -1) {
+                s < 0xd9 < 0xe0;  // fchs
+            }
+            else
+            if (e.second == 2) {
+                s < 0xd8 < 0xc0;  // fadd st(0), st(0)
+            }
+            else
+            if (e.second == -2) {
+                s < 0xd8 < 0xc0;  // fadd st(0), st(0)
+                s < 0xd9 < 0xe0;  // fchs
+            }
+            else {
+                emit_apply_op_with_constant<0x08>(ev, s, e.second);
+            }
+
+            if (!constant_added) {
+                // add the constant
+
+                // doing this here and not in the beginning requires one place
+                // less in the fpu stack (and 1 instruction less too)
+
+                if (ac_final != neutral) {
+                    emit_apply_op_with_constant<0x00>(ev, s, ac_final);
+                }
+                constant_added = true;
+            }
+            else {
+                s < 0xde < 0xc1;  // faddp       st(1), st
+            }
+        }
+
+        if (fpu_stack_empty) { // we did nothing, we should at least load a zero
+            s < 0xd9 < 0xee;   // fldz
+        }
+    }
+    else {
+        // NOTE: children can be powers, but they cannot be mul/div.
+        // They can also be add/sub, but this is not interesting for optimization.
+
+        bool constant_multiplied = false;
+        bool fpu_stack_empty = true;
+
+        for (auto &e : sig_map) {
+
+            if (e.second == 0) {
+                // factor 0 in add_sum means 0*a and in multiplications
+                // it means a^0, in both of which cases it has no effect.
+                continue;
+            }
+
+            // if the stack is not empty and the elist is only one element and the
+            // factor in e.second is 1 or -1,
+            // we can multiply directly from memory, to save one place in the FPU
+            // stack. This is a tradeoff, as it might be slightly slower to do so.
+
+            if (!fpu_stack_empty && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0 &&
+                (e.first.front()->element_type == CCONST || e.first.front()->element_type == CVAR) )
+            {
+                auto v = static_pointer_cast<Value>(e.first.front());
+                if (v->numeric_data_type != M64INT) { // see emit_apply_op_with_value implementation
+                    if (e.second == 1) {
+                        emit_apply_op_with_value<0x08>(s, v);
+                    }
+                    else {
+                        emit_apply_op_with_value<0x30>(s, v);
+                    }
+                    continue;
+                }
+            }
+
+            compile_elist(s, e.first.begin(), e.first.end());
+            fpu_stack_empty = false;
+
+            if (e.second == 1) {
+                // a^1 == a
+                // we loaded the expression, there is nothing further to do                
+            }
+            else
+            if (e.second == -1) {   //  1/a
+                s < 0xd9 < 0xe8;    // fld1
+                s < 0xde < 0xf1;    // fdivrp   st(1), st
+            }
+            else
+            if (e.second == 2) {    //  a*a
+                s < 0xdc < 0xc8;    // fmul st(0), st(0)
+            }
+            else
+            if (e.second == -2) {   //  1/(a*a)
+                s < 0xdc < 0xc8;    // fmul st(0), st(0)
+                s < 0xd9 < 0xe8;    // fld1
+                s < 0xde < 0xf1;    // fdivrp   st(1), st
+            }
+            else {
+                elist_t pow_list = e.first;
+                pow_list.push_back(make_intermediate_constant(ev, e.second));
+                auto pow_f = make_function("pow");
+                pow_list.push_back(pow_f);
+                link_arguments(pow_list);
+                pow_f->optimizer(prev(pow_list.end()), ev, &pow_list);
+
+                compile_elist(s, pow_list.begin(), pow_list.end());
+            }
+
+            if (!constant_multiplied) {
+                // add the constant
+
+                // doing this here and not in the beginning requires one place
+                // less in the fpu stack (and 1 instruction less too)
+
+                if (ac_final != neutral) {
+                    emit_apply_op_with_constant<0x08>(ev, s, ac_final);
+                }
+                constant_multiplied = true;
+            }
+            else {
+                s < 0xde < 0xc9;                       // fmulp       st(1), st
+            }
+        }
+
+        if (fpu_stack_empty) { // we did nothing, we should at least load 1
+            s < 0xd9 < 0xe8; 
+        }
+    }
+
+    string new_name = (fclass == 1) ? "add_sub_opt" : "mul_div_opt";
+
+    uint8_t* cc = push_intermediate_code(ev, s.s.str());
+    auto f_opt = make_shared<Function>(new_name, 0, 0, s.s.str().size(), cc, nullptr);
+    
+    *it = f_opt;
+    return;
 }
 
 
@@ -892,7 +1569,7 @@ inline Function Add()
     static uint8_t code[] = {
         0xde, 0xc1                                  // faddp       st(1), st
     };
-    return Function("add", 2, 0, sizeof(code), code, asmd_optimizer<0x00>);
+    return Function("add", 2, 0, sizeof(code), code, asmd_optimizer);
 }
 
 
@@ -901,7 +1578,7 @@ inline Function Sub()
     static uint8_t code[] = {
         0xde, 0xe9                                  // fsubp       st(1), st
     };
-    return Function("sub", 2, 0, sizeof(code), code, asmd_optimizer<0x20, 0x28>);
+    return Function("sub", 2, 0, sizeof(code), code, asmd_optimizer);
 }
 
 
@@ -910,7 +1587,7 @@ inline Function Mul()
     static uint8_t code[] = {
         0xde, 0xc9                                  // fmulp       st(1), st
     };
-    return Function("mul", 2, 0, sizeof(code), code, asmd_optimizer<0x08>);
+    return Function("mul", 2, 0, sizeof(code), code, asmd_optimizer);
 }
 
 
@@ -919,12 +1596,13 @@ inline Function Div()
     static uint8_t code[] = {
         0xde, 0xf9                                  // fdivp       st(1), st
     };
-    return Function("div", 2, 0, sizeof(code), code, asmd_optimizer<0x30, 0x38>);
+    return Function("div", 2, 0, sizeof(code), code, asmd_optimizer);
 }
 
 
 inline Function Neg()
 {
+    // TODO: this does not need its own internal name, it is a special case of add_sub
     static uint8_t code[] = {
         0xd9, 0xe0                                  // fchs
     };
@@ -996,49 +1674,54 @@ inline Function Bias()
 }
 
 
-inline const ::std::map<string, Function>& make_function_map()
+
+inline const map<string, Function>& make_function_map()
 {
     static Function f[] = {
         Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(), Less_than(),
-        Log(), Log2(), Ln(), Log10(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
+        Log(), Log2(), Ln(), Log10(), Logb(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
         Bnd(), Add(), Sub(), Neg(), Mul(), Div(), Bias(), Gain()
     };
 
-    static ::std::map<string, Function> ret;
+    static map<string, Function> ret;
     for (auto& e : f) {
-        if (e.name) {
-            assert(ret.find(e.name) == ret.end());
-            ret.insert(std::make_pair(e.name, e));
-        }
-
+        assert(ret.find(e.name) == ret.end()); //if it fails, some functions share the same name.
+        ret.insert(make_pair(e.name, e));
     }
     return ret;
 }
 
 
-inline const ::std::map<string, Function>& function_map()
+inline const map<string, Function>& function_map()
 {
-    static const ::std::map<string, Function>& name_set = make_function_map();
-    return name_set;
+    static const map<string, Function>& fname_map = make_function_map();
+    return fname_map;
 }
 
 
-inline std::shared_ptr<Function> make_function(const std::string& name) {
+inline shared_ptr<Function> make_function(const string& name) {
     auto fn = function_map().find(name);
-    return std::make_shared<Function>(fn->second);
+    return make_shared<Function>(fn->second);
+}
+
+
+inline const map<string, shared_ptr<Constant> >& built_in_constants_map()
+{
+    static const map<string, shared_ptr<Constant> > cname_map = {
+        { "pi", std::make_shared<impl::Constant>("3.141592653589793238462643383", "pi") },
+        { "e",  std::make_shared<impl::Constant>("2.718281828459045235360287471", "e" ) }
+    };
+    return cname_map;
 }
 
 
 struct Token
 {
-    int             type;
-    int             priority;
-    size_t          position;
+    int             type        = 0;
+    int             priority    = 0;
+    size_t          position    = 0;
     string          content;
-    Token():
-        type      ( 0 ),
-        priority  ( 0 ),
-        position  ( 0 ) {}
+    Token() = default;
     Token(int type, size_t position, char content):
         type      ( type               ),
         priority  ( type               ),
@@ -1060,33 +1743,13 @@ inline bool is_alphabetic(char c) { return (c>='A' && c<='Z') || (c>='a' && c<='
 inline bool is_numeric(   char c) { return  c>='0' && c<='9'; }
 
 
-inline const char* operator_to_function_name(const std::string& op, bool unary = false) {
-    if (!unary) {
-        if (op == "+") return "add";
-        if (op == "-") return "sub";
-        if (op == "*") return "mul";
-        if (op == "/") return "div";
-        if (op == "^") return "pow";
-        if (op == "<") return "less_than";
-    }
-    else {
-        if (op == "-") return "neg";
-    }
-    assert(false);
-    return 0;
-}
-
 } // mexce_impl
 
 
 inline
 evaluator::evaluator():
-    m_buffer_size(0)
+    m_constants(impl::built_in_constants_map())
 {
-    // register functions
-    using namespace impl;
-    m_constants["pi"] = (std::make_shared<Constant>("3.141592653589793238462643383", "pi"));
-    m_constants["e" ] = (std::make_shared<Constant>("2.718281828459045235360287471", "e" ));
     assign_expression("0");
 }
 
@@ -1094,72 +1757,86 @@ evaluator::evaluator():
 inline
 evaluator::~evaluator()
 {
-    impl::free_executable_buffer(evaluate, m_buffer_size);
+    impl::free_executable_buffer(evaluate_fptr, m_buffer_size);
 }
 
 
 template <typename T>
-bool evaluator::bind(T& v, const std::string& s)
+void evaluator::bind(T& v, const std::string& s)
 {
     using namespace impl;
-    if ((m_variables.find(s) == m_variables.end()) &&
-        (function_map().find(s) == function_map().end()))
-    {
-        m_variables[s] = std::make_shared<Variable>(&v, s, get_ndt<T>());
-        return true;
+    if (function_map().find(s) != function_map().end()) {
+        throw std::logic_error("Attempted to bind a variable, named as an existing function");
     }
-    return false;
+    if (built_in_constants_map().find(s) != built_in_constants_map().end()) {
+        throw std::logic_error("Attempted to bind a variable, named as an existing constant");
+    }
+    m_variables[s] = make_shared<Variable>(&v, s, get_ndt<T>());
 }
 
 
+
 inline
-bool evaluator::unbind(const std::string& s)
+void evaluator::unbind(const std::string& s)
 {
     if (s.length() == 0)
-         return false;
+        throw std::logic_error("Variable name was an empty string");
 
     auto it = m_variables.find(s);
     if (it != m_variables.end()) {
-        if (it->second->element_type != impl::CVAR)
-            return false;
+        assert(it->second->element_type == impl::CVAR);
         if (it->second->referenced) {
             assign_expression("0");
         }
         m_variables.erase(it);
-        return true;
+        return;
     }
-    return false;
+    throw std::logic_error("Attempted to unbind an unknown variable");
 }
 
 
+
 inline
-bool evaluator::assign_expression(std::string e)
+double evaluator::evaluate() {
+    if (is_constant_expression) {
+        return constant_expression_value;
+    }
+    return evaluate_fptr();
+}
+
+
+
+inline
+void evaluator::assign_expression(std::string e)
 {
     using namespace impl;
-    using std::list;
-    using std::string;
     using mpe = mexce_parsing_exception;
 
-    std::deque<Token> tokens;
+    deque<Token> tokens;
 
-    m_literals.clear();
     m_intermediate_constants.clear();
+    m_intermediate_code.clear();
+    m_elist.clear();
+
+    if (evaluate_fptr) {
+        free_executable_buffer(evaluate_fptr, m_buffer_size);
+        evaluate_fptr = nullptr;
+    }
 
     auto x = m_variables.begin();
     for (; x != m_variables.end(); x++)
         x->second->referenced = false;
 
     if (e.length() == 0){
-        assign_expression("0");
-        return true;
+        throw (std::logic_error("Expected an expression"));
     }
 
     e += ' ';
 
     //stage 1: checking expression syntax
     Token temp;
-    std::vector< std::pair<int, int> > bdarray(1);
-    std::map<string, Function>::const_iterator i_fnc;
+    vector< pair<int, int> > bdarray(1);
+    map<string, Function>::const_iterator i_fnc;
     int state = 0;
     size_t i = 0;
     int function_parentheses = 0;
@@ -1289,7 +1966,7 @@ bool evaluator::assign_expression(std::string e)
                         temp.type = FUNCTION_NAME;
                         tokens.push_back(temp);
                         tokens.push_back(Token(FUNCTION_LEFT_PARENTHESIS, i, '('));
-                        bdarray.push_back(std::make_pair(0, i_fnc->second.num_args));
+                        bdarray.push_back(make_pair(0, i_fnc->second.num_args));
                         function_parentheses++;
                         state = 6;
                     }
@@ -1329,7 +2006,7 @@ bool evaluator::assign_expression(std::string e)
                     temp.type = FUNCTION_NAME;
                     tokens.push_back(temp);
                     tokens.push_back(Token(FUNCTION_LEFT_PARENTHESIS, i, '('));
-                    bdarray.push_back(std::make_pair(0, i_fnc->second.num_args));
+                    bdarray.push_back(make_pair(0, i_fnc->second.num_args));
                     function_parentheses++;
                     state = 0;
                     break;
@@ -1418,8 +2095,8 @@ bool evaluator::assign_expression(std::string e)
     }
 
     //stage 2: transform expression to postfix
-    std::deque<Token> postfix;
-    std::vector<Token> tstack;
+    deque<Token> postfix;
+    vector<Token> tstack;
     while (!tokens.empty()) {
         temp = tokens.front();
         tokens.pop_front();
@@ -1455,7 +2132,6 @@ bool evaluator::assign_expression(std::string e)
                     postfix.push_back(tstack.back());
                     tstack.pop_back();
                 }
-                postfix.push_back(tstack.back());
                 tstack.pop_back();
                 break;
             case FUNCTION_RIGHT_PARENTHESIS:
@@ -1483,7 +2159,7 @@ bool evaluator::assign_expression(std::string e)
     }
 
     //stage 3: convert "Token" expression primitives to "Element *"
-    list< std::shared_ptr<Element> > elist;
+
     while (!postfix.empty()) {
         temp = postfix.front();
         postfix.pop_front();
@@ -1492,112 +2168,100 @@ bool evaluator::assign_expression(std::string e)
             case INFIX_3:
             case INFIX_2:
             case INFIX_1: {
-                auto name = operator_to_function_name(temp.content);
-                elist.push_back( make_function(name) );
+                auto name = infix_operator_to_function_name(temp.content);
+                m_elist.push_back( make_function(name) );
                 break;
             }
             case FUNCTION_NAME:
-                elist.push_back(make_function(temp.content));
+                m_elist.push_back(make_function(temp.content));
                 break;
             case UNARY:
                 if (temp.content == "-") { // unary '+' is ignored
-                    elist.push_back( make_function("neg") );
+
+                    // Rather than having an individual function for the unary minus
+                    // we insert a zero before the last argument (which is already in
+                    // the list), and use a subtraction instead.
+                    // The reason is to allow the optimizer to group
+                    // addition/subtraction chains. Clearly, this is a bit unorthodox
+                    // and could be done in the optimizer too, but the optimizer is
+                    // complex enough already.
+
+                    link_arguments(m_elist); 
+                    auto chunk = get_dependent_chunk(std::prev(m_elist.end()));
+                    m_elist.insert(chunk.first, make_intermediate_constant(this, 0.0));
+                    m_elist.push_back( make_function("sub") );
                 }
                 break;
             case NUMERIC_LITERAL: {
-                auto it = m_literals.find(temp.content);
-                if (it != m_literals.end()) {
-                    elist.push_back(it->second);
-                }
-                else {
-                    m_literals[temp.content] = std::make_shared<Constant>(temp.content, temp.content);
-                    elist.push_back(m_literals[temp.content]);
-                }
+                double c_value = atof(temp.content.c_str());
+                m_elist.push_back(make_intermediate_constant(this, c_value));
                 break;
             }
             case CONSTANT_NAME: {
-                elist.push_back(m_constants.find(temp.content)->second);
+                m_elist.push_back(m_constants.find(temp.content)->second);
                 break;
             }
             case VARIABLE_NAME: {
                 auto it = m_variables.find(temp.content);
                 assert(it != m_variables.end());
                 it->second->referenced = true;
-                elist.push_back(it->second);
+                m_elist.push_back(it->second);
                 break;
             }
         }
     }
 
     // link functions to their arguments (1)
-    std::vector< elist_it_t > evec;
-    for (auto y = elist.begin(); y != elist.end(); y++) {
-        if ((*y)->element_type == CFUNC) {
-            auto fp = std::static_pointer_cast<Function>(*y);
-            for (size_t i = 0; i < fp->num_args; i++) {
-                fp->args[i] = evec.back();
-                evec.pop_back();
-            }
-        }
-        evec.push_back(y);
-    }
-
-    // TODO: Rearrange chains of same level operators, so that dependents are last
-    // ...
+    link_arguments(m_elist);
 
     // choose more suitable functions, where applicable
-    for (auto y = elist.begin(); y != elist.end(); y++) {
+    for (auto y = m_elist.begin(); y != m_elist.end(); ) {
+        auto y_next = next(y);
         if ((*y)->element_type == CFUNC) {
-            auto fp = std::static_pointer_cast<Function>(*y);
-            if (fp->optimizer != 0) {
-                auto xx = fp->optimizer(fp, this, &elist);
-                *y = xx;
-            }
-        }
-    }
+            auto f = static_pointer_cast<Function>(*y);
 
-    assert(evec.size() == 1);
-
-    // precompute constant expressions
-    for (auto y = elist.begin(); y != elist.end(); y++) {
-        if ((*y)->element_type == CFUNC) {
-            // check if its dependents are const
-            auto yt = y;
-            Function* fp = (Function*)(y->get());
-
-            if (fp->var_ref) {
-                continue;
-            }
-
-            int dc = fp->num_args;
-            while (true) {
-                if (!(dc--)) {
-                    // the loop reached the end, it is a constant function
-                    auto ynext = std::next(y);
-                    compile_elist(yt, ynext);
-                    elist.erase(yt, ynext);
-                    auto ic = std::make_shared<Constant>(evaluate());
-                    m_intermediate_constants.push_back(ic);
-                    y = elist.insert(ynext, ic);
-                    
-                    
-                    break;
+            // eliminate constants
+            if (!f->force_not_constant) {
+                bool all_args_are_const = true;
+                for (size_t j = 0; j < f->num_args; j++) {
+                    if ((*f->args[j])->element_type != CCONST) {
+                        all_args_are_const = false;
+                        break;
+                    }
                 }
-                yt--;
-                if ((*yt)->element_type != CCONST) { // either CVAR, or non-const CFUNC
-                    break;
+                if (all_args_are_const) {
+                    elist_it_t first_arg_it = y;
+                    std::advance(first_arg_it, -(int64_t)f->num_args);
+                    compile_and_finalize_elist(first_arg_it, next(y));
+                    double res = evaluate_fptr();
+                    m_elist.erase(first_arg_it, y);
+                    *y = make_intermediate_constant(this, res);
+                    y = y_next;
+                    continue;
                 }
             }
+
+            if (f->optimizer != 0) {
+                f->optimizer(y, this, &m_elist);
+            }
         }
+        y = y_next;
     }
 
-    compile_elist(elist.begin(), elist.end());
-    return true;
+    is_constant_expression = m_elist.size()==1 && m_elist.back()->element_type == CCONST;
+    if (is_constant_expression) {
+        auto v = static_pointer_cast<Constant>(m_elist.back());
+        constant_expression_value = v->get_data_as_double();
+    }
+    else {
+        compile_and_finalize_elist(m_elist.begin(), m_elist.end());
+    }
 }
 
 
+
 inline
-void evaluator::compile_elist(impl::elist_it_t first, impl::elist_it_t last)
+void evaluator::compile_and_finalize_elist(impl::elist_it_t first, impl::elist_it_t last)
 {
     using namespace impl;
 
@@ -1618,85 +2282,35 @@ void evaluator::compile_elist(impl::elist_it_t first, impl::elist_it_t last)
         0xdd, 0x18,                                                 // fstp        qword ptr [rax]
 
         // load from the return value to xmm0
-        0xF3, 0x0F, 0x7E, 0x00,                                     // movq        xmm0, mmword ptr [rax]
+        0xf3, 0x0f, 0x7e, 0x00,                                     // movq        xmm0, mmword ptr [rax]
         0x58,                                                       // pop rax
 #endif
         0xc3                                                        // return
     };
 
-    mexce_charstream code_buffer;    
-    elist_it_t y = first;
+    mexce_charstream code_buffer;
 
 #ifdef MEXCE_64
     // On x64 we are using rax to fetch/store addresses
     code_buffer < 0x50; // push rax
-
 #endif
 
-    size_t fpu_stack_size = 0;
-
-    for (; y != last; y++) {
-        if ((*y)->element_type == CVAR  ||
-            (*y)->element_type == CCONST)
-        {
-            if (++fpu_stack_size > 8) {
-                // The caller is expected to supply this function with element lists
-                // that have been adjusted accordingly, to mitigate this problem.
-                // Therefore, this should be unreachable code.
-                //throw mexce_parsing_exception("FPU stack limit exceeded (internal error)", 0);
-            }
-
-            Value * tn = (Value *) y->get();
-
-#ifdef MEXCE_64
-            code_buffer << (uint16_t)0xb848;   // move input address to rax (opcode)
-            code_buffer << (void*)tn->address;
-#endif
-
-            switch (tn->numeric_data_type) {
-#ifdef MEXCE_64
-                // On x64, variable addresses are already supplied in rax.
-                case M32FP:   code_buffer < 0xd9 < 0x00; break;
-                case M64FP:   code_buffer < 0xdd < 0x00; break;
-                case M16INT:  code_buffer < 0xdf < 0x00; break;
-                case M32INT:  code_buffer < 0xdb < 0x00; break;
-                case M64INT:  code_buffer < 0xdf < 0x28; break;
-#else
-                // On 32-bit x86, variable addresses are explicitly specified.
-                case M32FP:   code_buffer < 0xd9 < 0x05; break;
-                case M64FP:   code_buffer < 0xdd < 0x05; break;
-                case M16INT:  code_buffer < 0xdf < 0x05; break;
-                case M32INT:  code_buffer < 0xdb < 0x05; break;
-                case M64INT:  code_buffer < 0xdf < 0x2d; break;
-#endif
-            }
-
-#ifndef MEXCE_64
-            code_buffer << (void*)(tn->address);
-#endif
-        }
-        else {
-            Function * tf = (Function *) y->get();
-
-            fpu_stack_size -= tf->num_args-1;
-
-            code_buffer.s.write((const char*)tf->code, tf->code_size);
-        }
-    }
+    compile_elist(code_buffer, first, last);
 
     // copy the return sequence
     code_buffer.s.write((const char*)return_sequence, sizeof(return_sequence));
 
     auto code = code_buffer.s.str();
-    auto buffer = get_executable_buffer(code.size());
-    memcpy(buffer, &code[0], code.size());
+    m_buffer_size = code.size();
+    auto buffer = get_executable_buffer(m_buffer_size);
+    memcpy(buffer, &code[0], m_buffer_size);
 
 #ifdef MEXCE_64
     // load the intermediate variable's address to rax
     *((uint64_t*)(buffer+code.size()-16)) = (uint64_t)&m_x64_return_var;
 #endif
 
-    evaluate = lock_executable_buffer(buffer, code.size());
+    evaluate_fptr = lock_executable_buffer(buffer, code.size());
 }
 
 } // mexce
