@@ -647,7 +647,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
                 if (diff_high &&  diff_low) {
                     // now we get rid of the temporary we used earlier
-                    s < 0xde < 0xc9;            // fmulpst(1), st(0)
+                    s < 0xde < 0xc9;            // fmulp st(1), st(0)
                 }
             }
             else {
@@ -737,20 +737,28 @@ inline Function Pow()
         0xdf, 0xe0,                                 // fnstsw      ax                       } if the exponent was NOT negative
         0x9e,                                       // sahf                                 }     goto exit_point
         0xdd, 0xd8,                                 // fstp        st(0)                    }
-        0x77, 0x28,                                 // ja          exit_point               }
+        0x77, 0x36,                                 // ja          exit_point               }
 
         0xd9, 0xe8,                                 // fld1                                 }
         0xde, 0xf1,                                 // fdivrp      st(1),st                 } inverse
-        0xeb, 0x22,                                 // jmp         exit_point               }
+        0xeb, 0x30,                                 // jmp         exit_point               }
 
 // pop_before_generic_pow:
         0xdd, 0xd8,                                 // fstp        st(0)
 // generic_pow:
+        0xd9, 0xe4,                                 // ftst                                 }
+        0xdf, 0xe0,                                 // fnstsw      ax                       }
+        0x9e,                                       // sahf                                 }
+        0x75, 0x08,                                 // jne         non_zero_exponent        } if exponent is 0
+        0xdd, 0xd8,                                 // fstp        st(0)                    } return 1
+        0xdd, 0xd8,                                 // fstp        st(0)                    }
+        0xd9, 0xe8,                                 // fld1                                 }
+        0xeb, 0x1f,                                 // jmp         exit_point               }
+// non_zero_exponent:
         0xd9, 0xc9,                                 // fxch                                 }
         0xd9, 0xe4,                                 // ftst                                 }
-        0x9b,                                       // wait                                 } if base is 0, leave it in st(0)
-        0xdf, 0xe0,                                 // fnstsw      ax                       } and exit
-        0x9e,                                       // sahf                                 }
+        0xdf, 0xe0,                                 // fnstsw      ax                       } if base is 0, leave it in st(0)
+        0x9e,                                       // sahf                                 } and exit
         0x74, 0x14,                                 // je          store_and_exit           }
         0xd9, 0xe1,                                 // fabs
         0xd9, 0xf1,                                 // fyl2x                                }
@@ -1495,26 +1503,28 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
             }
 
-            compile_elist(s, e.first.begin(), e.first.end());
+            if (e.second >= -2 && e.second <=2) {  // cannot be 0, it has been handled above
+                compile_elist(s, e.first.begin(), e.first.end());
 
-            if (e.second == 1) {
-                // a^1 == a
-                // we loaded the expression, there is nothing further to do                
-            }
-            else
-            if (e.second == -1) {   //  1/a
-                s < 0xd9 < 0xe8;    // fld1
-                s < 0xde < 0xf1;    // fdivrp   st(1), st
-            }
-            else
-            if (e.second == 2) {    //  a*a
-                s < 0xdc < 0xc8;    // fmul st(0), st(0)
-            }
-            else
-            if (e.second == -2) {   //  1/(a*a)
-                s < 0xdc < 0xc8;    // fmul st(0), st(0)
-                s < 0xd9 < 0xe8;    // fld1
-                s < 0xde < 0xf1;    // fdivrp   st(1), st
+                if (e.second == 1) {
+                    // a^1 == a
+                    // we loaded the expression, there is nothing further to do                
+                }
+                else
+                if (e.second == -1) {   //  1/a
+                    s < 0xd9 < 0xe8;    // fld1
+                    s < 0xde < 0xf1;    // fdivrp   st(1), st
+                }
+                else
+                if (e.second == 2) {    //  a*a
+                    s < 0xdc < 0xc8;    // fmul st(0), st(0)
+                }
+                else
+                if (e.second == -2) {   //  1/(a*a)
+                    s < 0xdc < 0xc8;    // fmul st(0), st(0)
+                    s < 0xd9 < 0xe8;    // fld1
+                    s < 0xde < 0xf1;    // fdivrp   st(1), st
+                }
             }
             else {
                 elist_t pow_list = e.first;
