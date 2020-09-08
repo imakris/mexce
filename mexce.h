@@ -6,7 +6,7 @@
 // Author: Ioannis Makris
 //
 // mexce can compile and evaluate a mathematical expression at runtime.
-// The generated machine code will mostly use the FPU.
+// The generated machine code will mostly use the x87 FPU.
 //
 // An example:
 // -----------
@@ -17,11 +17,10 @@
 // 
 // mexce::evaluator eval;
 // 
-// eval.bind(x, "x");
-// eval.bind(y, "y");
-// eval.bind(z, "z");
+// // associate runtime variables with their aliases in the expression.
+// eval.bind(x, "x", y, "y", z, "z");
 // 
-// eval.assign_expression("0.3+(-sin(2.33+x-logb((.3*pi+(88/y)/e),3.2+z)))/98");
+// eval.set_expression("0.3+(-sin(2.33+x-logb((.3*pi+(88/y)/e),3.2+z)))/988.472e-02");
 // 
 // cout << endl << "Evaluation results:" << endl;
 // for (int i = 0; i < 10; i++, x-=0.1f, y+=0.212, z+=2) {
