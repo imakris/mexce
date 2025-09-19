@@ -1,0 +1,11 @@
+# Build artifacts
+benchmark
+*.o
+bench_expr_results.txt
+
+# CMake generated files
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
