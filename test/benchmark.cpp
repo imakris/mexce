@@ -27,9 +27,11 @@ IterationParseResult parse_iterations(const char* text, int* value)
         }
         *value = parsed;
         return IterationParseResult::kSuccess;
-    } catch (const std::invalid_argument&) {
+    }
+    catch (const std::invalid_argument&) {
         return IterationParseResult::kNotNumeric;
-    } catch (const std::out_of_range&) {
+    }
+    catch (const std::out_of_range&) {
         return IterationParseResult::kInvalidRange;
     }
 }
@@ -67,7 +69,8 @@ int main(int argc, char* argv[])
     if (argc == 3) {
         if (iterations_set) {
             output_path = argv[2];
-        } else {
+        }
+        else {
             int parsed_iterations = 0;
             switch (parse_iterations(argv[2], &parsed_iterations)) {
             case IterationParseResult::kSuccess:
@@ -85,9 +88,22 @@ int main(int argc, char* argv[])
     }
 
     if (argc == 1) {
-        std::cout << "No arguments provided. Running 10000 iterations and writing results to "
-                  << output_path << " in the current working directory." << std::endl;
-    } else if (!iterations_set) {
+        std::cout << "No commandline arguments provided." << std::endl;
+        std::cout << "Running " << iterations << " iterations." << std::endl;
+
+        // Resolve to absolute path for clarity
+        char abs_path[PATH_MAX];
+        if (realpath(output_path.c_str(), abs_path)) {
+            std::cout << "Results will be written to " << abs_path << std::endl;
+        }
+        else {
+            // Fallback if realpath fails (e.g. file not yet existing)
+            std::cout << "Results will be written to "
+                      << std::filesystem::current_path() / output_path << std::endl;
+        }
+    }
+    else
+    if (!iterations_set) {
         std::cout << "Using default iteration count of 10000." << std::endl;
     }
 
@@ -113,7 +129,8 @@ int main(int argc, char* argv[])
         if (argc != 1) {
             std::cout << "Writing benchmark results to " << output_path << std::endl;
         }
-    } else {
+    }
+    else {
         std::cout << "Writing benchmark results to standard output." << std::endl;
     }
 
@@ -145,12 +162,14 @@ int main(int argc, char* argv[])
 
         try {
             eval.set_expression(expr);
-        } catch (const mexce::mexce_parsing_exception& err) {
+        }
+        catch (const mexce::mexce_parsing_exception& err) {
             std::cerr << "Failed to compile expression \"" << expr << "\": " << err.what()
                       << std::endl;
             failed_expressions.push_back(expr);
             continue;
-        } catch (const std::exception& err) {
+        }
+        catch (const std::exception& err) {
             std::cerr << "Unexpected error compiling expression \"" << expr << "\": " << err.what()
                       << std::endl;
             failed_expressions.push_back(expr);
@@ -166,7 +185,8 @@ int main(int argc, char* argv[])
             try {
                 volatile double result = eval.evaluate();
                 (void)result;
-            } catch (const std::exception& err) {
+            }
+            catch (const std::exception& err) {
                 std::cerr << "Error evaluating expression \"" << expr << "\": " << err.what()
                           << std::endl;
                 success = false;
@@ -205,7 +225,8 @@ int main(int argc, char* argv[])
             << " iterations per expression: " << total_duration.count() << " ns" << std::endl;
         out << "Average time per expression (over " << iterations
             << " iterations): " << avg_total_duration << " ns" << std::endl;
-    } else {
+    }
+    else {
         out << "No expressions were successfully evaluated." << std::endl;
     }
 
