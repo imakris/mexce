@@ -71,12 +71,12 @@ Here is how it compares in the [math-parser-benchmark-project](https://github.co
   12      | Lepton              |   double   |         438|      9  |   4
   13      | muparserx           |   double   |         239|      5  |   0
 
-Full results [here](https://github.com/imakris/mexce/blob/master/bench_expr_all_results.txt)
+Full results [here](https://github.com/imakris/mexce/blob/master/test/bench_expr_all_results.txt)
 
 ## Benchmarks
 
-This repository ships with a small harness (`benchmark.cpp`) and the
-`bench_expr*.txt` suites from the
+This repository ships with a small harness (`test/benchmark.cpp`) and the
+`test/bench_expr*.txt` suites from the
 [math-parser-benchmark-project](https://github.com/ArashPartow/math-parser-benchmark-project).
 You can build and run the benchmarks using CMake:
 
