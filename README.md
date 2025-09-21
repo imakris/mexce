@@ -73,6 +73,26 @@ Here is how it compares in the [math-parser-benchmark-project](https://github.co
 
 Full results [here](https://github.com/imakris/mexce/blob/master/bench_expr_all_results.txt)
 
+## Benchmarks
+
+This repository ships with a small harness (`benchmark.cpp`) and the
+`bench_expr*.txt` suites from the
+[math-parser-benchmark-project](https://github.com/ArashPartow/math-parser-benchmark-project).
+You can build and run the benchmarks using CMake:
+
+```
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build
+cmake --build build --target run_benchmarks
+```
+
+The `run_benchmarks` target writes per-suite summaries to
+`bench_expr_results.txt` and `bench_expr_all_results.txt` in the build
+directory. The `ctest` invocation executes both suites with a reduced number
+of iterations to keep the runtime manageable while still validating that mexce
+successfully parses and evaluates every expression.
+
 ## License
 
 The source code of the library is licensed under the Simplified BSD License.
