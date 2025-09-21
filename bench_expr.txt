@@ -9,9 +9,9 @@ sin((1+2/2*3)*4^5)+cos(6*pi)
 #
 # Variablen und Variablenzusammenfassung
 #
-# direkte Rckgabe von Variablen Zusammenfassung von Variablen
-# Alle gleichungen hier knnen auf eine Variable oder einen Term
-# der Form a*x+b mit a,b konstant zurckgefhrt werden
+# direkte Rückgabe von Variablen Zusammenfassung von Variablen
+# Alle gleichungen hier können auf eine Variable oder einen Term
+# der Form a*x+b mit a,b konstant zurückgeführt werden
 a+1
 a*2
 2*a+1
@@ -32,7 +32,7 @@ a^2+1
 1.1*a^2.01 + 2.2*b^3.01
 1.1*a^2.01 + 2.2*b^3.01 + 3.3*c^4.01
 
-#physikalisch relevante gleichungen (variablen sind willkrlich gesetzt)
+#physikalisch relevante gleichungen (variablen sind willkürlich gesetzt)
 # gausskurve
 1/(a*sqrt(2*pi))*e^(-0.5*((b-a)/a)^2)
 
