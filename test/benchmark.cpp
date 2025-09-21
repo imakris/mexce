@@ -1,5 +1,5 @@
 #include <algorithm>
-#include <chrono>
+#include <omp.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -7,7 +7,75 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <cstdint>
 #include <vector>
+
+// Human-readable nanoseconds formatter.
+std::string format_ns(uint64_t ns)
+{
+    struct Unit { const char* name; uint64_t factor; };
+    // Powers of 10 only, so decimals are exact (no rounding artifacts).
+    static constexpr Unit units[] = {
+        {"sec", 1000000000ULL},
+        {"ms",    1000000ULL},
+        {"us",       1000ULL},
+        {"ns",          1ULL}
+    };
+
+    // Special-case zero.
+    if (ns == 0) {
+        return "0.0 ns";
+    }
+
+    const Unit* chosen = &units[3]; // default to ns
+    for (const Unit& u : units) {
+        uint64_t integer = ns / u.factor;
+        if (integer >= 1 && integer <= 999) {
+            chosen = &u;
+            break;
+        }
+    }
+    // If none matched (e.g., >= 1000 seconds), we keep "sec" anyway.
+    if (ns / units[0].factor >= 1000) {
+        chosen = &units[0];
+    }
+
+    uint64_t integer = ns / chosen->factor;
+    uint64_t frac    = ns % chosen->factor;
+
+    // Determine how many decimal digits this unit can have.
+    unsigned width = 0;
+    for (uint64_t f = chosen->factor; f > 1; f /= 10) {
+        ++width;
+    }
+
+    std::string out;
+    out.reserve(32);
+    out += std::to_string(integer);
+
+    if (width > 0) {
+        // Zero-pad the fractional part to full width, then trim trailing zeros.
+        std::string frac_str(width, '0');
+        for (int i = int(width) - 1; i >= 0 && frac > 0; --i) {
+            frac_str[std::size_t(i)] = char('0' + (frac % 10));
+            frac /= 10;
+        }
+        // Trim trailing zeros.
+        while (!frac_str.empty() && frac_str.back() == '0') {
+            frac_str.pop_back();
+        }
+        out += '.';
+        out += frac_str.empty() ? "0" : frac_str;
+    }
+    else {
+        // For "ns" we still show one decimal to satisfy "…and the rest decimals".
+        out += ".0";
+    }
+
+    out += ' ';
+    out += chosen->name;
+    return out;
+}
 
 #ifdef _WIN32
   #include <direct.h>   // _getcwd
@@ -190,7 +258,7 @@ int main(int argc, char* argv[])
     std::vector<std::string> failed_expressions;
     failed_expressions.reserve(total_expressions);
 
-    std::chrono::nanoseconds total_duration{0};
+    long long total_duration_ns = 0;
     std::size_t successful_expressions = 0;
 
     for (std::size_t idx = 0; idx < total_expressions; ++idx) {
@@ -220,7 +288,7 @@ int main(int argc, char* argv[])
             continue;
         }
 
-        const auto start = std::chrono::steady_clock::now();
+        const double start = omp_get_wtime();
 
         std::size_t executed_iterations = 0;
         bool success = true;
@@ -241,20 +309,18 @@ int main(int argc, char* argv[])
             std::swap(x, y);
         }
 
-        const auto end = std::chrono::steady_clock::now();
-        const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+        const double end = omp_get_wtime();
+        const long long duration_ns = static_cast<long long>((end - start) * 1e9);
 
         if (!success || executed_iterations == 0) {
             failed_expressions.push_back(expr);
             continue;
         }
 
-        total_duration += duration;
+        total_duration_ns += duration_ns;
         ++successful_expressions;
-
-        const double avg_duration = static_cast<double>(duration.count()) /
-                                    static_cast<double>(executed_iterations);
-        out << "Expression: \"" << expr << "\", Average time: " << avg_duration << " ns" << std::endl;
+        const uint64_t avg_duration_ns = static_cast<uint64_t>((static_cast<long double>(duration_ns) / static_cast<long double>(executed_iterations)) + 0.5L);
+        out << "Expression: \"" << expr << "\", Average time: " << format_ns(avg_duration_ns) << std::endl;
     }
 
     out << "-----------------------------------------------------" << std::endl;
@@ -263,12 +329,11 @@ int main(int argc, char* argv[])
     out << "Failed expressions: " << failed_expressions.size() << std::endl;
 
     if (successful_expressions > 0) {
-        const double avg_total_duration = static_cast<double>(total_duration.count()) /
-                                          static_cast<double>(successful_expressions);
+        const uint64_t avg_total_duration_ns = static_cast<uint64_t>((static_cast<long double>(total_duration_ns) / static_cast<long double>(successful_expressions)) + 0.5L);
         out << "Total time for " << iterations
-            << " iterations per expression: " << total_duration.count() << " ns" << std::endl;
+            << " iterations per expression: " << format_ns(total_duration_ns) << std::endl;
         out << "Average time per expression (over " << iterations
-            << " iterations): " << avg_total_duration << " ns" << std::endl;
+            << " iterations): " << format_ns(avg_total_duration_ns) << std::endl;
     }
     else {
         out << "No expressions were successfully evaluated." << std::endl;

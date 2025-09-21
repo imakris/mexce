@@ -7,6 +7,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(benchmark test/benchmark.cpp)
 target_include_directories(benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+find_package(OpenMP REQUIRED)
+target_link_libraries(benchmark PRIVATE OpenMP::OpenMP_CXX)
+
 if (MSVC)
     target_compile_options(benchmark PRIVATE /W4 /permissive-)
 else()
