@@ -3,11 +3,29 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+  #include <direct.h>   // _getcwd
+  #include <stdlib.h>   // _fullpath, _MAX_PATH
+#else
+  #include <limits.h>   // PATH_MAX
+  #include <unistd.h>   // getcwd, realpath
+#endif
+
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable:4100) // silence unreferenced parameter warnings inside mexce.h
+#endif
 #include "mexce.h"
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
+
 #include "benchmark_expressions.h"
 
 namespace {
@@ -34,6 +52,42 @@ IterationParseResult parse_iterations(const char* text, int* value)
     catch (const std::out_of_range&) {
         return IterationParseResult::kInvalidRange;
     }
+}
+
+// Portable absolute-path resolver for display purposes.
+static std::string resolve_full_path(const std::string& path)
+{
+#ifdef _WIN32
+    char absbuf[_MAX_PATH];
+    if (_fullpath(absbuf, path.c_str(), _MAX_PATH)) {
+        return std::string(absbuf);
+    }
+    // Fallback: CWD + '\' + path
+    char cwdbuf[_MAX_PATH];
+    if (_getcwd(cwdbuf, _MAX_PATH)) {
+        std::string s = cwdbuf;
+        if (!s.empty() && s.back() != '\\') s += '\\';
+        s += path;
+        return s;
+    }
+    return path;
+#else
+    // Try realpath (may fail if file doesn't exist yet)
+    if (char* rp = realpath(path.c_str(), nullptr)) {
+        std::string s(rp);
+        free(rp);
+        return s;
+    }
+    // Fallback: CWD + '/' + path
+    char cwdbuf[PATH_MAX];
+    if (getcwd(cwdbuf, sizeof(cwdbuf))) {
+        std::string s = cwdbuf;
+        if (!s.empty() && s.back() != '/') s += '/';
+        s += path;
+        return s;
+    }
+    return path;
+#endif
 }
 
 }  // namespace
@@ -87,24 +141,20 @@ int main(int argc, char* argv[])
         }
     }
 
+    const std::string resolved_output = output_path.empty()
+        ? std::string()
+        : resolve_full_path(output_path);
+
+    // Announce what we are going to do, as requested:
     if (argc == 1) {
         std::cout << "No commandline arguments provided." << std::endl;
-        std::cout << "Running " << iterations << " iterations." << std::endl;
-
-        // Resolve to absolute path for clarity
-        char abs_path[PATH_MAX];
-        if (realpath(output_path.c_str(), abs_path)) {
-            std::cout << "Results will be written to " << abs_path << std::endl;
-        }
-        else {
-            // Fallback if realpath fails (e.g. file not yet existing)
-            std::cout << "Results will be written to "
-                      << std::filesystem::current_path() / output_path << std::endl;
-        }
     }
-    else
-    if (!iterations_set) {
-        std::cout << "Using default iteration count of 10000." << std::endl;
+    std::cout << "Running " << iterations << " iterations." << std::endl;
+    if (!output_path.empty()) {
+        std::cout << "Results will be written to " << resolved_output << std::endl;
+    }
+    else {
+        std::cout << "Results will be written to standard output" << std::endl;
     }
 
     mexce::evaluator eval;
@@ -126,12 +176,6 @@ int main(int argc, char* argv[])
             return 1;
         }
         output_stream = &file_output;
-        if (argc != 1) {
-            std::cout << "Writing benchmark results to " << output_path << std::endl;
-        }
-    }
-    else {
-        std::cout << "Writing benchmark results to standard output." << std::endl;
     }
 
     std::ostream& out = *output_stream;
