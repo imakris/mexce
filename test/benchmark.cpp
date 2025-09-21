@@ -8,82 +8,87 @@
 #include <vector>
 
 #include "mexce.h"
+#include "benchmark_expressions.h"
 
 namespace {
 
-std::string trim(const std::string& input)
+enum class IterationParseResult {
+    kSuccess,
+    kNotNumeric,
+    kInvalidRange,
+};
+
+IterationParseResult parse_iterations(const char* text, int* value)
 {
-    const auto first = input.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) {
-        return std::string();
-    }
-    const auto last = input.find_last_not_of(" \t\r\n");
-    return input.substr(first, last - first + 1);
-}
-
-std::vector<std::string> load_expressions(const std::string& path)
-{
-    std::ifstream file(path);
-    if (!file) {
-        throw std::runtime_error("Failed to open expressions file: " + path);
-    }
-
-    std::vector<std::string> expressions;
-    std::string line;
-    while (std::getline(file, line)) {
-        const auto cleaned = trim(line);
-        if (cleaned.empty()) {
-            continue;
+    try {
+        const int parsed = std::stoi(text);
+        if (parsed <= 0) {
+            return IterationParseResult::kInvalidRange;
         }
-        if (cleaned[0] == '#') {
-            continue;
-        }
-        expressions.push_back(cleaned);
+        *value = parsed;
+        return IterationParseResult::kSuccess;
+    } catch (const std::invalid_argument&) {
+        return IterationParseResult::kNotNumeric;
+    } catch (const std::out_of_range&) {
+        return IterationParseResult::kInvalidRange;
     }
-
-    return expressions;
 }
 
 }  // namespace
 
 int main(int argc, char* argv[])
 {
-    if (argc < 2 || argc > 4) {
-        std::cerr << "Usage: " << argv[0]
-                  << " <expressions_file> [iterations] [output_file]" << std::endl;
+    if (argc > 3) {
+        std::cerr << "Usage: " << argv[0] << " [iterations] [output_file]" << std::endl;
+        std::cerr << "You may also pass an output file as the first argument." << std::endl;
         return 1;
     }
 
-    int iterations = 1000;
-    if (argc >= 3) {
-        try {
-            iterations = std::stoi(argv[2]);
-        } catch (const std::exception&) {
-            std::cerr << "Invalid iteration count: " << argv[2] << std::endl;
+    int iterations = 10000;
+    std::string output_path = "benchmark_results.txt";
+    bool iterations_set = false;
+
+    if (argc >= 2) {
+        int parsed_iterations = 0;
+        switch (parse_iterations(argv[1], &parsed_iterations)) {
+        case IterationParseResult::kSuccess:
+            iterations = parsed_iterations;
+            iterations_set = true;
+            break;
+        case IterationParseResult::kNotNumeric:
+            output_path = argv[1];
+            break;
+        case IterationParseResult::kInvalidRange:
+            std::cerr << "Iteration count must be a positive integer." << std::endl;
             return 1;
         }
-        if (iterations <= 0) {
-            std::cerr << "Iteration count must be positive" << std::endl;
-            return 1;
+    }
+
+    if (argc == 3) {
+        if (iterations_set) {
+            output_path = argv[2];
+        } else {
+            int parsed_iterations = 0;
+            switch (parse_iterations(argv[2], &parsed_iterations)) {
+            case IterationParseResult::kSuccess:
+                iterations = parsed_iterations;
+                iterations_set = true;
+                break;
+            case IterationParseResult::kNotNumeric:
+                std::cerr << "Invalid iteration count: " << argv[2] << std::endl;
+                return 1;
+            case IterationParseResult::kInvalidRange:
+                std::cerr << "Iteration count must be a positive integer." << std::endl;
+                return 1;
+            }
         }
     }
 
-    std::string output_path;
-    if (argc == 4) {
-        output_path = argv[3];
-    }
-
-    std::vector<std::string> expressions;
-    try {
-        expressions = load_expressions(argv[1]);
-    } catch (const std::exception& err) {
-        std::cerr << err.what() << std::endl;
-        return 1;
-    }
-
-    if (expressions.empty()) {
-        std::cout << "No expressions found in file." << std::endl;
-        return 0;
+    if (argc == 1) {
+        std::cout << "No arguments provided. Running 10000 iterations and writing results to "
+                  << output_path << " in the current working directory." << std::endl;
+    } else if (!iterations_set) {
+        std::cout << "Using default iteration count of 10000." << std::endl;
     }
 
     mexce::evaluator eval;
@@ -96,9 +101,6 @@ int main(int argc, char* argv[])
     double w = 7.7;
     eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
 
-    std::chrono::nanoseconds total_duration{0};
-    std::size_t successful_expressions = 0;
-
     std::ofstream file_output;
     std::ostream* output_stream = &std::cout;
     if (!output_path.empty()) {
@@ -108,16 +110,31 @@ int main(int argc, char* argv[])
             return 1;
         }
         output_stream = &file_output;
-    }
-
-    if (output_stream != &std::cout) {
-        std::cout << "Writing benchmark results to " << output_path << std::endl;
+        if (argc != 1) {
+            std::cout << "Writing benchmark results to " << output_path << std::endl;
+        }
+    } else {
+        std::cout << "Writing benchmark results to standard output." << std::endl;
     }
 
     std::ostream& out = *output_stream;
     out << std::fixed << std::setprecision(3);
 
-    for (const auto& expr : expressions) {
+    const std::size_t total_expressions = mexce::benchmark_data::kExpressionCount;
+    if (total_expressions == 0) {
+        out << "No expressions available for benchmarking." << std::endl;
+        return 0;
+    }
+
+    std::vector<std::string> failed_expressions;
+    failed_expressions.reserve(total_expressions);
+
+    std::chrono::nanoseconds total_duration{0};
+    std::size_t successful_expressions = 0;
+
+    for (std::size_t idx = 0; idx < total_expressions; ++idx) {
+        const std::string expr = mexce::benchmark_data::kExpressions[idx];
+
         a = 1.1;
         b = 2.2;
         c = 3.3;
@@ -129,12 +146,14 @@ int main(int argc, char* argv[])
         try {
             eval.set_expression(expr);
         } catch (const mexce::mexce_parsing_exception& err) {
-            std::cerr << "Failed to compile expression \"" << expr << "\": "
-                      << err.what() << std::endl;
+            std::cerr << "Failed to compile expression \"" << expr << "\": " << err.what()
+                      << std::endl;
+            failed_expressions.push_back(expr);
             continue;
         } catch (const std::exception& err) {
-            std::cerr << "Unexpected error compiling expression \"" << expr
-                      << "\": " << err.what() << std::endl;
+            std::cerr << "Unexpected error compiling expression \"" << expr << "\": " << err.what()
+                      << std::endl;
+            failed_expressions.push_back(expr);
             continue;
         }
 
@@ -148,8 +167,8 @@ int main(int argc, char* argv[])
                 volatile double result = eval.evaluate();
                 (void)result;
             } catch (const std::exception& err) {
-                std::cerr << "Error evaluating expression \"" << expr << "\": "
-                          << err.what() << std::endl;
+                std::cerr << "Error evaluating expression \"" << expr << "\": " << err.what()
+                          << std::endl;
                 success = false;
                 break;
             }
@@ -162,6 +181,7 @@ int main(int argc, char* argv[])
         const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
 
         if (!success || executed_iterations == 0) {
+            failed_expressions.push_back(expr);
             continue;
         }
 
@@ -170,25 +190,32 @@ int main(int argc, char* argv[])
 
         const double avg_duration = static_cast<double>(duration.count()) /
                                     static_cast<double>(executed_iterations);
-        out << "Expression: \"" << expr << "\", Average time: "
-            << avg_duration << " ns" << std::endl;
+        out << "Expression: \"" << expr << "\", Average time: " << avg_duration << " ns" << std::endl;
     }
-
-    if (successful_expressions == 0) {
-        out << "No expressions were successfully evaluated." << std::endl;
-        return 0;
-    }
-
-    const double avg_total_duration = static_cast<double>(total_duration.count()) /
-                                      static_cast<double>(successful_expressions);
 
     out << "-----------------------------------------------------" << std::endl;
-    out << "Total expressions: " << expressions.size() << std::endl;
+    out << "Total expressions: " << total_expressions << std::endl;
     out << "Successful expressions: " << successful_expressions << std::endl;
-    out << "Total time for " << iterations
-        << " iterations per expression: " << total_duration.count() << " ns" << std::endl;
-    out << "Average time per expression (over " << iterations
-        << " iterations): " << avg_total_duration << " ns" << std::endl;
+    out << "Failed expressions: " << failed_expressions.size() << std::endl;
+
+    if (successful_expressions > 0) {
+        const double avg_total_duration = static_cast<double>(total_duration.count()) /
+                                          static_cast<double>(successful_expressions);
+        out << "Total time for " << iterations
+            << " iterations per expression: " << total_duration.count() << " ns" << std::endl;
+        out << "Average time per expression (over " << iterations
+            << " iterations): " << avg_total_duration << " ns" << std::endl;
+    } else {
+        out << "No expressions were successfully evaluated." << std::endl;
+    }
+
+    if (!failed_expressions.empty()) {
+        out << "-----------------------------------------------------" << std::endl;
+        out << "Failed expressions:" << std::endl;
+        for (const auto& failed : failed_expressions) {
+            out << "  " << failed << std::endl;
+        }
+    }
 
     return 0;
 }

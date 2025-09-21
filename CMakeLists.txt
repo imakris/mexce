@@ -4,9 +4,7 @@ project(mexce_benchmark LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(MEXCE_TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/test)
-
-add_executable(benchmark ${MEXCE_TEST_DIR}/benchmark.cpp)
+add_executable(benchmark test/benchmark.cpp)
 target_include_directories(benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 if (MSVC)
@@ -16,16 +14,13 @@ else()
 endif()
 
 enable_testing()
-add_test(NAME bench_expr
-         COMMAND benchmark ${MEXCE_TEST_DIR}/bench_expr.txt 100)
-add_test(NAME bench_expr_all
-         COMMAND benchmark ${MEXCE_TEST_DIR}/bench_expr_all.txt 100)
+add_test(NAME benchmark_quick
+         COMMAND benchmark 5 ${CMAKE_BINARY_DIR}/benchmark_quick_results.txt)
+add_test(NAME benchmark_output_first
+         COMMAND benchmark ${CMAKE_BINARY_DIR}/benchmark_output_first.txt 5)
 
 add_custom_target(run_benchmarks
-    COMMAND ${CMAKE_COMMAND} -E echo "Running bench_expr.txt with 100 iterations"
-    COMMAND $<TARGET_FILE:benchmark> ${MEXCE_TEST_DIR}/bench_expr.txt 100 ${CMAKE_BINARY_DIR}/bench_expr_results.txt
-    COMMAND ${CMAKE_COMMAND} -E echo "Running bench_expr_all.txt with 100 iterations"
-    COMMAND $<TARGET_FILE:benchmark> ${MEXCE_TEST_DIR}/bench_expr_all.txt 100 ${CMAKE_BINARY_DIR}/bench_expr_all_results.txt
-    DEPENDS benchmark
+    COMMAND ${CMAKE_COMMAND} -E echo "Running benchmark with 100 iterations"
+    COMMAND $<TARGET_FILE:benchmark> 100 ${CMAKE_BINARY_DIR}/benchmark_results.txt
     COMMENT "Executing mexce benchmarks"
     USES_TERMINAL)
