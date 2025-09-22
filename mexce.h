@@ -59,7 +59,7 @@
 #ifdef _WIN32
     #include <Windows.h>
 #elif defined(__linux__)
-    //#include <unistd.h>
+    #include <unistd.h>
     #include <sys/mman.h>
 #endif
 
@@ -143,7 +143,7 @@ private:
     impl::variable_map_t    m_variables;
     impl::constant_map_t    m_constants;
 
-    double                (*evaluate_fptr)();
+    double                (*evaluate_fptr)()            = nullptr;
 
 #ifdef MEXCE_64
     volatile double         m_x64_return_var;
@@ -209,8 +209,8 @@ inline
 uint8_t* get_executable_buffer(size_t sz)
 {
 #ifdef _WIN32
-    static auto const page_size = get_page_size();
-    return (uint8_t*)VirtualAlloc(nullptr, page_size, MEM_COMMIT, PAGE_READWRITE);
+    (void)sz; // prevent warning
+    return (uint8_t*)VirtualAlloc(0, sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 #elif defined(__linux__)
     return (uint8_t*)mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #endif
@@ -224,7 +224,7 @@ double (*lock_executable_buffer(uint8_t* buffer, size_t sz))()
     DWORD dummy;
     VirtualProtect(buffer, sz, PAGE_EXECUTE_READ, &dummy);
 #elif defined(__linux__)
-    if (mprotect((void*) buffer, sz, PROT_EXEC) != 0) {
+    if (mprotect(buffer, sz, PROT_READ | PROT_EXEC) != 0) {
         buffer = 0;
     }
 #endif
@@ -239,6 +239,7 @@ void free_executable_buffer(double (*buffer)(), size_t sz)
         return;
     }
 #ifdef _WIN32
+    (void)sz; // prevent warning
     VirtualFree( (void*) buffer, 0, MEM_RELEASE);
 #elif defined(__linux__)
     munmap((void *) buffer, sz);
@@ -1878,7 +1879,7 @@ struct Token
 };
 
 
-template <typename> inline Numeric_data_type get_ndt()  { assert(false); }
+template <typename> inline Numeric_data_type get_ndt()  { assert(false); return Numeric_data_type(); }
 template <> inline Numeric_data_type get_ndt<double >() { return M64FP;  }
 template <> inline Numeric_data_type get_ndt<float  >() { return M32FP;  }
 template <> inline Numeric_data_type get_ndt<int16_t>() { return M16INT; }
@@ -2015,6 +2016,7 @@ void evaluator::set_expression(std::string e)
                     state = 5;
                     break;
                 }
+                /* FALLTHROUGH */
             case 4: //just read an infix operator
                 if (e[i] == ' ')
                     break;
@@ -2053,6 +2055,7 @@ void evaluator::set_expression(std::string e)
                     state = 2;
                     break;
                 }
+                /* FALLTHROUGH */
             case 2: // currently reading a numeric literal, found dot
                 if (is_numeric(e[i])) {
                     temp.content += e[i];
@@ -2139,7 +2142,7 @@ void evaluator::set_expression(std::string e)
                         temp.type = FUNCTION_NAME;
                         tokens.push_back(temp);
                         tokens.push_back(Token(FUNCTION_LEFT_PARENTHESIS, i, '('));
-                        bdarray.push_back(make_pair(0, i_fnc->second.num_args));
+                        bdarray.push_back(make_pair(0, (int)i_fnc->second.num_args));
                         function_parentheses++;
                         state = 6;
                         break;
@@ -2178,7 +2181,7 @@ void evaluator::set_expression(std::string e)
                     temp.type = FUNCTION_NAME;
                     tokens.push_back(temp);
                     tokens.push_back(Token(FUNCTION_LEFT_PARENTHESIS, i, '('));
-                    bdarray.push_back(make_pair(0, i_fnc->second.num_args));
+                    bdarray.push_back(make_pair(0, (int)i_fnc->second.num_args));
                     function_parentheses++;
                     state = 0;
                     break;
@@ -2278,6 +2281,7 @@ void evaluator::set_expression(std::string e)
                     postfix.push_back(tstack.back());
                     tstack.pop_back();
                 }
+                /* FALLTHROUGH */
             case INFIX_1:
             case LEFT_PARENTHESIS:
             case FUNCTION_NAME:
