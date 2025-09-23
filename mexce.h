@@ -1,32 +1,112 @@
-//
-// Mini Expression Compiler/Evaluator
-// ==================================
-//
-// mexce.h
-// Author: Ioannis Makris
-//
-// mexce can compile and evaluate a mathematical expression at runtime.
-// The generated machine code will mostly use the x87 FPU.
-//
-// An example:
-// -----------
-//
-// float   x  = 0.0f;
-// double  y  = 0.1;
-// int     z  = 200;
-// 
-// mexce::evaluator eval;
-// 
-// // associate runtime variables with their aliases in the expression.
-// eval.bind(x, "x", y, "y", z, "z");
-// 
-// eval.set_expression("0.3+(-sin(2.33+x-logb((.3*pi+(88/y)/e),3.2+z)))/988.472e-02");
-// 
-// cout << endl << "Evaluation results:" << endl;
-// for (int i = 0; i < 10; i++, x-=0.1f, y+=0.212, z+=2) {
-//     cout << "  " << eval.evaluate() << endl; // evaluation will use bound variables x, y and z
-// }
-//
+/**
+ * @file mexce.h
+ * @brief Mini Expression Compiler/Evaluator.
+ * @author Ioannis Makris
+ *
+ * mexce is a single-header, dependency-free runtime compiler for scalar
+ * mathematical expressions.  It can compile and evaluate expressions at
+ * runtime, emitting compact machine code that primarily uses the x87 FPU.
+ * Subsequent calls to `evaluate()` jump directly to the generated code, so
+ * evaluating the same expression repeatedly is fast.
+ *
+ * The library targets x86 (32-bit and 64-bit) Windows and Linux.  It requests a
+ * writable/executable buffer with the appropriate platform APIs and relies on
+ * the x87 floating-point stack, which makes it well suited for compact
+ * numerical kernels and environments where adding a full parser is excessive.
+ *
+ * ### Basic usage
+ *
+ * ```cpp
+ * float   x  = 0.0f;
+ * double  y  = 0.1;
+ * int     z  = 200;
+ *
+ * mexce::evaluator eval;
+ *
+ * // Associate runtime variables with their aliases in the expression.
+ * eval.bind(x, "x", y, "y", z, "z");
+ *
+ * eval.set_expression("0.3+(-sin(2.33+x-logb((.3*pi+(88/y)/e),3.2+z)))/988.472e-02");
+ *
+ * std::cout << std::endl << "Evaluation results:" << std::endl;
+ * for (int i = 0; i < 10; ++i, x -= 0.1f, y += 0.212, z += 2) {
+ *     std::cout << "  " << eval.evaluate() << std::endl;
+ * }
+ * ```
+ *
+ * Output:
+ *
+ * ```
+ * Evaluation results:
+ *   0.200122
+ *   0.210523
+ *   0.224581
+ *   0.240747
+ *   0.258237
+ *   0.276433
+ *   0.294792
+ *   0.312816
+ *   0.330053
+ *   0.346095
+ * ```
+ *
+ * Bound variables are referenced directly — they must outlive the evaluator and
+ * may be rebound or removed with `bind()`, `unbind()` or `unbind_all()`.  The
+ * convenience overload `evaluate(expression)` can be used for single-shot
+ * evaluations without permanently replacing the current expression.
+ *
+ * ### Expression syntax
+ *
+ * * Numeric literals may be written with decimal points or scientific
+ *   notation.
+ * * Unary `+` and `-` as well as the infix operators `+`, `-`, `*`, `/`, `^`
+ *   (power) and `<` (less-than) are supported.  The `<` operator expands to the
+ *   `less_than(a, b)` function, yielding `1` when `a < b` and `0` otherwise.
+ * * Parentheses and comma-separated argument lists follow familiar C-like
+ *   rules.
+ *
+ * ### Built-in identifiers
+ *
+ * *Constants*: `pi` and `e` are always available.
+ *
+ * *Functions*: arguments are listed in call order.
+ *   - `abs(x)` — absolute value.
+ *   - `add(a, b)`, `sub(a, b)`, `mul(a, b)`, `div(a, b)` and `neg(x)` — basic
+ *     arithmetic (the parser also maps `+`, `-`, `*`, `/` and unary `-` to
+ *     these implementations).
+ *   - `bias(x, a)` and `gain(x, a)` — common tone-mapping curves defined for
+ *     inputs in the `[0, 1]` range.
+ *   - `bnd(x, period)` — periodic wrap similar to `fmod`, returning `x`
+ *     reduced to the `[0, period)` interval.
+ *   - `ceil(x)`, `floor(x)`, `round(x)` and `int(x)` — rounding helpers.
+ *   - `cos(x)`, `sin(x)`, `tan(x)` — trigonometric functions (optionally using
+ *     polynomial refinements when `MEXCE_ACCURACY` is defined).
+ *   - `exp(x)` and `pow(a, b)` — base-e exponent and exponentiation.
+ *   - `expn(x)` — exponent part of `x`, and `sfc(x)` — significand/fractional
+ *     component of `x` in the range `[0.5, 1)`.
+ *   - `less_than(a, b)` — comparison used for the `<` operator.
+ *   - `log(x)`/`ln(x)`, `log2(x)`, `log10(x)`, `logb(base, value)` and
+ *     `ylog2(y, x)` (`y * log2(x)`).
+ *   - `max(a, b)`, `min(a, b)` and `mod(a, b)`.
+ *   - `sign(x)` — returns `1` for positive values and `-1` otherwise.
+ *   - `signp(x)` — returns `1` for positive values and `0` when `x <= 0`.
+ *   - `sqrt(x)` — square root.
+ *
+ * The parser rejects attempts to bind variables that collide with reserved
+ * names.  Additional constants produced during simplification are stored inside
+ * the evaluator and re-used across compilations of the same instance.
+ *
+ * ### API surface
+ *
+ * * `bind()`/`unbind()`/`unbind_all()` associate C++ lvalues of type
+ *   `double`, `float`, `int16_t`, `int32_t` or `int64_t` with symbolic names.
+ * * `set_expression()` compiles a new expression; syntax errors throw
+ *   `mexce_parsing_exception` with the offending position while semantic issues
+ *   raise `std::logic_error`.
+ * * `evaluate()` executes the previously compiled expression.  Constant
+ *   expressions are folded during compilation and return immediately.
+ */
+ 
 
 #ifndef MEXCE_INCLUDED
 #define MEXCE_INCLUDED
