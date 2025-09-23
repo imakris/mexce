@@ -221,11 +221,15 @@ inline
 double (*lock_executable_buffer(uint8_t* buffer, size_t sz))()
 {
 #ifdef _WIN32
-    DWORD dummy;
-    VirtualProtect(buffer, sz, PAGE_EXECUTE_READ, &dummy);
+    DWORD old_protect = 0;
+    if (!VirtualProtect(buffer, sz, PAGE_EXECUTE_READ, &old_protect)) {
+        VirtualFree((void*)buffer, 0, MEM_RELEASE);
+        throw std::runtime_error("VirtualProtect(PAGE_EXECUTE_READ) failed");
+    }
 #elif defined(__linux__)
-    if (mprotect(buffer, sz, PROT_READ | PROT_EXEC) != 0) {
-        buffer = 0;
+    if (mprotect((void*)buffer, sz, PROT_READ | PROT_EXEC) != 0) {
+        munmap((void*)buffer, sz);
+        throw std::runtime_error("mprotect(PROT_READ|PROT_EXEC) failed");
     }
 #endif
     return reinterpret_cast<double (*)()>(buffer);
@@ -491,147 +495,202 @@ Token_type get_infix_rank(char infix_op)
 }
 
 
-inline Function Sin()
-{
-    static uint8_t code[] = {
-        0xd9, 0xfe                                  // fsin
-    };
-    return Function("sin", 1, 0, sizeof(code), code);
-}
+#if defined(MEXCE_ACCURACY)
+// 80-bit Maclaurin coeffs as 16-byte records (mantissa 8 + exp/sign 2 + pad)
+static uint64_t mexce_trig_mfactors[] = {
+#if (MEXCE_ACCURACY > 9)
+    0x9c9962823eb07306, 0x000000000000bf93,     // -1/(30!)
+#endif
+#if (MEXCE_ACCURACY > 8)
+    0x850c5131a842e9ba, 0x0000000000003f9d,     // +1/(28!)
+#endif
+#if (MEXCE_ACCURACY > 7)
+    0xc4742fe35272cd1c, 0x000000000000bfa6,     // -1/(26!)
+#endif
+#if (MEXCE_ACCURACY > 6)
+    0xf96780cb97abbe65, 0x0000000000003faf,     // +1/(24!)
+#endif
+#if (MEXCE_ACCURACY > 5)
+    0x8671cb6dbfc294a3, 0x000000000000bfb9,     // -1/(22!)
+#endif
+#if (MEXCE_ACCURACY > 4)
+    0xf2a15d201011283d, 0x0000000000003fc1,     // +1/(20!)
+#endif
+#if (MEXCE_ACCURACY > 3)
+    0xb413c31dcbecbbde, 0x000000000000bfca,     // -1/(18!)
+#endif
+#if (MEXCE_ACCURACY > 2)
+    0xd73f9f399dc0f88f, 0x0000000000003fd2,     // +1/(16!)
+#endif
+#if (MEXCE_ACCURACY > 1)
+    0xc9cba54603e4e906, 0x000000000000bfda,     // -1/(14!)
+#endif
+#if (MEXCE_ACCURACY > 0)
+    0x8f76c77fc6c4bdaa, 0x0000000000003fe2,     // +1/(12!)
+#endif
+    0x93f27dbbc4fae397, 0x000000000000bfe9,     // -1/(10!)
+    0xd00d00d00d00d00d, 0x0000000000003fef,     // +1/( 8!)
+    0xb60b60b60b60b60b, 0x000000000000bff5,     // -1/( 6!)
+    0xaaaaaaaaaaaaaaab, 0x0000000000003ffa,     // +1/( 4!)
+    0x8000000000000000, 0x000000000000bffe,     // -1/( 2!)
+    0x8000000000000000, 0x0000000000003fff      // +1
+};
+
+// Arch-specific tiny opcode helpers (NO #if inside their bodies)
+#ifdef MEXCE_64
+#   define MEXCE_MOV_BASE_IMM   0x48,0xB8, 0,0,0,0,0,0,0,0     /* mov rax, imm64 */
+#   define MEXCE_ADD_BASE_80    0x48,0x05, 0x80,0x00,0x00,0x00 /* add rax, 80h   */
+#   define MEXCE_FLD_BASE0      0xDB,0x28                      /* fld tword [rax]*/
+#   define MEXCE_FLD_BASE(d)    0xDB,0x68,(d)                  /* fld [rax+d]    */
+#else
+#   define MEXCE_MOV_BASE_IMM   0xB8, 0,0,0,0                  /* mov eax, imm32 */
+#   define MEXCE_ADD_BASE_80    0x05, 0x80,0x00,0x00,0x00      /* add eax, 80h   */
+#   define MEXCE_FLD_BASE0      0xDB,0x28                      /* fld tword [eax]*/
+#   define MEXCE_FLD_BASE(d)    0xDB,0x68,(d)                  /* fld [eax+d]    */
+#endif
+
+// Shared snippets
+#define MEXCE_TRIG_RANGE_REDUCE  0xD9,0xEB, 0xD8,0xC0, 0xD9,0xC9, 0xD9,0xF5, 0xDD,0xD9
+#define MEXCE_TRIG_Y_SQUARED     0xDC,0xC8
+
+// t = x − π/2 using FSCALE (avoid FDIV)
+// Stack dance: push -1, scale π by 2^{-1}, then subtract from x.
+#define MEXCE_SIN_PRESHIFT \
+    0xD9,0xE8, /* fld1          */ \
+    0xD9,0xE0, /* fchs   => -1  */ \
+    0xD9,0xEB, /* fldpi         */ \
+    0xD9,0xFD, /* fscale => π/2 */ \
+    0xDD,0xD9, /* fstp  st(1)   (pop -1) */ \
+    0xDE,0xE9  /* fsubp st(1), st => x - π/2 */
+
+#endif // MEXCE_ACCURACY
 
 
 inline Function Cos()
 {
 #ifndef MEXCE_ACCURACY
-    static uint8_t code[] = {
-        0xd9, 0xff                                  // fcos
-    };
-#else
-
-    static uint64_t mfactors[] = {  // Maclaurin expansion factors (80-bit)
-
-#if (MEXCE_ACCURACY > 9)
-        0x9c9962823eb07306, 0x000000000000bf93,     // - 1 / (30!),
-#endif
-#if (MEXCE_ACCURACY > 8)
-        0x850c5131a842e9ba, 0x0000000000003f9d,     //   1 / (28!),
-#endif
-#if (MEXCE_ACCURACY > 7)
-        0xc4742fe35272cd1c, 0x000000000000bfa6,     // - 1 / (26!),
-#endif
-#if (MEXCE_ACCURACY > 6)
-        0xf96780cb97abbe65, 0x0000000000003faf,     //   1 / (24!),
-#endif
-#if (MEXCE_ACCURACY > 5)
-        0x8671cb6dbfc294a3, 0x000000000000bfb9,     // - 1 / (22!),
-#endif
-#if (MEXCE_ACCURACY > 4)
-        0xf2a15d201011283d, 0x0000000000003fc1,     //   1 / (20!),
-#endif
-#if (MEXCE_ACCURACY > 3)
-        0xb413c31dcbecbbde, 0x000000000000bfca,     // - 1 / (18!),
-#endif
-#if (MEXCE_ACCURACY > 2)
-        0xd73f9f399dc0f88f, 0x0000000000003fd2,     //   1 / (16!),
-#endif
-#if (MEXCE_ACCURACY > 1)
-        0xc9cba54603e4e906, 0x000000000000bfda,     // - 1 / (14!),
-#endif
-#if (MEXCE_ACCURACY > 0)
-        0x8f76c77fc6c4bdaa, 0x0000000000003fe2,     //   1 / (12!),
-#endif
-        0x93f27dbbc4fae397, 0x000000000000bfe9,     // - 1 / (10!),  
-        0xd00d00d00d00d00d, 0x0000000000003fef,     //   1 / ( 8!),
-        0xb60b60b60b60b60b, 0x000000000000bff5,     // - 1 / ( 6!),
-        0xaaaaaaaaaaaaaaab, 0x0000000000003ffa,     //   1 / ( 4!),
-        0x8000000000000000, 0x000000000000bffe,     // - 1 / ( 2!),
-        0x8000000000000000, 0x0000000000003fff      //   1   
-    };
-
-    static uint8_t code[] = {
-        0xd9, 0xeb,                                 // fldpi                    }
-        0xdc, 0xc0,                                 // fadd        st(0),st     }
-        0xd9, 0xc9,                                 // fxch        st(1)        } bring arg to range [0, 2*pi)
-        0xd9, 0xf5,                                 // fprem1                   }
-        0xdd, 0xd9,                                 // fstp        st(1)        }
-
-        0xdc, 0xc8,                                 // fmul        st(0),st  
-        0xb8, 0, 0, 0, 0,                           // mov         eax, dword ptr [addr_fct26]  
-        0xdb, 0x28,                                 // fld         tword ptr [eax]  
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x10,                           // fld         tword ptr [eax+8]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x20,                           // fld         tword ptr [eax+10h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x30,                           // fld         tword ptr [eax+18h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x40,                           // fld         tword ptr [eax+20h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x50,                           // fld         tword ptr [eax+28h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-
-#if (MEXCE_ACCURACY > 0)
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x60,                           // fld         tword ptr [eax+30h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-#endif
-#if (MEXCE_ACCURACY > 1)
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x70,                           // fld         tword ptr [eax+38h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-#endif
-#if (MEXCE_ACCURACY > 2)
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0x05, 0x80, 0x00, 0x00, 0x00,               // add         eax, 80h
-        0xdb, 0x28,                                 // fld         tword ptr [eax]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-#endif
-#if (MEXCE_ACCURACY > 3)
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x10,                           // fld         tword ptr [eax+10h]  
-        0xde, 0xc1,                                 // faddp       st(1),st
-#endif
-#if (MEXCE_ACCURACY > 4)
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x20,                           // fld         tword ptr [eax+20h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-#endif
-#if (MEXCE_ACCURACY > 5)
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x30,                           // fld         tword ptr [eax+30h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-#endif
-#if (MEXCE_ACCURACY > 6)
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x40,                           // fld         tword ptr [eax+40h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-#endif
-#if (MEXCE_ACCURACY > 7)
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x50,                           // fld         tword ptr [eax+50h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-#endif
-#if (MEXCE_ACCURACY > 8)
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x60,                           // fld         tword ptr [eax+60h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-#endif
-#if (MEXCE_ACCURACY > 9)
-        0xd8, 0xc9,                                 // fmul        st,st(1)  
-        0xdb, 0x68, 0x70,                           // fld         tword ptr [eax+70h]  
-        0xde, 0xc1,                                 // faddp       st(1),st  
-#endif
-        0xdd, 0xd9                                  // fstp        st(1)  
-    };
-
-    *((void**)(code+13)) = (void*)mfactors;
-#endif
-
+    static uint8_t code[] = { 0xD9, 0xFF }; // fcos
     return Function("cos", 1, 0, sizeof(code), code);
+#else
+    // Range reduce, y=x^2, base -> coeff table, Horner on y
+    static uint8_t code[] = {
+        MEXCE_TRIG_RANGE_REDUCE,
+        MEXCE_TRIG_Y_SQUARED,
+        MEXCE_MOV_BASE_IMM,
+
+        // Horner (fixed part)
+        MEXCE_FLD_BASE0,           0xD8,0xC9, MEXCE_FLD_BASE(0x10), 0xDE,0xC1,
+        0xD8,0xC9, MEXCE_FLD_BASE(0x20), 0xDE,0xC1,
+        0xD8,0xC9, MEXCE_FLD_BASE(0x30), 0xDE,0xC1,
+        0xD8,0xC9, MEXCE_FLD_BASE(0x40), 0xDE,0xC1,
+        0xD8,0xC9, MEXCE_FLD_BASE(0x50), 0xDE,0xC1,
+
+        // Optional deeper terms (compile-time gated) — placed OUTSIDE of macros
+#if (MEXCE_ACCURACY > 0)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x60), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 1)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x70), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 2)
+        0xD8,0xC9, MEXCE_ADD_BASE_80, MEXCE_FLD_BASE0, 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 3)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x10), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 4)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x20), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 5)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x30), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 6)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x40), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 7)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x50), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 8)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x60), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 9)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x70), 0xDE,0xC1,
+#endif
+        0xDD,0xD9 // fstp st(1)
+    };
+#   ifdef MEXCE_64
+    // imm64 starts at offset 14 (10 bytes reduce + 2 bytes y^2 + 2-byte opcode)
+    *((void**)(code + 14)) = (void*)mexce_trig_mfactors;
+#   else
+    // imm32 starts at offset 13 (10 + 2 + 1)
+    *((void**)(code + 13)) = (void*)mexce_trig_mfactors;
+#   endif
+    return Function("cos", 1, 0, sizeof(code), code);
+#endif
+}
+
+
+
+inline Function Sin()
+{
+#ifndef MEXCE_ACCURACY
+    static uint8_t code[] = { 0xD9, 0xFE }; // fsin
+    return Function("sin", 1, 0, sizeof(code), code);
+#else
+    static uint8_t code[] = {
+        // t = x − π/2 to reuse cosine polynomial
+        MEXCE_SIN_PRESHIFT,
+        MEXCE_TRIG_RANGE_REDUCE,
+        MEXCE_TRIG_Y_SQUARED,
+        MEXCE_MOV_BASE_IMM,
+
+        // Same Horner ladder as in Cos()
+        MEXCE_FLD_BASE0,           0xD8,0xC9, MEXCE_FLD_BASE(0x10), 0xDE,0xC1,
+        0xD8,0xC9, MEXCE_FLD_BASE(0x20), 0xDE,0xC1,
+        0xD8,0xC9, MEXCE_FLD_BASE(0x30), 0xDE,0xC1,
+        0xD8,0xC9, MEXCE_FLD_BASE(0x40), 0xDE,0xC1,
+        0xD8,0xC9, MEXCE_FLD_BASE(0x50), 0xDE,0xC1,
+#if (MEXCE_ACCURACY > 0)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x60), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 1)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x70), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 2)
+        0xD8,0xC9, MEXCE_ADD_BASE_80, MEXCE_FLD_BASE0, 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 3)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x10), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 4)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x20), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 5)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x30), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 6)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x40), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 7)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x50), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 8)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x60), 0xDE,0xC1,
+#endif
+#if (MEXCE_ACCURACY > 9)
+        0xD8,0xC9, MEXCE_FLD_BASE(0x70), 0xDE,0xC1,
+#endif
+        0xDD,0xD9 // fstp st(1)
+    };
+#   ifdef MEXCE_64
+    // imm64 starts at offset 24 (10 pre-shift + 10 reduce + 2 y^2 + 2-byte opcode)
+    *((void**)(code + 26)) = (void*)mexce_trig_mfactors;
+#   else
+    // imm32 starts at offset 23 (10 + 10 + 2 + 1)
+    *((void**)(code + 25)) = (void*)mexce_trig_mfactors;
+#   endif
+    return Function("sin", 1, 0, sizeof(code), code);
+#endif
 }
 
 
