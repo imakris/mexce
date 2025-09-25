@@ -122,6 +122,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <new>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -312,6 +313,7 @@ double (*lock_executable_buffer(uint8_t* buffer, size_t sz))()
         VirtualFree((void*)buffer, 0, MEM_RELEASE);
         throw std::runtime_error("VirtualProtect(PAGE_EXECUTE_READ) failed");
     }
+    FlushInstructionCache(GetCurrentProcess(), buffer, sz);
 #elif defined(__linux__)
     if (mprotect((void*)buffer, sz, PROT_READ | PROT_EXEC) != 0) {
         munmap((void*)buffer, sz);
@@ -379,12 +381,14 @@ enum Token_type
 inline
 string double_to_hex( double v )
 {
-    uint64_t* u64p = (uint64_t*)&v;
+    uint64_t u64;
+    static_assert(sizeof(u64) == sizeof(v), "double and uint64_t size mismatch");
+    memcpy(&u64, &v, sizeof(v));
 
     stringstream stream;
     stream << "0x"
-        << std::setfill ('0') << std::setw(sizeof(*u64p)*2)
-        << std::hex << *u64p;
+        << std::setfill ('0') << std::setw(sizeof(u64)*2)
+        << std::hex << u64;
     return stream.str();
 }
 
@@ -2584,9 +2588,16 @@ void evaluator::compile_and_finalize_elist(impl::elist_it_t first, impl::elist_i
 #ifdef MEXCE_64
     // On x64 we are using rax to fetch/store addresses
     code_buffer < 0x50; // push rax
+    // Reserve 32 bytes of stack space for ABI compliance (Win64) and scratch.
+    code_buffer < 0x48 < 0x83 < 0xec < 0x20;   // sub  rsp, 32
 #endif
 
     compile_elist(code_buffer, first, last);
+
+#ifdef MEXCE_64
+    // Deallocate stack space before return sequence.
+    code_buffer < 0x48 < 0x83 < 0xc4 < 0x20;   // add  rsp, 32
+#endif
 
     // copy the return sequence
     code_buffer.s.write((const char*)return_sequence, sizeof(return_sequence));
@@ -2594,6 +2605,17 @@ void evaluator::compile_and_finalize_elist(impl::elist_it_t first, impl::elist_i
     auto code = code_buffer.s.str();
     m_buffer_size = code.size();
     auto buffer = get_executable_buffer(m_buffer_size);
+
+#ifdef _WIN32
+    if (!buffer) {
+        throw std::bad_alloc();
+    }
+#elif defined(__linux__)
+    if (buffer == MAP_FAILED) {
+        throw std::bad_alloc();
+    }
+#endif
+
     memcpy(buffer, &code[0], m_buffer_size);
 
 #ifdef MEXCE_64
