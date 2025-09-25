@@ -155,7 +155,6 @@ class evaluator;
 namespace impl {
 
     struct Element;
-    struct Value;
     struct Constant;
     struct Variable;
     struct Function;
@@ -174,18 +173,17 @@ namespace impl {
     using std::next;
     using std::pair;
     using std::shared_ptr;
-    using std::static_pointer_cast;
     using std::string;
     using std::stringstream;
     using std::vector;
 
     using constant_map_t    = map<string, shared_ptr<Constant> >;
     using variable_map_t    = map<string, shared_ptr<Variable> >;
-    using elist_t           = list<shared_ptr<Element> >;
+    using elist_t           = list<Element>;
     using elist_it_t        = elist_t::iterator;
     using elist_const_it_t  = elist_t::const_iterator;
 
-    std::shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v);
+    shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v);
     uint8_t* push_intermediate_code(evaluator* ev, const std::string& s);
     shared_ptr<Function> make_function(evaluator* ev, const string& name);
     void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
@@ -234,7 +232,7 @@ private:
     volatile double         m_x64_return_var;
 #endif
 
-    void compile_and_finalize_elist(impl::elist_it_t first, impl::elist_it_t last);
+    void compile_and_finalize_elist(impl::elist_const_it_t first, impl::elist_const_it_t last);
 
     // Grant friend access to helpers that need private state.
     friend std::shared_ptr<impl::Constant> impl::make_intermediate_constant(evaluator* ev, double v);
@@ -349,7 +347,7 @@ enum Numeric_data_type
 };
 
 
-enum Element_type
+enum class Element_type
 {
     CCONST,
     CVAR,
@@ -393,85 +391,47 @@ string double_to_hex( double v )
 }
 
 
-
-struct Element
+struct Constant
 {
-    Element_type element_type;
-    uint64_t     id;
+    uint64_t          id;
+    string            name;
+    double            value;
+    // Members to provide a common interface with Variable for codegen helpers
+    volatile void*    address;
+    Numeric_data_type numeric_data_type;
 
-    Element(Element_type ct, uint64_t id): element_type(ct), id(id) {}
-    virtual ~Element() = default;
-};
-
-
-struct Value: public Element
-{
-    volatile void*          address;
-    Numeric_data_type       numeric_data_type;
-    string                  name;
-
-    Value(uint64_t            id,
-          volatile void *   address,
-          Numeric_data_type   numeric_data_type,
-          Element_type        element_type,
-          string              name)
-    :
-        Element             ( element_type, id  ),
-        address             ( address           ),
-        numeric_data_type   ( numeric_data_type ),
-        name                ( name              ) {}
-};
-
-
-struct Constant: public Value
-{
-    Constant(uint64_t id, string num, string name):
-        Value(id, (volatile void *) &internal_constant, M64FP, CCONST, name),
-        internal_constant(atof(num.data()))
+    Constant(uint64_t i, string num, string n):
+        id(i), name(n), value(atof(num.data())),
+        address((void*)&this->value), numeric_data_type(M64FP)
     {}
 
-    Constant(uint64_t id, double num):
-        Value(id, (volatile void *) &internal_constant, M64FP, CCONST, double_to_hex(num)),
-        internal_constant(num)
-    {}
-
-    Constant(const Constant& rhs):
-        Value(rhs),
-        internal_constant(rhs.internal_constant)
-    {
-        address = (void*)&internal_constant;
-    }
-
-    double get_data_as_double() const {
-        switch (this->numeric_data_type) {
-            case M16INT: return (double)*((int16_t*)address);
-            case M32INT: return (double)*((int32_t*)address);
-            case M64INT: return (double)*((int64_t*)address);
-            case M32FP:  return (double)*((float*  )address);
-            case M64FP:  return         *((double* )address);
-            default: return 0.0;
-        }
-    }
-
-private:
-    const double   internal_constant;
-};
-
-
-struct Variable: public Value
-{
-    bool        referenced;
-
-    Variable(uint64_t id, volatile void * addr, string name, Numeric_data_type numeric_data_type):
-        Value(id, addr, numeric_data_type, CVAR, name), referenced(false)
+    Constant(uint64_t i, double v):
+        id(i), name(double_to_hex(v)), value(v),
+        address((void*)&this->value), numeric_data_type(M64FP)
     {}
 };
 
 
-struct Function: public Element
+struct Variable
+{
+    uint64_t          id;
+    string            name;
+    bool              referenced;
+    // Members to provide a common interface with Constant for codegen helpers
+    volatile void*    address;
+    Numeric_data_type numeric_data_type;
+
+    Variable(uint64_t i, volatile void* addr, string n, Numeric_data_type ndt):
+        id(i), name(n), referenced(false), address(addr), numeric_data_type(ndt)
+    {}
+};
+
+
+struct Function
 {
     using optimizer_t = void (*)(elist_it_t, evaluator*, elist_t*);
 
+    uint64_t            id;
     size_t              stack_req;
     string              name;
     size_t              num_args;
@@ -488,22 +448,43 @@ struct Function: public Element
     bool                force_not_constant = false;
 
     Function(
-        uint64_t    id,
-        const string& name,
-        size_t      num_args,
+        uint64_t    i,
+        const string& n,
+        size_t      n_args,
         size_t      sreq,
         size_t      size,
         uint8_t    *code_buffer,
-        optimizer_t optimizer = 0)
+        optimizer_t opt = 0)
     :
-        Element   ( CFUNC, id                    ),
-        stack_req ( sreq                         ),
-        name      ( name                         ),
-        num_args  ( num_args                     ),
-        args      ( vector<elist_it_t>(num_args) ),
-        code      ( (char*)code_buffer, size     ),
-        optimizer ( optimizer                    ) {}
+        id        ( i                           ),
+        stack_req ( sreq                        ),
+        name      ( n                           ),
+        num_args  ( n_args                      ),
+        args      ( vector<elist_it_t>(n_args)  ),
+        code      ( (char*)code_buffer, size    ),
+        optimizer ( opt                         ) {}
 };
+
+
+struct Element {
+    Element_type type;
+    uint64_t     id;
+
+    shared_ptr<Constant> c;
+    shared_ptr<Variable> v;
+    shared_ptr<Function> f;
+
+    Element(shared_ptr<Constant> c_ptr)
+        : type(Element_type::CCONST), id(c_ptr->id), c(c_ptr) {}
+    Element(shared_ptr<Variable> v_ptr)
+        : type(Element_type::CVAR), id(v_ptr->id), v(v_ptr) {}
+    Element(shared_ptr<Function> f_ptr)
+        : type(Element_type::CFUNC), id(f_ptr->id), f(f_ptr) {}
+
+    // Default constructor to allow creation in containers
+    Element(): type(Element_type::CCONST), id(0) {}
+};
+
 
 
 struct mexce_charstream { stringstream s; };
@@ -524,12 +505,12 @@ mexce_charstream& operator < (mexce_charstream &s, int v) {
 
 
 inline
-shared_ptr<mexce::impl::Constant> make_intermediate_constant(evaluator* ev, double v)
+shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v)
 {
     auto name = double_to_hex(v);
     auto it = ev->m_intermediate_constants.find(name);
     if (it == ev->m_intermediate_constants.end()) {
-        auto sc = make_shared<impl::Constant>(ev->m_next_element_id++, v);
+        auto sc = make_shared<Constant>(ev->m_next_element_id++, v);
         ev->m_intermediate_constants[name] = sc;
         return sc;
     }
@@ -553,16 +534,15 @@ uint8_t* push_intermediate_code(evaluator* ev, const string& s)
 inline
 void link_arguments(elist_t& elist)
 {
-    vector<elist_it_t > evec;
+    vector<elist_it_t> evec;
     for (auto y = elist.begin(); y != elist.end(); y++) {
-        if ((*y)->element_type == CFUNC) {
-            auto f = static_pointer_cast<Function>(*y);
+        if (y->type == Element_type::CFUNC) {
+            auto f = y->f;
             f->parent = elist.end();
             for (size_t i = 0; i < f->num_args; i++) {
                 f->args[i] = evec.back();
-
-                if ((*f->args[i])->element_type == CFUNC) {
-                    auto cf = static_pointer_cast<Function>(*f->args[i]);
+                if (f->args[i]->type == Element_type::CFUNC) {
+                    auto cf = f->args[i]->f;
                     cf->parent = y;
                     cf->parent_arg_index = i; // postfix order (inverted)
                 }
@@ -779,10 +759,10 @@ inline Function Sin()
         0xDD,0xD9 // fstp st(1)
     };
 #   ifdef MEXCE_64
-    // imm64 starts at offset 24 (10 pre-shift + 10 reduce + 2 y^2 + 2-byte opcode)
+    // imm64 starts at offset 26 (10 pre-shift + 10 reduce + 2 y^2 + 2-byte opcode)
     *((void**)(code + 26)) = (void*)mexce_trig_mfactors;
 #   else
-    // imm32 starts at offset 23 (10 + 10 + 2 + 1)
+    // imm32 starts at offset 25 (10 + 10 + 2 + 1)
     *((void**)(code + 25)) = (void*)mexce_trig_mfactors;
 #   endif
     return Function(0, "sin", 1, 0, sizeof(code), code);
@@ -871,12 +851,12 @@ inline Function Sqrt()
 inline
 void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
-    auto f = static_pointer_cast<Function>(*it);
+    auto f = it->f;
 
-    if ((*f->args[0])->element_type == CCONST) {
-        auto v = static_pointer_cast<Constant>(*f->args[0]);
+    if (f->args[0]->type == Element_type::CCONST) {
+        auto v = f->args[0]->c;
 
-        double v_d = v->get_data_as_double();
+        double v_d = v->value;
         double r_d = round(v_d);
         double a_d = abs(v_d);
 
@@ -993,6 +973,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2-matched, 0, s.s.str().size(), cc, nullptr);
 
         if (matched) {
+            f_opt->args.resize(1);
             f_opt->args[0] = f->args[1];
             elist->erase(f->args[0]);
         }
@@ -1000,7 +981,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             f_opt->args[0] = f->args[0];
             f_opt->args[1] = f->args[1];
         }
-        *it = f_opt;
+        *it = Element(f_opt);
     }
 }
 
@@ -1287,8 +1268,8 @@ inline
 pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it)
 {
     auto it_end = next(it);
-    while ( (*it) ->element_type == CFUNC) {
-        shared_ptr<Function> f = static_pointer_cast<Function>( *it );
+    while (it->type == Element_type::CFUNC) {
+        shared_ptr<Function> f = it->f;
         if (!f->args.size()) {
             break;
         }
@@ -1314,13 +1295,13 @@ struct elist_comparison {
         auto itb = b.begin();
         for (; ita != a.end(); ita++, itb++) {
             // start by comparing element types
-            if ((*ita)->element_type != (*itb)->element_type) {
-                return (*ita)->element_type > (*itb)->element_type;
+            if (ita->type != itb->type) {
+                return ita->type > itb->type;
             }
 
             // Compare deterministic IDs.
-            if ((*ita)->id != (*itb)->id) {
-                return (*ita)->id < (*itb)->id;
+            if (ita->id != itb->id) {
+                return ita->id < itb->id;
             }
         }
 
@@ -1329,9 +1310,8 @@ struct elist_comparison {
 };
 
 
-
-template <uint8_t OP>
-void emit_apply_op_with_value(impl::mexce_charstream& s, shared_ptr<impl::Value> v)
+template <uint8_t OP, typename T>
+void emit_apply_op_with_value(impl::mexce_charstream& s, const T& v)
 {
     using namespace impl;
 #ifdef MEXCE_64
@@ -1402,44 +1382,51 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
 {
     using namespace impl;
 
-    elist_const_it_t it = first;
-
-    for (; it != last; it++) {
-        if ((*it)->element_type == CVAR  ||
-            (*it)->element_type == CCONST)
-        {
-            Value * tn = (Value *) it->get();
-
+    for (auto it = first; it != last; ++it) {
+        switch (it->type) {
+            case Element_type::CVAR: {
+                auto tn = it->v;
 #ifdef MEXCE_64
-            code_buffer << (uint16_t)0xb848;   // move input address to rax (opcode)
-            code_buffer << (void*)tn->address;
+                code_buffer << (uint16_t)0xb848;   // move input address to rax (opcode)
+                code_buffer << (void*)tn->address;
 #endif
-
-            switch (tn->numeric_data_type) {
+                switch (tn->numeric_data_type) {
 #ifdef MEXCE_64
-                // On x64, variable addresses are already supplied in rax.
-                case M32FP:   code_buffer < 0xd9 < 0x00; break;
-                case M64FP:   code_buffer < 0xdd < 0x00; break;
-                case M16INT:  code_buffer < 0xdf < 0x00; break;
-                case M32INT:  code_buffer < 0xdb < 0x00; break;
-                case M64INT:  code_buffer < 0xdf < 0x28; break;
+                    case M32FP:   code_buffer < 0xd9 < 0x00; break;
+                    case M64FP:   code_buffer < 0xdd < 0x00; break;
+                    case M16INT:  code_buffer < 0xdf < 0x00; break;
+                    case M32INT:  code_buffer < 0xdb < 0x00; break;
+                    case M64INT:  code_buffer < 0xdf < 0x28; break;
 #else
-                // On 32-bit x86, variable addresses are explicitly specified.
-                case M32FP:   code_buffer < 0xd9 < 0x05; break;
-                case M64FP:   code_buffer < 0xdd < 0x05; break;
-                case M16INT:  code_buffer < 0xdf < 0x05; break;
-                case M32INT:  code_buffer < 0xdb < 0x05; break;
-                case M64INT:  code_buffer < 0xdf < 0x2d; break;
+                    case M32FP:   code_buffer < 0xd9 < 0x05; break;
+                    case M64FP:   code_buffer < 0xdd < 0x05; break;
+                    case M16INT:  code_buffer < 0xdf < 0x05; break;
+                    case M32INT:  code_buffer < 0xdb < 0x05; break;
+                    case M64INT:  code_buffer < 0xdf < 0x2d; break;
 #endif
-            }
-
+                }
 #ifndef MEXCE_64
-            code_buffer << (void*)(tn->address);
+                code_buffer << (void*)(tn->address);
 #endif
-        }
-        else {
-            Function * tf = (Function *) it->get();
-            code_buffer.s.write(tf->code.data(), tf->code.size());
+                break;
+            }
+            case Element_type::CCONST: {
+                auto tn = it->c;
+#ifdef MEXCE_64
+                code_buffer << (uint16_t)0xb848;
+                code_buffer << (void*)tn->address;
+                code_buffer < 0xdd < 0x00;
+#else
+                code_buffer < 0xdd < 0x05;
+                code_buffer << (void*)(tn->address);
+#endif
+                break;
+            }
+            case Element_type::CFUNC: {
+                auto tf = it->f;
+                code_buffer.s.write(tf->code.data(), tf->code.size());
+                break;
+            }
         }
     }
 }
@@ -1508,20 +1495,22 @@ string elist_to_string(const elist_t& elist)
     st.push_back(make_tuple(string(), 2, vector<string>{""}));
 
     for (auto it = elist.rbegin(); it != elist.rend(); it++) {
-        auto e = *it;
-        if (e->element_type == CFUNC) {
-            auto f = static_pointer_cast<Function>(e);
-            st.push_back(make_tuple(string(), f->args.size() + 1, vector<string>{f->name} ));
-        }
-        else
-        if (e->element_type == CCONST) {
-            auto c = static_pointer_cast<Constant>(e);
-            get<2>(st.back()).push_back( double_to_pretty_string(c->get_data_as_double()) );
-        }
-        else
-        if (e->element_type == CVAR) {
-            auto v = static_pointer_cast<Variable>(e);
-            get<2>(st.back()).push_back( v->name );
+        switch(it->type) {
+            case Element_type::CFUNC: {
+                auto f = it->f;
+                st.push_back(make_tuple(string(), f->args.size() + 1, vector<string>{f->name}));
+                break;
+            }
+            case Element_type::CCONST: {
+                auto c = it->c;
+                get<2>(st.back()).push_back(double_to_pretty_string(c->value));
+                break;
+            }
+            case Element_type::CVAR: {
+                auto v = it->v;
+                get<2>(st.back()).push_back(v->name);
+                break;
+            }
         }
 
         while ( get<2>(st.back()).size() ==  get<1>(st.back()) ) {
@@ -1570,8 +1559,8 @@ string elist_to_string(const elist_t& elist)
 inline
 void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
-    auto f = static_pointer_cast<Function>(*it);
-    auto fname = string(f->name);
+    auto f = it->f;
+    auto fname = f->name;
     int fclass = (fname == "add" || fname == "sub") ? 1 : (fname == "mul" || fname == "div") ? 2 : 0;
     assert(fclass);
 
@@ -1579,9 +1568,9 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     bool arg2_inv = (fname == "sub" || fname == "div");
 
-    if (f->parent != elist->end() &&  (*f->parent)->element_type == CFUNC) {
-        shared_ptr<Function> pf = static_pointer_cast<Function>(*f->parent);
-        auto pname = string(pf->name);
+    if (f->parent != elist->end() && f->parent->type == Element_type::CFUNC) {
+        shared_ptr<Function> pf = f->parent->f;
+        auto pname = pf->name;
         int pclass = (pname == "add" || pname == "sub") ? 1 : (pname == "mul" || pname == "div") ? 2 : 0;
         bool parg2_inv = (pname == "sub" || pname == "div");
 
@@ -1608,7 +1597,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             pf->force_not_constant = true;
 
-            *it = make_intermediate_constant(ev, neutral);
+            *it = Element(make_intermediate_constant(ev, neutral));
 
             return;
         }
@@ -1636,13 +1625,13 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     for (int i=0; i<2; i++) {
         for (auto e = f->absorbed[i].begin(); e!=f->absorbed[i].end(); ) {
             auto next_e = next(e);
-            if (e->size()==1 && e->front()->element_type == CCONST) {
-                auto v = static_pointer_cast<Constant>(e->front());
+            if (e->size()==1 && e->front().type == Element_type::CCONST) {
+                auto v = e->front().c;
                 if (fclass==1) {
-                    ac[i] += v->get_data_as_double();
+                    ac[i] += v->value;
                 }
                 else {
-                    ac[i] *= v->get_data_as_double();
+                    ac[i] *= v->value;
                 }
                 f->absorbed[i].erase(e);
             }
@@ -1676,16 +1665,20 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             // we can multiply directly from memory, to save one place in the FPU
             // stack. This is a tradeoff, as it might be slightly slower to do so.
 
-            if (constant_added && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0 &&
-                (e.first.front()->element_type == CCONST || e.first.front()->element_type == CVAR) )
+            if (constant_added && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0)
             {
-                auto v = static_pointer_cast<Value>(e.first.front());
-                if (v->numeric_data_type != M64INT) { // see emit_apply_op_with_value implementation
+                auto& elem = e.first.front();
+                if (elem.type == Element_type::CCONST && elem.c->numeric_data_type != M64INT) {
+                    if (e.second == 1) emit_apply_op_with_value<0x00>(s, elem.c);
+                    else emit_apply_op_with_value<0x20>(s, elem.c);
+                    continue;
+                }
+                if (elem.type == Element_type::CVAR && elem.v->numeric_data_type != M64INT) {
                     if (e.second == 1) {
-                        emit_apply_op_with_value<0x00>(s, v);
+                        emit_apply_op_with_value<0x00>(s, elem.v);
                     }
                     else {
-                        emit_apply_op_with_value<0x20>(s, v);
+                        emit_apply_op_with_value<0x20>(s, elem.v);
                     }
                     continue;
                 }
@@ -1752,16 +1745,24 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             // we can multiply directly from memory, to save one place in the FPU
             // stack. This is a tradeoff, as it might be slightly slower to do so.
 
-            if (constant_multiplied && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0 &&
-                (e.first.front()->element_type == CCONST || e.first.front()->element_type == CVAR) )
+            if (constant_multiplied && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0)
             {
-                auto v = static_pointer_cast<Value>(e.first.front());
-                if (v->numeric_data_type != M64INT) { // see emit_apply_op_with_value implementation
+                auto& elem = e.first.front();
+                if (elem.type == Element_type::CCONST && elem.c->numeric_data_type != M64INT) {
                     if (e.second == 1) {
-                        emit_apply_op_with_value<0x08>(s, v);
+                        emit_apply_op_with_value<0x08>(s, elem.c);
                     }
                     else {
-                        emit_apply_op_with_value<0x30>(s, v);
+                        emit_apply_op_with_value<0x30>(s, elem.c);
+                    }
+                    continue;
+                }
+                if (elem.type == Element_type::CVAR && elem.v->numeric_data_type != M64INT) {
+                    if (e.second == 1) {
+                        emit_apply_op_with_value<0x08>(s, elem.v);
+                    }
+                    else {
+                        emit_apply_op_with_value<0x30>(s, elem.v);
                     }
                     continue;
                 }
@@ -1792,9 +1793,9 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             }
             else {
                 elist_t pow_list = e.first;
-                pow_list.push_back(make_intermediate_constant(ev, e.second));
+                pow_list.push_back(Element(make_intermediate_constant(ev, e.second)));
                 auto pow_f = make_function(ev, "pow");
-                pow_list.push_back(pow_f);
+                pow_list.push_back(Element(pow_f));
                 link_arguments(pow_list);
                 pow_f->optimizer(prev(pow_list.end()), ev, &pow_list);
 
@@ -1827,7 +1828,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     uint8_t* cc = push_intermediate_code(ev, s.s.str());
     auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.s.str().size(), cc, nullptr);
 
-    *it = f_opt;
+    *it = Element(f_opt);
     return;
 }
 
@@ -1980,10 +1981,11 @@ inline shared_ptr<Function> make_function(evaluator* ev, const string& name) {
 
 inline const map<string, shared_ptr<Constant> >& built_in_constants_map()
 {
-    static const map<string, shared_ptr<Constant> > cname_map = {
-        { "pi", std::make_shared<impl::Constant>(0, "3.141592653589793238462643383", "pi") },
-        { "e",  std::make_shared<impl::Constant>(1, "2.718281828459045235360287471", "e" ) }
-    };
+    static map<string, shared_ptr<Constant> > cname_map;
+    if (cname_map.empty()) {
+        cname_map["pi"] = std::make_shared<Constant>(0, "3.141592653589793238462643383", "pi");
+        cname_map["e"]  = std::make_shared<Constant>(1, "2.718281828459045235360287471", "e");
+    }
     return cname_map;
 }
 
@@ -2059,7 +2061,6 @@ void evaluator::unbind(const std::string& s, Args&... args)
 
     auto it = m_variables.find(s);
     if (it != m_variables.end()) {
-        assert(it->second->element_type == impl::CVAR);
         if (it->second->referenced) {
             set_expression("0");
         }
@@ -2464,11 +2465,11 @@ void evaluator::set_expression(std::string e)
             case INFIX_2:
             case INFIX_1: {
                 auto name = infix_operator_to_function_name(temp.content);
-                m_elist.push_back( make_function(this, name) );
+                m_elist.push_back(Element(make_function(this, name)));
                 break;
             }
             case FUNCTION_NAME:
-                m_elist.push_back(make_function(this, temp.content));
+                m_elist.push_back(Element(make_function(this, temp.content)));
                 break;
             case UNARY:
                 if (temp.content == "-") { // unary '+' is ignored
@@ -2483,24 +2484,24 @@ void evaluator::set_expression(std::string e)
 
                     link_arguments(m_elist);
                     auto chunk = get_dependent_chunk(std::prev(m_elist.end()));
-                    m_elist.insert(chunk.first, make_intermediate_constant(this, 0.0));
-                    m_elist.push_back( make_function(this, "sub") );
+                    m_elist.insert(chunk.first, Element(make_intermediate_constant(this, 0.0)));
+                    m_elist.push_back(Element(make_function(this, "sub")));
                 }
                 break;
             case NUMERIC_LITERAL: {
                 double c_value = atof(temp.content.c_str());
-                m_elist.push_back(make_intermediate_constant(this, c_value));
+                m_elist.push_back(Element(make_intermediate_constant(this, c_value)));
                 break;
             }
             case CONSTANT_NAME: {
-                m_elist.push_back(m_constants.find(temp.content)->second);
+                m_elist.push_back(Element(m_constants.find(temp.content)->second));
                 break;
             }
             case VARIABLE_NAME: {
                 auto it = m_variables.find(temp.content);
                 assert(it != m_variables.end());
                 it->second->referenced = true;
-                m_elist.push_back(it->second);
+                m_elist.push_back(Element(it->second));
                 break;
             }
         }
@@ -2512,14 +2513,14 @@ void evaluator::set_expression(std::string e)
     // choose more suitable functions, where applicable
     for (auto y = m_elist.begin(); y != m_elist.end(); ) {
         auto y_next = next(y);
-        if ((*y)->element_type == CFUNC) {
-            auto f = static_pointer_cast<Function>(*y);
+        if (y->type == Element_type::CFUNC) {
+            auto f = y->f;
 
             // eliminate constants
             if (!f->force_not_constant) {
                 bool all_args_are_const = true;
                 for (size_t j = 0; j < f->num_args; j++) {
-                    if ((*f->args[j])->element_type != CCONST) {
+                    if (f->args[j]->type != Element_type::CCONST) {
                         all_args_are_const = false;
                         break;
                     }
@@ -2530,7 +2531,7 @@ void evaluator::set_expression(std::string e)
                     compile_and_finalize_elist(first_arg_it, next(y));
                     double res = evaluate_fptr();
                     m_elist.erase(first_arg_it, y);
-                    *y = make_intermediate_constant(this, res);
+                    *y = Element(make_intermediate_constant(this, res));
                     y = y_next;
                     continue;
                 }
@@ -2543,10 +2544,9 @@ void evaluator::set_expression(std::string e)
         y = y_next;
     }
 
-    is_constant_expression = m_elist.size()==1 && m_elist.back()->element_type == CCONST;
+    is_constant_expression = m_elist.size()==1 && m_elist.back().type == Element_type::CCONST;
     if (is_constant_expression) {
-        auto v = static_pointer_cast<Constant>(m_elist.back());
-        constant_expression_value = v->get_data_as_double();
+        constant_expression_value = m_elist.back().c->value;
     }
     else {
         compile_and_finalize_elist(m_elist.begin(), m_elist.end());
@@ -2556,7 +2556,7 @@ void evaluator::set_expression(std::string e)
 
 
 inline
-void evaluator::compile_and_finalize_elist(impl::elist_it_t first, impl::elist_it_t last)
+void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::elist_const_it_t last)
 {
     using namespace impl;
 
