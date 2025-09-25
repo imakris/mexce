@@ -476,25 +476,103 @@ int main(int argc, char* argv[])
     print_kv("Native expressions covered", std::to_string(native_covered));
 
     out << "\nAccuracy distribution (ULP):\n";
-    auto print_distribution = [&](const std::string& label, size_t comparisons, size_t exact_zero_count, const std::vector<size_t>& bins) {
-        print_kv("  " + label + " (samples)", std::to_string(comparisons));
-        if (comparisons == 0) {
-            return;
-        }
-        print_kv("    0 (exact)", std::to_string(exact_zero_count));
-        for (size_t bin_idx = 0; bin_idx < k_num_bins; ++bin_idx) {
-            char buf[64];
-            uint64_t lo = (bin_idx == 0 ? 1 : (k_bin_thresholds[bin_idx - 1] + 1));
-            uint64_t hi = k_bin_thresholds[bin_idx];
-            std::snprintf(buf, sizeof(buf), "    %llu-%llu", (unsigned long long)lo, (unsigned long long)hi);
-            print_kv(buf, std::to_string(bins[bin_idx]));
-        }
-        print_kv("    >65536", std::to_string(bins[k_num_bins]));
+
+    struct Distribution_column {
+        std::string title;
+        size_t comparisons;
+        size_t exact_zero_count;
+        const std::vector<size_t>* bins;
     };
 
-    print_distribution("Mexce vs Reference", comparisons_mexce_ref, exact_zero_count_mexce_ref, bin_counts_mexce_ref);
-    print_distribution("Mexce vs Compiler", comparisons_mexce_comp, exact_zero_count_mexce_comp, bin_counts_mexce_comp);
-    print_distribution("Compiler vs Reference", comparisons_comp_ref, exact_zero_count_comp_ref, bin_counts_comp_ref);
+    const Distribution_column distribution_columns[] = {
+        {"Mexce vs Reference", comparisons_mexce_ref, exact_zero_count_mexce_ref, &bin_counts_mexce_ref},
+        {"Compiler vs Reference", comparisons_comp_ref, exact_zero_count_comp_ref, &bin_counts_comp_ref},
+        {"Mexce vs Compiler", comparisons_mexce_comp, exact_zero_count_mexce_comp, &bin_counts_mexce_comp}
+    };
+
+    std::vector<std::string> row_labels;
+    row_labels.reserve(k_num_bins + 3);
+    row_labels.emplace_back("Samples");
+    row_labels.emplace_back("0 (exact)");
+    for (size_t bin_idx = 0; bin_idx < k_num_bins; ++bin_idx) {
+        char buf[32];
+        uint64_t lo = (bin_idx == 0 ? 1 : (k_bin_thresholds[bin_idx - 1] + 1));
+        uint64_t hi = k_bin_thresholds[bin_idx];
+        std::snprintf(buf, sizeof(buf), "%llu-%llu", (unsigned long long)lo, (unsigned long long)hi);
+        row_labels.emplace_back(buf);
+    }
+    row_labels.emplace_back(">65536");
+
+    const std::string label_header = "Metric";
+    size_t label_width = label_header.size();
+    for (const auto& label : row_labels) {
+        label_width = std::max(label_width, label.size());
+    }
+
+    std::vector<std::vector<std::string>> column_values(3);
+    for (size_t column_idx = 0; column_idx < 3; ++column_idx) {
+        const Distribution_column& column = distribution_columns[column_idx];
+        std::vector<std::string>& values = column_values[column_idx];
+        values.reserve(row_labels.size());
+        values.emplace_back(std::to_string(column.comparisons));
+        if (column.comparisons == 0) {
+            values.emplace_back("-");
+            for (size_t bin_idx = 0; bin_idx < k_num_bins + 1; ++bin_idx) {
+                values.emplace_back("-");
+            }
+        }
+        else {
+            values.emplace_back(std::to_string(column.exact_zero_count));
+            for (size_t bin_idx = 0; bin_idx < k_num_bins; ++bin_idx) {
+                values.emplace_back(std::to_string((*column.bins)[bin_idx]));
+            }
+            values.emplace_back(std::to_string((*column.bins)[k_num_bins]));
+        }
+    }
+
+    std::vector<size_t> column_widths(3, 0);
+    for (size_t column_idx = 0; column_idx < 3; ++column_idx) {
+        const Distribution_column& column = distribution_columns[column_idx];
+        column_widths[column_idx] = column.title.size();
+        for (const std::string& value : column_values[column_idx]) {
+            column_widths[column_idx] = std::max(column_widths[column_idx], value.size());
+        }
+    }
+
+    const auto print_table_row = [&](const std::string& label, size_t row_index) {
+        out << std::left << std::setw((int)label_width) << label << "  ";
+        for (size_t column_idx = 0; column_idx < 3; ++column_idx) {
+            out << std::setw((int)column_widths[column_idx]) << column_values[column_idx][row_index];
+            if (column_idx + 1 != 3) {
+                out << "  ";
+            }
+        }
+        out << "\n";
+    };
+
+    out << std::left << std::setw((int)label_width) << label_header << "  ";
+    for (size_t column_idx = 0; column_idx < 3; ++column_idx) {
+        out << std::setw((int)column_widths[column_idx]) << distribution_columns[column_idx].title;
+        if (column_idx + 1 != 3) {
+            out << "  ";
+        }
+    }
+    out << "\n";
+
+    out << std::string((int)label_width, '-') << "  ";
+    for (size_t column_idx = 0; column_idx < 3; ++column_idx) {
+        out << std::string((int)column_widths[column_idx], '-');
+        if (column_idx + 1 != 3) {
+            out << "  ";
+        }
+    }
+    out << "\n";
+
+    for (size_t row_idx = 0; row_idx < row_labels.size(); ++row_idx) {
+        print_table_row(row_labels[row_idx], row_idx);
+    }
+
+    out << "\n";
 
     out << "\n" << line << "\n" << "BENCHMARK SUMMARY" << "\n" << line << "\n";
     print_kv("Functions benchmarked", std::to_string(benchmarked_functions));
