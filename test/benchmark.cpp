@@ -189,7 +189,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    int iterations = 10000;
+    int iterations = 100000;
     std::string output_path = "benchmark_results.txt";
     bool iterations_set = false;
 
@@ -262,6 +262,13 @@ int main(int argc, char* argv[])
         output_stream = &file_output;
     }
     std::ostream& out = *output_stream;
+
+#ifdef BENCHMARK_COMPILER
+    out << "Compiler: " << BENCHMARK_COMPILER << std::endl;
+#endif
+#ifdef BENCHMARK_COMPILER_FLAGS
+    out << "Compiler flags: " << BENCHMARK_COMPILER_FLAGS << std::endl;
+#endif
 
     const volatile std::size_t total_expressions = mexce::benchmark_data::kExpressionCount; // volatile, only for MSVC to shut up
     if (total_expressions == 0) {
@@ -491,8 +498,7 @@ int main(int argc, char* argv[])
     };
 
     std::vector<std::string> row_labels;
-    row_labels.reserve(k_num_bins + 3);
-    row_labels.emplace_back("Samples");
+    row_labels.reserve(k_num_bins + 2);
     row_labels.emplace_back("0 (exact)");
     for (size_t bin_idx = 0; bin_idx < k_num_bins; ++bin_idx) {
         char buf[32];
@@ -516,7 +522,6 @@ int main(int argc, char* argv[])
         const Distribution_column& column = distribution_columns[column_idx];
         std::vector<std::string>& values = column_values[column_idx];
         values.reserve(row_labels.size());
-        values.emplace_back(std::to_string(column.comparisons));
         if (column.comparisons == 0) {
             values.emplace_back("-");
             for (size_t bin_idx = 0; bin_idx < k_num_bins + 1; ++bin_idx) {

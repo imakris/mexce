@@ -11,10 +11,56 @@ find_package(OpenMP REQUIRED)
 target_link_libraries(benchmark PRIVATE OpenMP::OpenMP_CXX)
 
 if (MSVC)
-    target_compile_options(benchmark PRIVATE /W4 /permissive- /bigobj)
+    set(MEXCE_BENCHMARK_LOCAL_FLAGS /W4 /permissive- /bigobj)
 else()
-    target_compile_options(benchmark PRIVATE -Wall -Wextra -Wpedantic)
+    set(MEXCE_BENCHMARK_LOCAL_FLAGS -Wall -Wextra -Wpedantic)
 endif()
+
+target_compile_options(benchmark PRIVATE ${MEXCE_BENCHMARK_LOCAL_FLAGS})
+
+set(MEXCE_BENCHMARK_COMPILER "${CMAKE_CXX_COMPILER_ID}")
+if (CMAKE_CXX_COMPILER_VERSION)
+    string(APPEND MEXCE_BENCHMARK_COMPILER " ${CMAKE_CXX_COMPILER_VERSION}")
+endif()
+
+set(MEXCE_BENCHMARK_FLAGS "${CMAKE_CXX_FLAGS}")
+if (CMAKE_BUILD_TYPE)
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" MEXCE_BUILD_TYPE_UPPER)
+    if (DEFINED CMAKE_CXX_FLAGS_${MEXCE_BUILD_TYPE_UPPER})
+        set(MEXCE_BUILD_TYPE_FLAGS "${CMAKE_CXX_FLAGS_${MEXCE_BUILD_TYPE_UPPER}}")
+        if (MEXCE_BUILD_TYPE_FLAGS)
+            if (MEXCE_BENCHMARK_FLAGS)
+                string(APPEND MEXCE_BENCHMARK_FLAGS " ")
+            endif()
+            string(APPEND MEXCE_BENCHMARK_FLAGS "${MEXCE_BUILD_TYPE_FLAGS}")
+        endif()
+    endif()
+endif()
+
+if (MEXCE_BENCHMARK_LOCAL_FLAGS)
+    list(JOIN MEXCE_BENCHMARK_LOCAL_FLAGS " " MEXCE_BENCHMARK_LOCAL_FLAGS_STR)
+    if (MEXCE_BENCHMARK_LOCAL_FLAGS_STR)
+        if (MEXCE_BENCHMARK_FLAGS)
+            string(APPEND MEXCE_BENCHMARK_FLAGS " ")
+        endif()
+        string(APPEND MEXCE_BENCHMARK_FLAGS "${MEXCE_BENCHMARK_LOCAL_FLAGS_STR}")
+    endif()
+endif()
+
+string(STRIP "${MEXCE_BENCHMARK_FLAGS}" MEXCE_BENCHMARK_FLAGS)
+if ("${MEXCE_BENCHMARK_FLAGS}" STREQUAL "")
+    set(MEXCE_BENCHMARK_FLAGS "<none>")
+endif()
+
+foreach(_var MEXCE_BENCHMARK_COMPILER MEXCE_BENCHMARK_FLAGS)
+    string(REPLACE "\\" "\\\\" ${_var} "${${_var}}")
+    string(REPLACE "\"" "\\\"" ${_var} "${${_var}}")
+endforeach()
+
+target_compile_definitions(benchmark PRIVATE
+    BENCHMARK_COMPILER="${MEXCE_BENCHMARK_COMPILER}"
+    BENCHMARK_COMPILER_FLAGS="${MEXCE_BENCHMARK_FLAGS}"
+)
 
 enable_testing()
 add_test(NAME benchmark_quick
