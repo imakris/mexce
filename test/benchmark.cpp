@@ -347,7 +347,7 @@ int main(int argc, char* argv[])
         rec.expected = golden;
         rec.compiled = false;
         rec.eval_ok = false;
-        rec.native_available = idx < mexce::benchmark_data::kNativeExpressionCount;
+        rec.native_available = idx < mexce::benchmark_data::kNativeExpressionsCount;
         rec.native_eval_ok = false;
         rec.mexce_result = std::numeric_limits<double>::quiet_NaN();
         rec.native_result = std::numeric_limits<double>::quiet_NaN();
@@ -472,7 +472,7 @@ int main(int argc, char* argv[])
     }
 
     const std::size_t total_expr_count = static_cast<std::size_t>(total_expressions);
-    const std::size_t native_covered = std::min<std::size_t>(total_expr_count, mexce::benchmark_data::kNativeExpressionCount);
+    const std::size_t native_covered = std::min<std::size_t>(total_expr_count, mexce::benchmark_data::kNativeExpressionsCount);
     print_kv("Native expressions covered", std::to_string(native_covered));
 
     out << "\nAccuracy distribution (ULP):\n";
@@ -485,9 +485,9 @@ int main(int argc, char* argv[])
     };
 
     const Distribution_column distribution_columns[] = {
-        {"Mexce vs Reference", comparisons_mexce_ref, exact_zero_count_mexce_ref, &bin_counts_mexce_ref},
-        {"Compiler vs Reference", comparisons_comp_ref, exact_zero_count_comp_ref, &bin_counts_comp_ref},
-        {"Mexce vs Compiler", comparisons_mexce_comp, exact_zero_count_mexce_comp, &bin_counts_mexce_comp}
+        {"Mexce vs Reference",    comparisons_mexce_ref, exact_zero_count_mexce_ref,   &bin_counts_mexce_ref},
+        {"Compiler vs Reference", comparisons_comp_ref,  exact_zero_count_comp_ref,    &bin_counts_comp_ref},
+        {"Mexce vs Compiler",     comparisons_mexce_comp, exact_zero_count_mexce_comp, &bin_counts_mexce_comp}
     };
 
     std::vector<std::string> row_labels;
@@ -502,6 +502,8 @@ int main(int argc, char* argv[])
         row_labels.emplace_back(buf);
     }
     row_labels.emplace_back(">65536");
+
+    using std::max;
 
     const std::string label_header = "Metric";
     size_t label_width = label_header.size();
@@ -616,12 +618,12 @@ int main(int argc, char* argv[])
         summary_columns.push_back(std::move(compiler_column));
     }
 
-    size_t label_width = std::string("Metric").size();
+    label_width = std::string("Metric").size();
     for (const std::string& row_label : summary_rows) {
         label_width = max(label_width, row_label.size());
     }
 
-    std::vector<size_t> column_widths(summary_columns.size(), 0);
+    column_widths = std::vector<size_t>(summary_columns.size(), 0);
     for (size_t column_idx = 0; column_idx < summary_columns.size(); ++column_idx) {
         Summary_column& column = summary_columns[column_idx];
         column_widths[column_idx] = column.title.size();
