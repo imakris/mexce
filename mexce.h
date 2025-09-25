@@ -106,7 +106,7 @@
  * * `evaluate()` executes the previously compiled expression.  Constant
  *   expressions are folded during compilation and return immediately.
  */
- 
+
 
 #ifndef MEXCE_INCLUDED
 #define MEXCE_INCLUDED
@@ -376,8 +376,8 @@ string double_to_hex( double v )
     uint64_t* u64p = (uint64_t*)&v;
 
     stringstream stream;
-    stream << "0x" 
-        << std::setfill ('0') << std::setw(sizeof(*u64p)*2) 
+    stream << "0x"
+        << std::setfill ('0') << std::setw(sizeof(*u64p)*2)
         << std::hex << *u64p;
     return stream.str();
 }
@@ -461,7 +461,7 @@ struct Function: public Element
     size_t              stack_req;
     string              name;
     size_t              num_args;
-    
+
     vector<elist_it_t>  args;
     elist_it_t          parent;
     size_t              parent_arg_index = size_t(~0); // index in postfix order (inverted), i.e. arg1-arg0
@@ -1004,14 +1004,14 @@ inline Function Pow()
         0xdf, 0x5c, 0x24, 0xfe,                     // fistp       word ptr [esp-2]         }
         0x66, 0x8b, 0x44, 0x24, 0xfe,               // mov         ax, word ptr [esp-2]     } if (abs(exponent) > 32)
         0x66, 0x83, 0xe8, 0x01,                     // sub         ax, 1                    }    goto generic_pow;
-        0x66, 0x83, 0xf8, 0x21,                     // cmp         ax, 1fh                  } 
+        0x66, 0x83, 0xf8, 0x21,                     // cmp         ax, 1fh                  }
         0x77, 0x22,                                 // ja          generic_pow              }
 
         0xd9, 0xc1,                                 // fld         st(1)
 // loop_start:
-        0x66, 0x85, 0xc0,                           // test        ax, ax  
+        0x66, 0x85, 0xc0,                           // test        ax, ax
         0x74, 0x08,                                 // je          loop_end
-        0xdc, 0xca,                                 // fmul        st(2), st  
+        0xdc, 0xca,                                 // fmul        st(2), st
         0x66, 0x83, 0xe8, 0x01,                     // sub         ax, 1
         0xeb, 0xf3,                                 // jmp         loop_start
 
@@ -1066,14 +1066,14 @@ inline Function Pow()
 inline Function Exp()
 {
     static uint8_t code[]  =  {
-        0xd9, 0xea,                                 // fldl2e  
-        0xde, 0xc9,                                 // fmulp       st(1), st  
-        0xd9, 0xe8,                                 // fld1  
-        0xd9, 0xc1,                                 // fld         st(1)  
-        0xd9, 0xf8,                                 // fprem  
-        0xd9, 0xf0,                                 // f2xm1  
-        0xde, 0xc1,                                 // faddp       st(1), st  
-        0xd9, 0xfd,                                 // fscale  
+        0xd9, 0xea,                                 // fldl2e
+        0xde, 0xc9,                                 // fmulp       st(1), st
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xc1,                                 // fld         st(1)
+        0xd9, 0xf8,                                 // fprem
+        0xd9, 0xf0,                                 // f2xm1
+        0xde, 0xc1,                                 // faddp       st(1), st
+        0xd9, 0xfd,                                 // fscale
         0xdd, 0xd9,                                 // fstp        st(1)
     };
     return Function("exp", 1, 1, sizeof(code), code);
@@ -1239,12 +1239,12 @@ inline Function Mod()
 inline Function Less_than()
 {
     static uint8_t code[] = {
-        0xdf, 0xf1,                                 // fcomip      st,st(1)  
-        0xdd, 0xd8,                                 // fstp        st(0)  
-        0xd9, 0xe8,                                 // fld1  
-        0xd9, 0xee,                                 // fldz  
-        0xdb, 0xd1,                                 // fcmovnb     st,st(1)  
-        0xdd, 0xd9,                                 // fstp        st(1)  
+        0xdf, 0xf1,                                 // fcomip      st,st(1)
+        0xdd, 0xd8,                                 // fstp        st(0)
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xee,                                 // fldz
+        0xdb, 0xd1,                                 // fcmovnb     st,st(1)
+        0xdd, 0xd9,                                 // fstp        st(1)
     };
     return Function("less_than", 2, 0, sizeof(code), code);
 }
@@ -1359,8 +1359,8 @@ void emit_apply_op_with_value(impl::mexce_charstream& s, shared_ptr<impl::Value>
 #endif
     s << v->address;                        //                   [the address]
     switch(v->numeric_data_type) {
-        case M16INT: s < 0xde < OP; break;  // f[OP]  word  ptr [eax/rax]  
-        case M32INT: s < 0xda < OP; break;  // f[OP]  dword ptr [eax/rax]  
+        case M16INT: s < 0xde < OP; break;  // f[OP]  word  ptr [eax/rax]
+        case M32INT: s < 0xda < OP; break;  // f[OP]  dword ptr [eax/rax]
         case M32FP:  s < 0xd8 < OP; break;  // f[OP]  dword ptr [eax/rax]
         case M64FP:  s < 0xdc < OP; break;  // f[OP]  qword ptr [eax/rax]
 
@@ -1715,7 +1715,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             if (e.second == 1) {
                 // 1*a == a
-                // we loaded the expression, there is nothing further to do                
+                // we loaded the expression, there is nothing further to do
             }
             else
             if (e.second == -1) {
@@ -1792,7 +1792,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
                 if (e.second == 1) {
                     // a^1 == a
-                    // we loaded the expression, there is nothing further to do                
+                    // we loaded the expression, there is nothing further to do
                 }
                 else
                 if (e.second == -1) {   //  1/a
@@ -1846,7 +1846,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     uint8_t* cc = push_intermediate_code(ev, s.s.str());
     auto f_opt = make_shared<Function>(new_name, 0, 0, s.s.str().size(), cc, nullptr);
-    
+
     *it = f_opt;
     return;
 }
@@ -1920,7 +1920,7 @@ inline Function Gain()
         0xde, 0xe9,                                 // fsubp       st(1),st  ; 2a-1, a, x
         0xde, 0xf1,                                 // fdivrp      st(1),st  ; (2a-1)/a, x
         0xd9, 0xc1,                                 // fld         st(1)     ; x, (2a-1)/a, x
-        0xdc, 0xc0,                                 // fadd        st(0),st  ; 2x, (2a-1)/a, x 
+        0xdc, 0xc0,                                 // fadd        st(0),st  ; 2x, (2a-1)/a, x
         0xd9, 0xe8,                                 // fld1                  ; 1, 2x, (2a-1)/a, x
         0xde, 0xe9,                                 // fsubp       st(1),st  ; 2x-1, (2a-1)/a, x
         0xde, 0xc9,                                 // fmulp       st(1),st  ; (2x-1)*(2a-1)/a, x
@@ -2290,7 +2290,7 @@ void evaluator::set_expression(std::string e)
                         " is not a known constant, variable or function name", i));
                 }
                 if (e[i] == ')') {
-                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME : 
+                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME :
                                 m_constants.find(temp.content) != m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content) +
                             " is not a known constant or variable name", i));
@@ -2326,7 +2326,7 @@ void evaluator::set_expression(std::string e)
                     break;
                 }
                 if (is_operator(e[i])) {
-                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME : 
+                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME :
                                 m_constants.find(temp.content) != m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content) +
                             " is not a known constant or variable name", i));
@@ -2336,7 +2336,7 @@ void evaluator::set_expression(std::string e)
                     break;
                 }
                 if (e[i] == ',') {
-                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME : 
+                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME :
                                 m_constants.find(temp.content) != m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content)+" is not a "
                             "known constant or variable name", i));
@@ -2495,7 +2495,7 @@ void evaluator::set_expression(std::string e)
                     // and could be done in the optimizer too, but the optimizer is
                     // complex enough already.
 
-                    link_arguments(m_elist); 
+                    link_arguments(m_elist);
                     auto chunk = get_dependent_chunk(std::prev(m_elist.end()));
                     m_elist.insert(chunk.first, make_intermediate_constant(this, 0.0));
                     m_elist.push_back( make_function("sub") );
