@@ -575,16 +575,92 @@ int main(int argc, char* argv[])
     out << "\n";
 
     out << "\n" << line << "\n" << "BENCHMARK SUMMARY" << "\n" << line << "\n";
-    print_kv("Functions benchmarked", std::to_string(benchmarked_functions));
-    if (benchmarked_functions > 0) {
-        uint64_t avg_per_func_ns = (uint64_t)(sum_avg_ns / (long double)benchmarked_functions + 0.5L);
-        print_kv("Average runtime per function (Mexce)", format_ns(avg_per_func_ns));
-        print_kv("Total function execution time (Mexce)", format_ns((uint64_t)total_duration_ns));
+
+    struct Summary_column {
+        std::string title;
+        std::vector<std::string> values;
+    };
+
+    const std::vector<std::string> summary_rows = {
+        "Functions benchmarked",
+        "Average runtime per function",
+        "Total function execution time"
+    };
+
+    std::vector<Summary_column> summary_columns;
+    summary_columns.reserve(2);
+
+    {
+        Summary_column mexce_column;
+        mexce_column.title = "Mexce";
+        mexce_column.values.assign(summary_rows.size(), "-");
+        mexce_column.values[0] = std::to_string(benchmarked_functions);
+        if (benchmarked_functions > 0) {
+            const uint64_t avg_per_func_ns = (uint64_t)(sum_avg_ns / (long double)benchmarked_functions + 0.5L);
+            mexce_column.values[1] = format_ns(avg_per_func_ns);
+            mexce_column.values[2] = format_ns((uint64_t)total_duration_ns);
+        }
+        summary_columns.push_back(std::move(mexce_column));
     }
-    if (benchmarked_native_functions > 0) {
-        uint64_t avg_native_ns = (uint64_t)(sum_native_avg_ns / (long double)benchmarked_native_functions + 0.5L);
-        print_kv("Average runtime per function (Compiler)", format_ns(avg_native_ns));
-        print_kv("Total function execution time (Compiler)", format_ns((uint64_t)total_native_duration_ns));
+
+    {
+        Summary_column compiler_column;
+        compiler_column.title = "Compiler";
+        compiler_column.values.assign(summary_rows.size(), "-");
+        compiler_column.values[0] = std::to_string(benchmarked_native_functions);
+        if (benchmarked_native_functions > 0) {
+            const uint64_t avg_native_ns = (uint64_t)(sum_native_avg_ns / (long double)benchmarked_native_functions + 0.5L);
+            compiler_column.values[1] = format_ns(avg_native_ns);
+            compiler_column.values[2] = format_ns((uint64_t)total_native_duration_ns);
+        }
+        summary_columns.push_back(std::move(compiler_column));
+    }
+
+    size_t label_width = std::string("Metric").size();
+    for (const std::string& row_label : summary_rows) {
+        label_width = max(label_width, row_label.size());
+    }
+
+    std::vector<size_t> column_widths(summary_columns.size(), 0);
+    for (size_t column_idx = 0; column_idx < summary_columns.size(); ++column_idx) {
+        Summary_column& column = summary_columns[column_idx];
+        column_widths[column_idx] = column.title.size();
+        for (const std::string& value : column.values) {
+            column_widths[column_idx] = max(column_widths[column_idx], value.size());
+        }
+    }
+
+    auto print_summary_row = [&](const std::string& label, size_t row_idx) {
+        out << std::left << std::setw((int)label_width) << label << "  ";
+        for (size_t column_idx = 0; column_idx < summary_columns.size(); ++column_idx) {
+            out << std::setw((int)column_widths[column_idx]) << summary_columns[column_idx].values[row_idx];
+            if (column_idx + 1 != summary_columns.size()) {
+                out << "  ";
+            }
+        }
+        out << "\n";
+    };
+
+    out << std::left << std::setw((int)label_width) << "Metric" << "  ";
+    for (size_t column_idx = 0; column_idx < summary_columns.size(); ++column_idx) {
+        out << std::setw((int)column_widths[column_idx]) << summary_columns[column_idx].title;
+        if (column_idx + 1 != summary_columns.size()) {
+            out << "  ";
+        }
+    }
+    out << "\n";
+
+    out << std::string((int)label_width, '-') << "  ";
+    for (size_t column_idx = 0; column_idx < summary_columns.size(); ++column_idx) {
+        out << std::string((int)column_widths[column_idx], '-');
+        if (column_idx + 1 != summary_columns.size()) {
+            out << "  ";
+        }
+    }
+    out << "\n";
+
+    for (size_t row_idx = 0; row_idx < summary_rows.size(); ++row_idx) {
+        print_summary_row(summary_rows[row_idx], row_idx);
     }
 
     out << "\n" << line << "\n" << "DETAILED REPORT" << "\n" << line << "\n";
