@@ -486,8 +486,8 @@ int main(int argc, char* argv[])
 
     const Distribution_column distribution_columns[] = {
         {"Mexce vs Reference", comparisons_mexce_ref, exact_zero_count_mexce_ref, &bin_counts_mexce_ref},
-        {"Mexce vs Compiler", comparisons_mexce_comp, exact_zero_count_mexce_comp, &bin_counts_mexce_comp},
-        {"Compiler vs Reference", comparisons_comp_ref, exact_zero_count_comp_ref, &bin_counts_comp_ref}
+        {"Compiler vs Reference", comparisons_comp_ref, exact_zero_count_comp_ref, &bin_counts_comp_ref},
+        {"Mexce vs Compiler", comparisons_mexce_comp, exact_zero_count_mexce_comp, &bin_counts_mexce_comp}
     };
 
     std::vector<std::string> row_labels;
@@ -506,7 +506,7 @@ int main(int argc, char* argv[])
     const std::string label_header = "Metric";
     size_t label_width = label_header.size();
     for (const auto& label : row_labels) {
-        label_width = std::max(label_width, label.size());
+        label_width = max(label_width, label.size());
     }
 
     std::vector<std::vector<std::string>> column_values(3);
@@ -535,7 +535,7 @@ int main(int argc, char* argv[])
         const Distribution_column& column = distribution_columns[column_idx];
         column_widths[column_idx] = column.title.size();
         for (const std::string& value : column_values[column_idx]) {
-            column_widths[column_idx] = std::max(column_widths[column_idx], value.size());
+            column_widths[column_idx] = max(column_widths[column_idx], value.size());
         }
     }
 
