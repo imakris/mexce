@@ -1,5 +1,6 @@
 #include "benchmark_expressions.h"
 #include "benchmark_results.h"
+#include "benchmark_native_expressions.h"
 
 #ifdef _MSC_VER
 #  pragma warning(push)
@@ -248,6 +249,7 @@ int main(int argc, char* argv[])
     mexce::evaluator eval;
     double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
     eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
+    mexce::benchmark_data::NativeContext native_ctx{};
 
     std::ofstream file_output;
     std::ostream* output_stream = &std::cout;
@@ -271,9 +273,14 @@ int main(int argc, char* argv[])
         std::string expr;
         bool compiled;
         bool eval_ok;
+        bool native_available;
+        bool native_eval_ok;
         long double expected;
-        double got;
-        uint64_t ulp;
+        double mexce_result;
+        double native_result;
+        uint64_t ulp_mexce_vs_compiler;
+        uint64_t ulp_mexce_vs_reference;
+        uint64_t ulp_compiler_vs_reference;
         uint64_t avg_ns;
         long long dur_ns;
         std::string error;
@@ -288,8 +295,35 @@ int main(int argc, char* argv[])
     constexpr size_t k_num_bins = sizeof(k_bin_thresholds) / sizeof(k_bin_thresholds[0]);
 
     size_t compiled_count = 0, compile_fail_count = 0, eval_fail_count = 0;
-    size_t exact_zero_count = 0;
-    std::vector<size_t> bin_counts(k_num_bins + 1, 0);
+    size_t exact_zero_count_mexce_ref = 0;
+    size_t exact_zero_count_mexce_comp = 0;
+    size_t exact_zero_count_comp_ref = 0;
+    std::vector<size_t> bin_counts_mexce_ref(k_num_bins + 1, 0);
+    std::vector<size_t> bin_counts_mexce_comp(k_num_bins + 1, 0);
+    std::vector<size_t> bin_counts_comp_ref(k_num_bins + 1, 0);
+    size_t comparisons_mexce_ref = 0;
+    size_t comparisons_mexce_comp = 0;
+    size_t comparisons_comp_ref = 0;
+    constexpr long double k_zero_abs_tol = 1e-12L;
+
+    auto update_bin_counts = [&](uint64_t ulp, size_t& exact_zero_count, std::vector<size_t>& bins, size_t& comparisons) {
+        if (ulp == UINT64_MAX) {
+            return;
+        }
+        ++comparisons;
+        if (ulp == 0) {
+            ++exact_zero_count;
+            return;
+        }
+        size_t bin_idx = k_num_bins;
+        for (size_t bin_i = 0; bin_i < k_num_bins; ++bin_i) {
+            if (ulp <= k_bin_thresholds[bin_i]) {
+                bin_idx = bin_i;
+                break;
+            }
+        }
+        ++bins[bin_idx];
+    };
 
     long long total_duration_ns = 0;
     size_t benchmarked_functions = 0;
@@ -301,16 +335,46 @@ int main(int argc, char* argv[])
 
         a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
 
+        const double golden_d = static_cast<double>(golden);
+
         record_t rec;
         rec.expr = expr;
         rec.expected = golden;
         rec.compiled = false;
         rec.eval_ok = false;
-        rec.got = std::numeric_limits<double>::quiet_NaN();
-        rec.ulp = 0;
+        rec.native_available = idx < mexce::benchmark_data::kNativeExpressionCount;
+        rec.native_eval_ok = false;
+        rec.mexce_result = std::numeric_limits<double>::quiet_NaN();
+        rec.native_result = std::numeric_limits<double>::quiet_NaN();
+        rec.ulp_mexce_vs_compiler = UINT64_MAX;
+        rec.ulp_mexce_vs_reference = UINT64_MAX;
+        rec.ulp_compiler_vs_reference = UINT64_MAX;
         rec.avg_ns = 0;
         rec.dur_ns = 0;
         rec.error.clear();
+
+        if (rec.native_available) {
+            native_ctx.a = a;
+            native_ctx.b = b;
+            native_ctx.c = c;
+            native_ctx.x = x;
+            native_ctx.y = y;
+            native_ctx.z = z;
+            native_ctx.w = w;
+
+            rec.native_result = mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+            rec.native_eval_ok = true;
+
+            const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
+            const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
+            if (native_zero && golden_zero) {
+                rec.ulp_compiler_vs_reference = 0;
+            }
+            else {
+                rec.ulp_compiler_vs_reference = ulp_distance(rec.native_result, golden_d);
+            }
+            update_bin_counts(rec.ulp_compiler_vs_reference, exact_zero_count_comp_ref, bin_counts_comp_ref, comparisons_comp_ref);
+        }
 
         try {
             eval.set_expression(expr);
@@ -325,7 +389,7 @@ int main(int argc, char* argv[])
         }
 
         try {
-            rec.got = eval.evaluate();
+            rec.mexce_result = eval.evaluate();
             rec.eval_ok = true;
         }
         catch (const std::exception& e) {
@@ -335,26 +399,25 @@ int main(int argc, char* argv[])
             continue;
         }
 
-        constexpr long double k_zero_abs_tol = 1e-12L;
-        if (std::abs(rec.got) <= (double)k_zero_abs_tol && std::abs(golden) <= k_zero_abs_tol) {
-            rec.ulp = 0;
+        const bool mexce_zero = std::fabs(rec.mexce_result) <= (double)k_zero_abs_tol;
+        const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
+        if (mexce_zero && golden_zero) {
+            rec.ulp_mexce_vs_reference = 0;
         }
         else {
-            rec.ulp = ulp_distance(rec.got, (double)golden);
+            rec.ulp_mexce_vs_reference = ulp_distance(rec.mexce_result, golden_d);
         }
+        update_bin_counts(rec.ulp_mexce_vs_reference, exact_zero_count_mexce_ref, bin_counts_mexce_ref, comparisons_mexce_ref);
 
-        if (rec.ulp == 0) {
-            ++exact_zero_count;
-        }
-        else {
-            size_t bin_idx = k_num_bins;
-            for (size_t bin_i = 0; bin_i < k_num_bins; ++bin_i) {
-                if (rec.ulp <= k_bin_thresholds[bin_i]) {
-                    bin_idx = bin_i;
-                    break;
-                }
+        if (rec.native_eval_ok) {
+            const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
+            if (mexce_zero && native_zero) {
+                rec.ulp_mexce_vs_compiler = 0;
             }
-            ++bin_counts[bin_idx];
+            else {
+                rec.ulp_mexce_vs_compiler = ulp_distance(rec.mexce_result, rec.native_result);
+            }
+            update_bin_counts(rec.ulp_mexce_vs_compiler, exact_zero_count_mexce_comp, bin_counts_mexce_comp, comparisons_mexce_comp);
         }
 
         const double t0 = omp_get_wtime();
@@ -386,17 +449,30 @@ int main(int argc, char* argv[])
         print_kv("Evaluation failures", std::to_string(eval_fail_count));
     }
 
-    out << "\nAccuracy distribution (ULP):\n";
-    print_kv("  0 (exact)", std::to_string(exact_zero_count));
+    const std::size_t total_expr_count = static_cast<std::size_t>(total_expressions);
+    const std::size_t native_covered = std::min<std::size_t>(total_expr_count, mexce::benchmark_data::kNativeExpressionCount);
+    print_kv("Native expressions covered", std::to_string(native_covered));
 
-    for (size_t bin_idx = 0; bin_idx < k_num_bins; ++bin_idx) {
-        char buf[64];
-        uint64_t lo = (bin_idx == 0 ? 1 : (k_bin_thresholds[bin_idx - 1] + 1));
-        uint64_t hi = k_bin_thresholds[bin_idx];
-        std::snprintf(buf, sizeof(buf), "  %llu-%llu", (unsigned long long)lo, (unsigned long long)hi);
-        print_kv(buf, std::to_string(bin_counts[bin_idx]));
-    }
-    print_kv("  >65536", std::to_string(bin_counts[k_num_bins]));
+    out << "\nAccuracy distribution (ULP):\n";
+    auto print_distribution = [&](const std::string& label, size_t comparisons, size_t exact_zero_count, const std::vector<size_t>& bins) {
+        print_kv("  " + label + " (samples)", std::to_string(comparisons));
+        if (comparisons == 0) {
+            return;
+        }
+        print_kv("    0 (exact)", std::to_string(exact_zero_count));
+        for (size_t bin_idx = 0; bin_idx < k_num_bins; ++bin_idx) {
+            char buf[64];
+            uint64_t lo = (bin_idx == 0 ? 1 : (k_bin_thresholds[bin_idx - 1] + 1));
+            uint64_t hi = k_bin_thresholds[bin_idx];
+            std::snprintf(buf, sizeof(buf), "    %llu-%llu", (unsigned long long)lo, (unsigned long long)hi);
+            print_kv(buf, std::to_string(bins[bin_idx]));
+        }
+        print_kv("    >65536", std::to_string(bins[k_num_bins]));
+    };
+
+    print_distribution("Mexce vs Reference", comparisons_mexce_ref, exact_zero_count_mexce_ref, bin_counts_mexce_ref);
+    print_distribution("Mexce vs Compiler", comparisons_mexce_comp, exact_zero_count_mexce_comp, bin_counts_mexce_comp);
+    print_distribution("Compiler vs Reference", comparisons_comp_ref, exact_zero_count_comp_ref, bin_counts_comp_ref);
 
     out << "\n" << line << "\n" << "BENCHMARK SUMMARY" << "\n" << line << "\n";
     print_kv("Functions benchmarked", std::to_string(benchmarked_functions));
@@ -408,22 +484,45 @@ int main(int argc, char* argv[])
 
     out << "\n" << line << "\n" << "DETAILED REPORT" << "\n" << line << "\n";
 
-    size_t max_ulp_len = 3;
-    for (size_t i = 0; i < records.size(); ++i) {
-        const record_t& r = records[i];
-        size_t len = r.eval_ok ? std::to_string(r.ulp).size() : 1;
-        if (len > max_ulp_len) {
-            max_ulp_len = len;
+    const char* kHeaderMexceComp = "ULP(Mx-Cp)";
+    const char* kHeaderMexceRef = "ULP(Mx-Ref)";
+    const char* kHeaderCompRef = "ULP(Cp-Ref)";
+
+    size_t max_ulp_len_mexce_comp = std::strlen(kHeaderMexceComp);
+    size_t max_ulp_len_mexce_ref = std::strlen(kHeaderMexceRef);
+    size_t max_ulp_len_comp_ref = std::strlen(kHeaderCompRef);
+
+    auto consider_len = [](uint64_t value, size_t& max_len) {
+        if (value == UINT64_MAX) {
+            return;
         }
+        const size_t len = std::to_string(value).size();
+        if (len > max_len) {
+            max_len = len;
+        }
+    };
+
+    for (const auto& r : records) {
+        consider_len(r.ulp_mexce_vs_compiler, max_ulp_len_mexce_comp);
+        consider_len(r.ulp_mexce_vs_reference, max_ulp_len_mexce_ref);
+        consider_len(r.ulp_compiler_vs_reference, max_ulp_len_comp_ref);
     }
+
+    auto format_ulp_value = [](uint64_t value) -> std::string {
+        return (value == UINT64_MAX) ? "-" : std::to_string(value);
+    };
 
     auto print_row_header = [&] {
         out << std::left << std::setw(10) << "Status"
-            << "  " << std::setw((int)max_ulp_len) << "ULP"
+            << "  " << std::setw((int)max_ulp_len_mexce_comp) << kHeaderMexceComp
+            << "  " << std::setw((int)max_ulp_len_mexce_ref) << kHeaderMexceRef
+            << "  " << std::setw((int)max_ulp_len_comp_ref) << kHeaderCompRef
             << "  " << std::setw(16) << "Avg/Call"
             << "  " << "Expression" << "\n";
         out << std::string(10, '-')
-            << "  " << std::string((int)max_ulp_len, '-')
+            << "  " << std::string((int)max_ulp_len_mexce_comp, '-')
+            << "  " << std::string((int)max_ulp_len_mexce_ref, '-')
+            << "  " << std::string((int)max_ulp_len_comp_ref, '-')
             << "  " << std::string(16, '-')
             << "  " << std::string(40, '-') << "\n";
     };
@@ -453,8 +552,8 @@ int main(int argc, char* argv[])
     std::sort(eval_failures.begin(), eval_failures.end(), sort_by_expression);
 
     std::sort(passed.begin(), passed.end(), [](const record_t* a, const record_t* b) {
-        if (a->ulp != b->ulp) {
-            return a->ulp > b->ulp; // Primary key: ULP descending
+        if (a->ulp_mexce_vs_reference != b->ulp_mexce_vs_reference) {
+            return a->ulp_mexce_vs_reference > b->ulp_mexce_vs_reference; // Primary key: ULP descending
         }
         return a->expr < b->expr;   // Secondary key: Alphabetical ascending
     });
@@ -468,7 +567,9 @@ int main(int argc, char* argv[])
         for (const auto* r_ptr : compile_failures) {
             const record_t& r = *r_ptr;
             out << std::left << std::setw(10) << "compile"
-                << "  " << std::setw((int)max_ulp_len) << "-"
+                << "  " << std::setw((int)max_ulp_len_mexce_comp) << format_ulp_value(r.ulp_mexce_vs_compiler)
+                << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
+                << "  " << std::setw((int)max_ulp_len_comp_ref) << format_ulp_value(r.ulp_compiler_vs_reference)
                 << "  " << std::setw(16) << "-"
                 << "  " << r.expr << "\n";
             if (!r.error.empty()) {
@@ -485,7 +586,9 @@ int main(int argc, char* argv[])
         for (const auto* r_ptr : eval_failures) {
             const record_t& r = *r_ptr;
             out << std::left << std::setw(10) << "eval"
-                << "  " << std::setw((int)max_ulp_len) << "-"
+                << "  " << std::setw((int)max_ulp_len_mexce_comp) << format_ulp_value(r.ulp_mexce_vs_compiler)
+                << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
+                << "  " << std::setw((int)max_ulp_len_comp_ref) << format_ulp_value(r.ulp_compiler_vs_reference)
                 << "  " << std::setw(16) << "-"
                 << "  " << r.expr << "\n";
             if (!r.error.empty()) {
@@ -499,25 +602,35 @@ int main(int argc, char* argv[])
     if (!passed.empty()) {
         out << "Passed (sorted by ULP desc, then alphabetically):" << "\n";
         print_row_header();
+        auto ulp_exceeds = [](uint64_t value) { return value != UINT64_MAX && value > 8192; };
         for (const auto* r_ptr : passed) {
             const record_t& r = *r_ptr;
 
-            if (r.ulp > 8192) {
+            const bool highlight = ulp_exceeds(r.ulp_mexce_vs_reference) ||
+                ulp_exceeds(r.ulp_mexce_vs_compiler) ||
+                ulp_exceeds(r.ulp_compiler_vs_reference);
+
+            if (highlight) {
                 out << "\n";
             }
 
             out << std::left << std::setw(10) << "ok"
-                << "  " << std::setw((int)max_ulp_len) << std::to_string(r.ulp)
+                << "  " << std::setw((int)max_ulp_len_mexce_comp) << format_ulp_value(r.ulp_mexce_vs_compiler)
+                << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
+                << "  " << std::setw((int)max_ulp_len_comp_ref) << format_ulp_value(r.ulp_compiler_vs_reference)
                 << "  " << std::setw(16) << format_ns(r.avg_ns)
                 << "  " << r.expr << "\n";
 
-            if (r.ulp > 8192) {
+            if (highlight) {
                 std::ios_base::fmtflags original_flags = out.flags();
                 auto original_precision = out.precision();
 
                 out << std::fixed << std::setprecision(17);
-                out << "    Got:      " << r.got << "\n";
-                out << "    Expected: " << static_cast<double>(r.expected) << "\n";
+                out << "    Mexce:    " << r.mexce_result << "\n";
+                if (r.native_eval_ok) {
+                    out << "    Compiler: " << r.native_result << "\n";
+                }
+                out << "    Reference: " << static_cast<double>(r.expected) << "\n";
 
                 out.flags(original_flags);
                 out.precision(original_precision);
