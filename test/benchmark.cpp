@@ -283,6 +283,8 @@ int main(int argc, char* argv[])
         uint64_t ulp_compiler_vs_reference;
         uint64_t avg_ns;
         long long dur_ns;
+        uint64_t native_avg_ns;
+        long long native_dur_ns;
         std::string error;
     };
 
@@ -328,6 +330,9 @@ int main(int argc, char* argv[])
     long long total_duration_ns = 0;
     size_t benchmarked_functions = 0;
     long double sum_avg_ns = 0.0L;
+    long long total_native_duration_ns = 0;
+    size_t benchmarked_native_functions = 0;
+    long double sum_native_avg_ns = 0.0L;
 
     for (std::size_t idx = 0; idx < total_expressions; ++idx) {
         const std::string expr = mexce::benchmark_data::kExpressions[idx];
@@ -351,6 +356,8 @@ int main(int argc, char* argv[])
         rec.ulp_compiler_vs_reference = UINT64_MAX;
         rec.avg_ns = 0;
         rec.dur_ns = 0;
+        rec.native_avg_ns = 0;
+        rec.native_dur_ns = 0;
         rec.error.clear();
 
         if (rec.native_available) {
@@ -434,6 +441,21 @@ int main(int argc, char* argv[])
         sum_avg_ns += (long double)rec.avg_ns;
         ++benchmarked_functions;
 
+        if (rec.native_eval_ok) {
+            const double tn0 = omp_get_wtime();
+            std::size_t native_executed = 0;
+            for (; native_executed < (std::size_t)iterations; ++native_executed) {
+                (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+            }
+            const double tn1 = omp_get_wtime();
+
+            rec.native_dur_ns = (long long)((tn1 - tn0) * 1e9);
+            rec.native_avg_ns = (uint64_t)((long double)rec.native_dur_ns / (long double)native_executed + 0.5L);
+            total_native_duration_ns += rec.native_dur_ns;
+            sum_native_avg_ns += (long double)rec.native_avg_ns;
+            ++benchmarked_native_functions;
+        }
+
         records.push_back(rec);
     }
 
@@ -478,8 +500,13 @@ int main(int argc, char* argv[])
     print_kv("Functions benchmarked", std::to_string(benchmarked_functions));
     if (benchmarked_functions > 0) {
         uint64_t avg_per_func_ns = (uint64_t)(sum_avg_ns / (long double)benchmarked_functions + 0.5L);
-        print_kv("Average runtime per function", format_ns(avg_per_func_ns));
-        print_kv("Total function execution time", format_ns((uint64_t)total_duration_ns));
+        print_kv("Average runtime per function (Mexce)", format_ns(avg_per_func_ns));
+        print_kv("Total function execution time (Mexce)", format_ns((uint64_t)total_duration_ns));
+    }
+    if (benchmarked_native_functions > 0) {
+        uint64_t avg_native_ns = (uint64_t)(sum_native_avg_ns / (long double)benchmarked_native_functions + 0.5L);
+        print_kv("Average runtime per function (Compiler)", format_ns(avg_native_ns));
+        print_kv("Total function execution time (Compiler)", format_ns((uint64_t)total_native_duration_ns));
     }
 
     out << "\n" << line << "\n" << "DETAILED REPORT" << "\n" << line << "\n";
@@ -517,12 +544,14 @@ int main(int argc, char* argv[])
             << "  " << std::setw((int)max_ulp_len_mexce_comp) << kHeaderMexceComp
             << "  " << std::setw((int)max_ulp_len_mexce_ref) << kHeaderMexceRef
             << "  " << std::setw((int)max_ulp_len_comp_ref) << kHeaderCompRef
-            << "  " << std::setw(16) << "Avg/Call"
+            << "  " << std::setw(16) << "Avg/Call (Mx)"
+            << "  " << std::setw(16) << "Avg/Call (Cp)"
             << "  " << "Expression" << "\n";
         out << std::string(10, '-')
             << "  " << std::string((int)max_ulp_len_mexce_comp, '-')
             << "  " << std::string((int)max_ulp_len_mexce_ref, '-')
             << "  " << std::string((int)max_ulp_len_comp_ref, '-')
+            << "  " << std::string(16, '-')
             << "  " << std::string(16, '-')
             << "  " << std::string(40, '-') << "\n";
     };
@@ -571,6 +600,7 @@ int main(int argc, char* argv[])
                 << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
                 << "  " << std::setw((int)max_ulp_len_comp_ref) << format_ulp_value(r.ulp_compiler_vs_reference)
                 << "  " << std::setw(16) << "-"
+                << "  " << std::setw(16) << "-"
                 << "  " << r.expr << "\n";
             if (!r.error.empty()) {
                 out << "    note: " << r.error << "\n";
@@ -589,6 +619,7 @@ int main(int argc, char* argv[])
                 << "  " << std::setw((int)max_ulp_len_mexce_comp) << format_ulp_value(r.ulp_mexce_vs_compiler)
                 << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
                 << "  " << std::setw((int)max_ulp_len_comp_ref) << format_ulp_value(r.ulp_compiler_vs_reference)
+                << "  " << std::setw(16) << "-"
                 << "  " << std::setw(16) << "-"
                 << "  " << r.expr << "\n";
             if (!r.error.empty()) {
@@ -619,6 +650,7 @@ int main(int argc, char* argv[])
                 << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
                 << "  " << std::setw((int)max_ulp_len_comp_ref) << format_ulp_value(r.ulp_compiler_vs_reference)
                 << "  " << std::setw(16) << format_ns(r.avg_ns)
+                << "  " << std::setw(16) << (r.native_eval_ok ? format_ns(r.native_avg_ns) : "-")
                 << "  " << r.expr << "\n";
 
             if (highlight) {
