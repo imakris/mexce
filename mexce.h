@@ -186,6 +186,9 @@ namespace impl {
 
     std::shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v);
     uint8_t* push_intermediate_code(evaluator* ev, const std::string& s);
+    shared_ptr<Function> make_function(evaluator* ev, const string& name);
+    void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
+    void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
 }
 
 
@@ -222,6 +225,7 @@ private:
     impl::constant_map_t    m_intermediate_constants;  // produced during expression simplification
     impl::variable_map_t    m_variables;
     impl::constant_map_t    m_constants;
+    uint64_t                m_next_element_id           = 0;
 
     double                (*evaluate_fptr)()            = nullptr;
 
@@ -231,11 +235,13 @@ private:
 
     void compile_and_finalize_elist(impl::elist_it_t first, impl::elist_it_t last);
 
-    friend
-    std::shared_ptr<impl::Constant> impl::make_intermediate_constant(evaluator* ev, double v);
+    // Grant friend access to helpers that need private state.
+    friend std::shared_ptr<impl::Constant> impl::make_intermediate_constant(evaluator* ev, double v);
+    friend std::shared_ptr<impl::Function> impl::make_function(evaluator* ev, const std::string& name);
+    friend void impl::asmd_optimizer(impl::elist_it_t it, evaluator* ev, impl::elist_t* elist);
+    friend void impl::pow_optimizer(impl::elist_it_t it, evaluator* ev, impl::elist_t* elist);
+    friend uint8_t* impl::push_intermediate_code(evaluator* ev, const std::string& s);
 
-    friend
-    uint8_t* impl::push_intermediate_code(evaluator* ev, const std::string& s);
 
     template <typename = void> void bind() {}
     template <typename = void> void unbind() {}
@@ -387,7 +393,10 @@ string double_to_hex( double v )
 struct Element
 {
     Element_type element_type;
-    Element(Element_type ct): element_type(ct) {}
+    uint64_t     id;
+
+    Element(Element_type ct, uint64_t id): element_type(ct), id(id) {}
+    virtual ~Element() = default;
 };
 
 
@@ -397,12 +406,13 @@ struct Value: public Element
     Numeric_data_type       numeric_data_type;
     string                  name;
 
-    Value(volatile void *   address,
-        Numeric_data_type   numeric_data_type,
-        Element_type        element_type,
-        string              name)
+    Value(uint64_t            id,
+          volatile void *   address,
+          Numeric_data_type   numeric_data_type,
+          Element_type        element_type,
+          string              name)
     :
-        Element             ( element_type      ),
+        Element             ( element_type, id  ),
         address             ( address           ),
         numeric_data_type   ( numeric_data_type ),
         name                ( name              ) {}
@@ -411,13 +421,13 @@ struct Value: public Element
 
 struct Constant: public Value
 {
-    Constant(string num, string name):
-        Value( (volatile void *) &internal_constant, M64FP, CCONST, name),
+    Constant(uint64_t id, string num, string name):
+        Value(id, (volatile void *) &internal_constant, M64FP, CCONST, name),
         internal_constant(atof(num.data()))
     {}
 
-    Constant(double num):
-        Value( (volatile void *) &internal_constant, M64FP, CCONST, double_to_hex(num)),
+    Constant(uint64_t id, double num):
+        Value(id, (volatile void *) &internal_constant, M64FP, CCONST, double_to_hex(num)),
         internal_constant(num)
     {}
 
@@ -446,10 +456,10 @@ private:
 
 struct Variable: public Value
 {
-    bool referenced;
+    bool        referenced;
 
-    Variable(volatile void * addr, string name, Numeric_data_type numeric_data_type):
-        Value(addr, numeric_data_type, CVAR, name), referenced(false)
+    Variable(uint64_t id, volatile void * addr, string name, Numeric_data_type numeric_data_type):
+        Value(id, addr, numeric_data_type, CVAR, name), referenced(false)
     {}
 };
 
@@ -474,6 +484,7 @@ struct Function: public Element
     bool                force_not_constant = false;
 
     Function(
+        uint64_t    id,
         const string& name,
         size_t      num_args,
         size_t      sreq,
@@ -481,7 +492,7 @@ struct Function: public Element
         uint8_t    *code_buffer,
         optimizer_t optimizer = 0)
     :
-        Element   ( CFUNC                        ),
+        Element   ( CFUNC, id                    ),
         stack_req ( sreq                         ),
         name      ( name                         ),
         num_args  ( num_args                     ),
@@ -511,15 +522,16 @@ mexce_charstream& operator < (mexce_charstream &s, int v) {
 inline
 shared_ptr<mexce::impl::Constant> make_intermediate_constant(evaluator* ev, double v)
 {
-    auto sc = make_shared<impl::Constant>(v);
-    auto it = ev->m_intermediate_constants.find(sc->name);
+    auto name = double_to_hex(v);
+    auto it = ev->m_intermediate_constants.find(name);
     if (it == ev->m_intermediate_constants.end()) {
-        ev->m_intermediate_constants[sc->name] = sc;
+        auto sc = make_shared<impl::Constant>(ev->m_next_element_id++, v);
+        ev->m_intermediate_constants[name] = sc;
+        return sc;
     }
     else {
-        sc = it->second; // releases the constant we just created
+        return it->second;
     }
-    return sc;
 }
 
 
@@ -649,11 +661,11 @@ static uint64_t mexce_trig_mfactors[] = {
 inline Function Cos()
 {
 #ifndef MEXCE_ACCURACY
-    static uint8_t code[] = { 0xD9, 0xFF }; // fcos
-    return Function("cos", 1, 0, sizeof(code), code);
+    uint8_t code[] = { 0xD9, 0xFF }; // fcos
+    return Function(0, "cos", 1, 0, sizeof(code), code);
 #else
     // Range reduce, y=x^2, base -> coeff table, Horner on y
-    static uint8_t code[] = {
+    uint8_t code[] = {
         MEXCE_TRIG_RANGE_REDUCE,
         MEXCE_TRIG_Y_SQUARED,
         MEXCE_MOV_BASE_IMM,
@@ -705,7 +717,7 @@ inline Function Cos()
     // imm32 starts at offset 13 (10 + 2 + 1)
     *((void**)(code + 13)) = (void*)mexce_trig_mfactors;
 #   endif
-    return Function("cos", 1, 0, sizeof(code), code);
+    return Function(0, "cos", 1, 0, sizeof(code), code);
 #endif
 }
 
@@ -714,10 +726,10 @@ inline Function Cos()
 inline Function Sin()
 {
 #ifndef MEXCE_ACCURACY
-    static uint8_t code[] = { 0xD9, 0xFE }; // fsin
-    return Function("sin", 1, 0, sizeof(code), code);
+    uint8_t code[] = { 0xD9, 0xFE }; // fsin
+    return Function(0, "sin", 1, 0, sizeof(code), code);
 #else
-    static uint8_t code[] = {
+    uint8_t code[] = {
         // t = x − π/2 to reuse cosine polynomial
         MEXCE_SIN_PRESHIFT,
         MEXCE_TRIG_RANGE_REDUCE,
@@ -769,53 +781,53 @@ inline Function Sin()
     // imm32 starts at offset 23 (10 + 10 + 2 + 1)
     *((void**)(code + 25)) = (void*)mexce_trig_mfactors;
 #   endif
-    return Function("sin", 1, 0, sizeof(code), code);
+    return Function(0, "sin", 1, 0, sizeof(code), code);
 #endif
 }
 
 
 inline Function Tan()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xf2,                                 // fptan
         0xdd, 0xd8                                  // fstp        st(0)
     };
-    return Function("tan", 1, 1, sizeof(code), code);
+    return Function(0, "tan", 1, 1, sizeof(code), code);
 }
 
 
 inline Function Abs()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xe1                                  // fabs
     };
-    return Function("abs", 1, 0, sizeof(code), code);
+    return Function(0, "abs", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Sfc()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xf4,                                 // fxtract
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("sfc", 1, 1, sizeof(code), code);
+    return Function(0, "sfc", 1, 1, sizeof(code), code);
 }
 
 
 inline Function Expn()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xf4,                                 // fxtract
         0xdd, 0xd8                                  // fstp        st(0)
     };
-    return Function("expn", 1, 1, sizeof(code), code);
+    return Function(0, "expn", 1, 1, sizeof(code), code);
 }
 
 
 inline Function Sign()
 {
-    static uint8_t code[]  =  {
+    uint8_t code[]  =  {
         0xd9, 0xee,                                 // fldz
         0xdf, 0xf1,                                 // fcomip      st, st(1)
         0xdd, 0xd8,                                 // fstp        st(0)
@@ -825,13 +837,13 @@ inline Function Sign()
         0xda, 0xc1,                                 // fcmovb      st, st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("sign", 1, 1, sizeof(code), code);
+    return Function(0, "sign", 1, 1, sizeof(code), code);
 }
 
 
 inline Function Signp()
 {
-    static uint8_t code[]  =  {
+    uint8_t code[]  =  {
         0xd9, 0xe8,                                 // fld1
         0xd9, 0xee,                                 // fldz
         0xdb, 0xf2,                                 // fcomi       st, st(2)
@@ -839,16 +851,16 @@ inline Function Signp()
         0xdb, 0xc1,                                 // fcmovnb     st, st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("signp", 1, 2, sizeof(code), code);
+    return Function(0, "signp", 1, 2, sizeof(code), code);
 }
 
 
 inline Function Sqrt()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xfa                                  // fsqrt
     };
-    return Function("sqrt", 1, 0, sizeof(code), code);
+    return Function(0, "sqrt", 1, 0, sizeof(code), code);
 }
 
 
@@ -974,7 +986,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
 
         uint8_t* cc = push_intermediate_code(ev, s.s.str());
-        auto f_opt = make_shared<Function>("pow_opt", 2-matched, 0, s.s.str().size(), cc, nullptr);
+        auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2-matched, 0, s.s.str().size(), cc, nullptr);
 
         if (matched) {
             f_opt->args[0] = f->args[1];
@@ -991,7 +1003,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
 inline Function Pow()
 {
-    static uint8_t code[]  =  {
+    uint8_t code[]  =  {
         0xd9, 0xc0,                                 // fld         st(0)                    }
         0xd9, 0xfc,                                 // frndint                              }
         0xd8, 0xd1,                                 // fcom        st(1)                    } if (abs(exponent) != round(abs(exponent)))
@@ -1059,13 +1071,13 @@ inline Function Pow()
         0xdd, 0xd9,                                 // fstp        st(1)
 // exit_point:
     };
-    return Function("pow", 2, 1, sizeof(code), code, pow_optimizer);
+    return Function(0, "pow", 2, 1, sizeof(code), code, pow_optimizer);
 }
 
 
 inline Function Exp()
 {
-    static uint8_t code[]  =  {
+    uint8_t code[]  =  {
         0xd9, 0xea,                                 // fldl2e
         0xde, 0xc9,                                 // fmulp       st(1), st
         0xd9, 0xe8,                                 // fld1
@@ -1076,13 +1088,13 @@ inline Function Exp()
         0xd9, 0xfd,                                 // fscale
         0xdd, 0xd9,                                 // fstp        st(1)
     };
-    return Function("exp", 1, 1, sizeof(code), code);
+    return Function(0, "exp", 1, 1, sizeof(code), code);
 }
 
 
 inline Function Logb()  // implementation with base
 {
-    static uint8_t code[]  =  {
+    uint8_t code[]  =  {
         0xd9, 0xe8,                                 // fld1
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1,                                 // fyl2x
@@ -1092,20 +1104,20 @@ inline Function Logb()  // implementation with base
         0xd9, 0xf1,                                 // fyl2x
         0xde, 0xf9                                  // fdivp       st(1),st
     };
-    return Function("logb", 2, 1, sizeof(code), code);
+    return Function(0, "logb", 2, 1, sizeof(code), code);
 }
 
 
 inline Function Ln()
 {
-    static uint8_t code[]  =  {
+    uint8_t code[]  =  {
         0xd9, 0xe8,                                 // fld1
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1,                                 // fyl2x
         0xd9, 0xea,                                 // fldl2e
         0xde, 0xf9                                  // fdivp       st(1),st
     };
-    return Function("ln", 1, 1, sizeof(code), code);
+    return Function(0, "ln", 1, 1, sizeof(code), code);
 }
 
 
@@ -1120,89 +1132,89 @@ inline Function Log()
 
 inline Function Log10()
 {
-    static uint8_t code[]  =  {
+    uint8_t code[]  =  {
         0xd9, 0xe8,                                 // fld1
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1,                                 // fyl2x
         0xd9, 0xe9,                                 // fldl2t
         0xde, 0xf9                                  // fdivp       st(1),st
     };
-    return Function("log10", 1, 1, sizeof(code), code);
+    return Function(0, "log10", 1, 1, sizeof(code), code);
 }
 
 
 inline Function Log2()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xe8,                                 // fld1
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1                                  // fyl2x
     };
-    return Function("log2", 1, 0, sizeof(code), code);
+    return Function(0, "log2", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Ylog2()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xf1                                  // fyl2x
     };
-    return Function("ylog2", 2, 0, sizeof(code), code);
+    return Function(0, "ylog2", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Max()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xdb, 0xf1,                                 // fcomi       st,st(1)
         0xda, 0xc1,                                 // fcmovb      st,st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("max", 2, 0, sizeof(code), code);
+    return Function(0, "max", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Min()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xdb, 0xf1,                                 // fcomi       st,st(1)
         0xd9, 0xc9,                                 // fxch        st(1)
         0xda, 0xc1,                                 // fcmovb      st,st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("min", 2, 0, sizeof(code), code);
+    return Function(0, "min", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Floor()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x06,   // mov         word ptr [esp-4], 67fh
         0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]
         0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]
         0xd9, 0xfc,                                 // frndint
         0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
-    return Function("floor", 1, 0, sizeof(code), code);
+    return Function(0, "floor", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Ceil()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x0a,   // mov         word ptr [esp-4], a7fh
         0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]
         0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]
         0xd9, 0xfc,                                 // frndint
         0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
-    return Function("ceil", 1, 0, sizeof(code), code);
+    return Function(0, "ceil", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Round()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
 
         // NOTE: In this case, saving/restoring the control word is most likely redundant.
 
@@ -1212,33 +1224,33 @@ inline Function Round()
         0xd9, 0xfc,                                 // frndint
         0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
-    return Function("round", 1, 0, sizeof(code), code);
+    return Function(0, "round", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Int()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xfc                                  // frndint
     };
-    return Function("int", 1, 0, sizeof(code), code);
+    return Function(0, "int", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Mod()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf8,                                 // fprem
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("mod", 2, 0, sizeof(code), code);
+    return Function(0, "mod", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Less_than()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xdf, 0xf1,                                 // fcomip      st,st(1)
         0xdd, 0xd8,                                 // fstp        st(0)
         0xd9, 0xe8,                                 // fld1
@@ -1246,13 +1258,13 @@ inline Function Less_than()
         0xdb, 0xd1,                                 // fcmovnb     st,st(1)
         0xdd, 0xd9,                                 // fstp        st(1)
     };
-    return Function("less_than", 2, 0, sizeof(code), code);
+    return Function(0, "less_than", 2, 0, sizeof(code), code);
 }
 
 
 inline Function Bnd()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf8,                                 // fprem
         0xd9, 0xc0,                                 // fld         st(0)
@@ -1263,7 +1275,7 @@ inline Function Bnd()
         0xdb, 0xc1,                                 // fcmovnb     st,st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function("bnd", 2, 2, sizeof(code), code);
+    return Function(0, "bnd", 2, 2, sizeof(code), code);
 }
 
 
@@ -1302,43 +1314,9 @@ struct elist_comparison {
                 return (*ita)->element_type > (*itb)->element_type;
             }
 
-            // if they are constants, we compare the values
-            if ((*ita)->element_type == CCONST) {
-                double da = static_pointer_cast<Constant>(*ita)->get_data_as_double();
-                double db = static_pointer_cast<Constant>(*itb)->get_data_as_double();
-                if (da != da && db != db) { // i.e. if both of them are NaN
-                    // not all NaNs are the same, we compare binary
-                    auto mcr = memcmp(&da, &db, sizeof(double));
-                    if (mcr != 0) {
-                        return mcr < 0;
-                    }
-                }
-                else
-                if (da != db) {
-                    return da < db;
-                }
-                continue; // it is the same... move on
-            }
-
-            // if they are variables, we compare addresses
-            if ((*ita)->element_type == CVAR) {
-                volatile void* aa = static_pointer_cast<Variable>(*ita)->address;
-                volatile void* ab = static_pointer_cast<Variable>(*itb)->address;
-                if (aa != ab) {
-                    return aa < ab;
-                }
-                continue; // it is the same... move on
-            }
-
-            // if they are functions, we compare their code
-            if ((*ita)->element_type == CFUNC) {
-                string fna = static_pointer_cast<Function>(*ita)->code;
-                string fnb = static_pointer_cast<Function>(*itb)->code;
-
-                if (fna != fnb) {
-                    return fna < fnb;
-                }
-                continue; // it is the same... move on [this one is not really required]
+            // Compare deterministic IDs.
+            if ((*ita)->id != (*itb)->id) {
+                return (*ita)->id < (*itb)->id;
             }
         }
 
@@ -1463,8 +1441,6 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
 }
 
 
-
-inline shared_ptr<Function> make_function(const string& name);
 
 
 inline string infix_operator_to_function_name(const string& op)
@@ -1628,7 +1604,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             pf->force_not_constant = true;
 
-            *it = make_shared<Constant>( neutral );
+            *it = make_intermediate_constant(ev, neutral);
 
             return;
         }
@@ -1659,17 +1635,17 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             if (e->size()==1 && e->front()->element_type == CCONST) {
                 auto v = static_pointer_cast<Constant>(e->front());
                 if (fclass==1) {
-                    ac[i] += *((double*)v->address);
+                    ac[i] += v->get_data_as_double();
                 }
                 else {
-                    ac[i] *= *((double*)v->address);
+                    ac[i] *= v->get_data_as_double();
                 }
                 f->absorbed[i].erase(e);
             }
             e = next_e;
         }
     }
-    double ac_final = (fclass==1) ? (ac[0] -ac[1]) : (ac[0] * 1.0/ac[1]);
+    double ac_final = (fclass==1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
 
     // sort and gather chunks
     map<elist_t, int, elist_comparison> sig_map;
@@ -1813,7 +1789,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             else {
                 elist_t pow_list = e.first;
                 pow_list.push_back(make_intermediate_constant(ev, e.second));
-                auto pow_f = make_function("pow");
+                auto pow_f = make_function(ev, "pow");
                 pow_list.push_back(pow_f);
                 link_arguments(pow_list);
                 pow_f->optimizer(prev(pow_list.end()), ev, &pow_list);
@@ -1845,7 +1821,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     string new_name = (fclass == 1) ? "add_sub_opt" : "mul_div_opt";
 
     uint8_t* cc = push_intermediate_code(ev, s.s.str());
-    auto f_opt = make_shared<Function>(new_name, 0, 0, s.s.str().size(), cc, nullptr);
+    auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.s.str().size(), cc, nullptr);
 
     *it = f_opt;
     return;
@@ -1854,47 +1830,47 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
 inline Function Add()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xde, 0xc1                                  // faddp       st(1), st
     };
-    return Function("add", 2, 0, sizeof(code), code, asmd_optimizer);
+    return Function(0, "add", 2, 0, sizeof(code), code, asmd_optimizer);
 }
 
 
 inline Function Sub()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xde, 0xe9                                  // fsubp       st(1), st
     };
-    return Function("sub", 2, 0, sizeof(code), code, asmd_optimizer);
+    return Function(0, "sub", 2, 0, sizeof(code), code, asmd_optimizer);
 }
 
 
 inline Function Mul()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xde, 0xc9                                  // fmulp       st(1), st
     };
-    return Function("mul", 2, 0, sizeof(code), code, asmd_optimizer);
+    return Function(0, "mul", 2, 0, sizeof(code), code, asmd_optimizer);
 }
 
 
 inline Function Div()
 {
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xde, 0xf9                                  // fdivp       st(1), st
     };
-    return Function("div", 2, 0, sizeof(code), code, asmd_optimizer);
+    return Function(0, "div", 2, 0, sizeof(code), code, asmd_optimizer);
 }
 
 
 inline Function Neg()
 {
     // TODO: this does not need its own internal name, it is a special case of add_sub
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xe0                                  // fchs
     };
-    return Function("neg", 1, 0, sizeof(code), code);
+    return Function(0, "neg", 1, 0, sizeof(code), code);
 }
 
 
@@ -1908,7 +1884,7 @@ inline Function Gain()
     //                 ------------------------  if x >= 0.5
     //                 (1 / a - 2) (1 - 2x) - 1
 
-    static uint8_t code[] = {                       //                       ; FPU stack
+    uint8_t code[] = {                       //                       ; FPU stack
         0xd9, 0xc1,                                 // fld         st(1)     ; x, a, x
         0xd8, 0xc2,                                 // fadd        st,st(2)  ; 2x, a, x
         0xd9, 0xe8,                                 // fld1                  ; 1, 2x, a, x
@@ -1937,7 +1913,7 @@ inline Function Gain()
         0xde, 0xf9,                                 // fdivp       st(1),st  ; (x-(2x-1)*(2a-1)/a)/(1-(2x-1)*(2a-1)/a)  [result]
 // gain_exit:
     };
-    return Function("gain", 2, 1, sizeof(code), code);
+    return Function(0, "gain", 2, 1, sizeof(code), code);
 }
 
 
@@ -1947,7 +1923,7 @@ inline Function Bias()
     // bias(x, a) = -----------------------    for x, a in [0, 1]
     //              (1 / a - 2) (1 - x) + 1
 
-    static uint8_t code[] = {
+    uint8_t code[] = {
         0xd9, 0xe8,                                 // fld1
         0xdc, 0xf1,                                 // fdivr       st(1), st
         0xdc, 0xe9,                                 // fsub        st(1), st
@@ -1958,23 +1934,24 @@ inline Function Bias()
         0xde, 0xc1,                                 // faddp       st(1), st
         0xde, 0xf9                                  // fdivp       st(1), st
     };
-    return Function("bias", 2, 1, sizeof(code), code);
+    return Function(0, "bias", 2, 1, sizeof(code), code);
 }
 
 
 
 inline const map<string, Function>& make_function_map()
 {
-    static Function f[] = {
-        Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(), Less_than(),
-        Log(), Log2(), Ln(), Log10(), Logb(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
-        Bnd(), Add(), Sub(), Neg(), Mul(), Div(), Bias(), Gain()
-    };
-
     static map<string, Function> ret;
-    for (auto& e : f) {
-        assert(ret.find(e.name) == ret.end()); //if it fails, some functions share the same name.
-        ret.insert(make_pair(e.name, e));
+    if (ret.empty()) { // Initialize only once
+        Function f[] = {
+            Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(), Less_than(),
+            Log(), Log2(), Ln(), Log10(), Logb(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
+            Bnd(), Add(), Sub(), Neg(), Mul(), Div(), Bias(), Gain()
+        };
+        for (auto& e : f) {
+            assert(ret.find(e.name) == ret.end()); //if it fails, some functions share the same name.
+            ret.insert(make_pair(e.name, e));
+        }
     }
     return ret;
 }
@@ -1987,17 +1964,21 @@ inline const map<string, Function>& function_map()
 }
 
 
-inline shared_ptr<Function> make_function(const string& name) {
-    auto fn = function_map().find(name);
-    return make_shared<Function>(fn->second);
+inline shared_ptr<Function> make_function(evaluator* ev, const string& name) {
+    auto fn_it = function_map().find(name);
+    assert(fn_it != function_map().end());
+    // Create a copy of the prototype and assign a new, unique ID.
+    auto new_func = make_shared<Function>(fn_it->second);
+    new_func->id = ev->m_next_element_id++;
+    return new_func;
 }
 
 
 inline const map<string, shared_ptr<Constant> >& built_in_constants_map()
 {
     static const map<string, shared_ptr<Constant> > cname_map = {
-        { "pi", std::make_shared<impl::Constant>("3.141592653589793238462643383", "pi") },
-        { "e",  std::make_shared<impl::Constant>("2.718281828459045235360287471", "e" ) }
+        { "pi", std::make_shared<impl::Constant>(0, "3.141592653589793238462643383", "pi") },
+        { "e",  std::make_shared<impl::Constant>(1, "2.718281828459045235360287471", "e" ) }
     };
     return cname_map;
 }
@@ -2038,6 +2019,7 @@ inline
 evaluator::evaluator():
     m_constants(impl::built_in_constants_map())
 {
+    m_next_element_id = 2; // Start after built-in constants.
     set_expression("0");
 }
 
@@ -2059,7 +2041,7 @@ void evaluator::bind(T& v, const std::string& s, Args&... args)
     if (built_in_constants_map().find(s) != built_in_constants_map().end()) {
         throw std::logic_error("Attempted to bind a variable, named as an existing constant");
     }
-    m_variables[s] = make_shared<Variable>(&v, s, get_ndt<T>());
+    m_variables[s] = make_shared<Variable>(m_next_element_id++, &v, s, get_ndt<T>());
 
     bind(args...);
 }
@@ -2478,11 +2460,11 @@ void evaluator::set_expression(std::string e)
             case INFIX_2:
             case INFIX_1: {
                 auto name = infix_operator_to_function_name(temp.content);
-                m_elist.push_back( make_function(name) );
+                m_elist.push_back( make_function(this, name) );
                 break;
             }
             case FUNCTION_NAME:
-                m_elist.push_back(make_function(temp.content));
+                m_elist.push_back(make_function(this, temp.content));
                 break;
             case UNARY:
                 if (temp.content == "-") { // unary '+' is ignored
@@ -2498,7 +2480,7 @@ void evaluator::set_expression(std::string e)
                     link_arguments(m_elist);
                     auto chunk = get_dependent_chunk(std::prev(m_elist.end()));
                     m_elist.insert(chunk.first, make_intermediate_constant(this, 0.0));
-                    m_elist.push_back( make_function("sub") );
+                    m_elist.push_back( make_function(this, "sub") );
                 }
                 break;
             case NUMERIC_LITERAL: {
