@@ -1,0 +1,14 @@
+vcpkg_from_github(
+    OUT_SOURCE_PATH SOURCE_PATH
+    REPO imakris/mexce
+    REF "v${VERSION}"
+    SHA512 325fe93d7d1c49baabdfc522e7d37266a087bb0d33221e30a972f09aa5fc0bcfdcf8462676d85cd703c1a9c32d26b0c30ca4a68c5f250acb34272306e4b890b5
+    HEAD_REF master
+)
+
+file(INSTALL "${SOURCE_PATH}/mexce.h" DESTINATION "${CURRENT_PACKAGES_DIR}/include")
+
+vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/LICENSE.txt")
+
+file(MAKE_DIRECTORY "${CURRENT_PACKAGES_DIR}/share/${PORT}")
+file(INSTALL "${CURRENT_PORT_DIR}/usage" DESTINATION "${CURRENT_PACKAGES_DIR}/share/${PORT}")
