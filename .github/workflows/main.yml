@@ -17,7 +17,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      # 1. Check out repository
+      # 1. Checks out your repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -34,7 +34,23 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
       
       # 5. Run a short benchmark
-      #    This executes the custom 'run_benchmarks' target.
-      #    The default iteration count (100) is suitable for CI.
       - name: Run Short Benchmark
         run: cmake --build build --config Release --target run_benchmarks
+      
+      # 6. Display Benchmark Summary in Log
+      #    FIX: Use the 'head' command to show only the first 54 lines of the
+      #    results file, which contains the summary tables.
+      - name: Display Benchmark Summary
+        shell: bash
+        run: |
+          echo "--- Benchmark Summary (first 54 lines) ---"
+          head -n 54 build/benchmark_results.txt
+          echo "------------------------------------------"
+
+      # 7. Upload Full Benchmark Results as an Artifact
+      #    This still saves the complete file for detailed analysis.
+      - name: Upload Benchmark Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ matrix.os }}
+          path: build/benchmark_results.txt
