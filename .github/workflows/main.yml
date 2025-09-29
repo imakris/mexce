@@ -1,4 +1,4 @@
-name: Build and Test mexce
+name: Build, Test, and Benchmark mexce
 
 # Trigger the workflow on push or pull request events for the main/master branch
 on:
@@ -8,33 +8,33 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-and-test:
-    name: Build and Test on ${{ matrix.os }}
+  build-and-benchmark:
+    name: Build and Benchmark on ${{ matrix.os }}
     strategy:
-      # Run a job for each OS in this list. macOS is excluded as it's an unsupported architecture.
       matrix:
         os: [ubuntu-latest, windows-latest]
 
     runs-on: ${{ matrix.os }}
 
     steps:
-      # 1. Checks out your repository so the job can access your code
+      # 1. Check out repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # 2. Configure the project using CMake
-      #    No special dependencies are needed. OpenMP is supported by the default compilers.
       - name: Configure CMake
         run: cmake -B build -S .
 
-      # 3. Build the project
-      #    This will compile the 'benchmark' executable.
+      # 3. Build the project and all targets
       - name: Build with CMake
         run: cmake --build build --config Release
 
-      # 4. Run the validation tests
-      #    This executes the 'benchmark' executable with a small iteration count using CTest.
-      #    The '-C Release' flag is important for Visual Studio on Windows.
-      #    --output-on-failure will print test output only if a test fails.
-      - name: Run Tests with CTest
+      # 4. Run the quick validation tests
+      - name: Run Quick Tests with CTest
         run: ctest --test-dir build -C Release --output-on-failure
+      
+      # 5. Run a short benchmark
+      #    This executes the custom 'run_benchmarks' target.
+      #    The default iteration count (100) is suitable for CI.
+      - name: Run Short Benchmark
+        run: cmake --build build --config Release --target run_benchmarks
