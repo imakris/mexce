@@ -11,7 +11,7 @@
 #  pragma warning(pop)
 #endif
 
-#include <omp.h>
+#include "get_wtime.h"
 
 #include <algorithm>
 #include <cmath>
@@ -406,10 +406,10 @@ int main(int argc, char* argv[])
             update_bin_counts(rec.ulp_compiler_vs_reference, exact_zero_count_comp_ref, bin_counts_comp_ref, comparisons_comp_ref);
         }
 
-        const double compile_start = omp_get_wtime();
+        const double compile_start = mexce::get_wtime();
         try {
             eval.set_expression(expr);
-            const double compile_end = omp_get_wtime();
+            const double compile_end = mexce::get_wtime();
             rec.compile_ns = (uint64_t)((compile_end - compile_start) * 1e9 + 0.5L);
             rec.compiled = true;
             ++compiled_count;
@@ -420,7 +420,7 @@ int main(int argc, char* argv[])
             compile_times.push_back(rec.compile_ns);
         }
         catch (const std::exception& e) {
-            const double compile_end = omp_get_wtime();
+            const double compile_end = mexce::get_wtime();
             rec.compile_ns = (uint64_t)((compile_end - compile_start) * 1e9 + 0.5L);
             ++compile_fail_count;
             rec.error = std::string("compile: ") + e.what();
@@ -460,12 +460,12 @@ int main(int argc, char* argv[])
             update_bin_counts(rec.ulp_mexce_vs_compiler, exact_zero_count_mexce_comp, bin_counts_mexce_comp, comparisons_mexce_comp);
         }
 
-        const double t0 = omp_get_wtime();
+        const double t0 = mexce::get_wtime();
         std::size_t executed = 0;
         for (; executed < (std::size_t)iterations; ++executed) {
             (void)eval.evaluate();
         }
-        const double t1 = omp_get_wtime();
+        const double t1 = mexce::get_wtime();
 
         rec.dur_ns = (long long)((t1 - t0) * 1e9);
         rec.avg_ns = (uint64_t)((long double)rec.dur_ns / (long double)executed + 0.5L);
@@ -475,12 +475,12 @@ int main(int argc, char* argv[])
         ++benchmarked_functions;
 
         if (rec.native_eval_ok) {
-            const double tn0 = omp_get_wtime();
+            const double tn0 = mexce::get_wtime();
             std::size_t native_executed = 0;
             for (; native_executed < (std::size_t)iterations; ++native_executed) {
                 (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
             }
-            const double tn1 = omp_get_wtime();
+            const double tn1 = mexce::get_wtime();
 
             rec.native_dur_ns = (long long)((tn1 - tn0) * 1e9);
             rec.native_avg_ns = (uint64_t)((long double)rec.native_dur_ns / (long double)native_executed + 0.5L);
