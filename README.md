@@ -164,22 +164,22 @@ The performance characteristics are attributed to the code generation strategy. 
 #### Accuracy Distribution (ULP)
 
 | ULP Range      | Mexce vs Reference | Compiler vs Reference | Mexce vs Compiler |
-|----------------|---------------------|-----------------------|-------------------|
-| 0 (exact)      | 20,164             | 16,636               | 24,183           |
-| 1–16           | 23,494             | 26,870               | 19,537           |
-| 17–32          | 198                | 279                  | 181              |
-| 33–64          | 136                | 152                  | 116              |
-| 65–128         | 60                 | 97                   | 59               |
-| 129–256        | 33                 | 50                   | 31               |
-| 257–512        | 66                 | 31                   | 38               |
-| 513–1024       | 13                 | 25                   | 17               |
-| 1025–2048      | 13                 | 19                   | 11               |
-| 2049–4096      | 21                 | 8                    | 12               |
-| 4097–8192      | 6                  | 13                   | 12               |
-| 8193–16,384    | 7                  | 8                    | 3                |
-| 16,385–32,768  | 1                  | 2                    | 2                |
-| 32,769–65,536  | 2                  | 1                    | 1                |
-| >65,536        | 15                 | 31                   | 19               |  
+|----------------|--------------------|-----------------------|-------------------|
+| 0 (exact)      | 20,164             | 16,636                | 24,183            |
+| 1–16           | 23,494             | 26,870                | 19,537            |
+| 17–32          | 198                | 279                   | 181               |
+| 33–64          | 136                | 152                   | 116               |
+| 65–128         | 60                 | 97                    | 59                |
+| 129–256        | 33                 | 50                    | 31                |
+| 257–512        | 66                 | 31                    | 38                |
+| 513–1024       | 13                 | 25                    | 17                |
+| 1025–2048      | 13                 | 19                    | 11                |
+| 2049–4096      | 21                 | 8                     | 12                |
+| 4097–8192      | 6                  | 13                    | 12                |
+| 8193–16,384    | 7                  | 8                     | 3                 |
+| 16,385–32,768  | 1                  | 2                     | 2                 |
+| 32,769–65,536  | 2                  | 1                     | 1                 |
+| >65,536        | 15                 | 31                    | 19                |
 
 #### Analysis of Large Deviations
 The few cases with very large ULP deviations occur where the mathematically correct result is infinity. The symbolic reference engine correctly returns `inf`. However, finite-precision floating-point hardware correctly handles this by overflowing to a very large finite number. This is the expected behavior emulated by both `mexce` and the native compiler.
