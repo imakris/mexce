@@ -35,6 +35,13 @@
 #  include <unistd.h>
 #endif
 
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
 // ----------------------------- Utils ---------------------------------
 
 // Human-readable ns formatter (no chrono)
