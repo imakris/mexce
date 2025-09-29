@@ -288,6 +288,7 @@ int main(int argc, char* argv[])
         uint64_t ulp_mexce_vs_compiler;
         uint64_t ulp_mexce_vs_reference;
         uint64_t ulp_compiler_vs_reference;
+        uint64_t compile_ns;
         uint64_t avg_ns;
         long long dur_ns;
         uint64_t native_avg_ns;
@@ -334,6 +335,13 @@ int main(int argc, char* argv[])
         ++bins[bin_idx];
     };
 
+    long long total_compile_duration_ns = 0;
+    long double sum_compile_ns = 0.0L;
+    uint64_t compile_min_ns = std::numeric_limits<uint64_t>::max();
+    uint64_t compile_max_ns = 0;
+    std::vector<uint64_t> compile_times;
+    compile_times.reserve(total_expressions);
+
     long long total_duration_ns = 0;
     size_t benchmarked_functions = 0;
     long double sum_avg_ns = 0.0L;
@@ -361,6 +369,7 @@ int main(int argc, char* argv[])
         rec.ulp_mexce_vs_compiler = UINT64_MAX;
         rec.ulp_mexce_vs_reference = UINT64_MAX;
         rec.ulp_compiler_vs_reference = UINT64_MAX;
+        rec.compile_ns = 0;
         rec.avg_ns = 0;
         rec.dur_ns = 0;
         rec.native_avg_ns = 0;
@@ -390,12 +399,22 @@ int main(int argc, char* argv[])
             update_bin_counts(rec.ulp_compiler_vs_reference, exact_zero_count_comp_ref, bin_counts_comp_ref, comparisons_comp_ref);
         }
 
+        const double compile_start = omp_get_wtime();
         try {
             eval.set_expression(expr);
+            const double compile_end = omp_get_wtime();
+            rec.compile_ns = (uint64_t)((compile_end - compile_start) * 1e9 + 0.5L);
             rec.compiled = true;
             ++compiled_count;
+            total_compile_duration_ns += (long long)rec.compile_ns;
+            sum_compile_ns += (long double)rec.compile_ns;
+            compile_min_ns = std::min(compile_min_ns, rec.compile_ns);
+            compile_max_ns = std::max(compile_max_ns, rec.compile_ns);
+            compile_times.push_back(rec.compile_ns);
         }
         catch (const std::exception& e) {
+            const double compile_end = omp_get_wtime();
+            rec.compile_ns = (uint64_t)((compile_end - compile_start) * 1e9 + 0.5L);
             ++compile_fail_count;
             rec.error = std::string("compile: ") + e.what();
             records.push_back(rec);
@@ -581,6 +600,72 @@ int main(int argc, char* argv[])
 
     out << "\n";
 
+    out << "Compilation time histogram:" << "\n";
+    if (compile_times.empty()) {
+        out << "No successfully compiled expressions." << "\n";
+    }
+    else {
+        constexpr size_t kCompileBins = 10;
+        std::vector<size_t> compile_hist(kCompileBins, 0);
+        const uint64_t denom = (compile_max_ns - compile_min_ns) + 1;
+        for (uint64_t ns : compile_times) {
+            size_t bin_idx = 0;
+            if (compile_max_ns > compile_min_ns) {
+                bin_idx = (size_t)(((ns - compile_min_ns) * kCompileBins) / denom);
+                if (bin_idx >= kCompileBins) {
+                    bin_idx = kCompileBins - 1;
+                }
+            }
+            compile_hist[bin_idx]++;
+        }
+
+        const std::string range_header = "Range";
+        const std::string count_header = "Count";
+        size_t range_width = range_header.size();
+        size_t count_width = count_header.size();
+        std::vector<std::string> ranges;
+        std::vector<std::string> counts;
+        ranges.reserve(kCompileBins);
+        counts.reserve(kCompileBins);
+
+        for (size_t bin_idx = 0; bin_idx < kCompileBins; ++bin_idx) {
+            const long double start_ratio = (long double)bin_idx / (long double)kCompileBins;
+            const long double end_ratio = (long double)(bin_idx + 1) / (long double)kCompileBins;
+            const uint64_t start_offset = (uint64_t)std::floor(start_ratio * denom);
+            const uint64_t end_offset = (uint64_t)std::floor(end_ratio * denom);
+            uint64_t start_ns = compile_min_ns + start_offset;
+            uint64_t end_ns = compile_min_ns + (end_offset == 0 ? 0 : end_offset - 1);
+            if (bin_idx == kCompileBins - 1) {
+                end_ns = compile_max_ns;
+            }
+            if (end_ns < start_ns) {
+                end_ns = start_ns;
+            }
+
+            std::string label;
+            if (start_ns == end_ns) {
+                label = format_ns(start_ns);
+            }
+            else {
+                label = format_ns(start_ns) + " - " + format_ns(end_ns);
+            }
+            ranges.push_back(label);
+            counts.push_back(std::to_string(compile_hist[bin_idx]));
+            range_width = std::max(range_width, label.size());
+            count_width = std::max(count_width, counts.back().size());
+        }
+
+        out << std::left << std::setw((int)range_width) << range_header << "  "
+            << std::setw((int)count_width) << count_header << "\n";
+        out << std::string(range_width, '-') << "  " << std::string(count_width, '-') << "\n";
+        for (size_t bin_idx = 0; bin_idx < kCompileBins; ++bin_idx) {
+            out << std::left << std::setw((int)range_width) << ranges[bin_idx] << "  "
+                << std::setw((int)count_width) << counts[bin_idx] << "\n";
+        }
+    }
+
+    out << "\n";
+
     out << "\n" << line << "\n" << "BENCHMARK SUMMARY" << "\n" << line << "\n";
 
     struct Summary_column {
@@ -590,7 +675,9 @@ int main(int argc, char* argv[])
 
     const std::vector<std::string> summary_rows = {
         "Functions benchmarked",
+        "Average compilation time",
         "Average runtime per function",
+        "Total compilation time",
         "Total function execution time"
     };
 
@@ -602,10 +689,15 @@ int main(int argc, char* argv[])
         mexce_column.title = "Mexce";
         mexce_column.values.assign(summary_rows.size(), "-");
         mexce_column.values[0] = std::to_string(benchmarked_functions);
+        if (compiled_count > 0) {
+            const uint64_t avg_compile_ns = (uint64_t)(sum_compile_ns / (long double)compiled_count + 0.5L);
+            mexce_column.values[1] = format_ns(avg_compile_ns);
+            mexce_column.values[3] = format_ns((uint64_t)total_compile_duration_ns);
+        }
         if (benchmarked_functions > 0) {
             const uint64_t avg_per_func_ns = (uint64_t)(sum_avg_ns / (long double)benchmarked_functions + 0.5L);
-            mexce_column.values[1] = format_ns(avg_per_func_ns);
-            mexce_column.values[2] = format_ns((uint64_t)total_duration_ns);
+            mexce_column.values[2] = format_ns(avg_per_func_ns);
+            mexce_column.values[4] = format_ns((uint64_t)total_duration_ns);
         }
         summary_columns.push_back(std::move(mexce_column));
     }
@@ -617,8 +709,8 @@ int main(int argc, char* argv[])
         compiler_column.values[0] = std::to_string(benchmarked_native_functions);
         if (benchmarked_native_functions > 0) {
             const uint64_t avg_native_ns = (uint64_t)(sum_native_avg_ns / (long double)benchmarked_native_functions + 0.5L);
-            compiler_column.values[1] = format_ns(avg_native_ns);
-            compiler_column.values[2] = format_ns((uint64_t)total_native_duration_ns);
+            compiler_column.values[2] = format_ns(avg_native_ns);
+            compiler_column.values[4] = format_ns((uint64_t)total_native_duration_ns);
         }
         summary_columns.push_back(std::move(compiler_column));
     }
@@ -705,6 +797,7 @@ int main(int argc, char* argv[])
             << "  " << std::setw((int)max_ulp_len_mexce_comp) << kHeaderMexceComp
             << "  " << std::setw((int)max_ulp_len_mexce_ref) << kHeaderMexceRef
             << "  " << std::setw((int)max_ulp_len_comp_ref) << kHeaderCompRef
+            << "  " << std::setw(16) << "Compile"
             << "  " << std::setw(16) << "Avg/Call (Mx)"
             << "  " << std::setw(16) << "Avg/Call (Cp)"
             << "  " << "Expression" << "\n";
@@ -712,6 +805,7 @@ int main(int argc, char* argv[])
             << "  " << std::string((int)max_ulp_len_mexce_comp, '-')
             << "  " << std::string((int)max_ulp_len_mexce_ref, '-')
             << "  " << std::string((int)max_ulp_len_comp_ref, '-')
+            << "  " << std::string(16, '-')
             << "  " << std::string(16, '-')
             << "  " << std::string(16, '-')
             << "  " << std::string(40, '-') << "\n";
@@ -760,6 +854,7 @@ int main(int argc, char* argv[])
                 << "  " << std::setw((int)max_ulp_len_mexce_comp) << format_ulp_value(r.ulp_mexce_vs_compiler)
                 << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
                 << "  " << std::setw((int)max_ulp_len_comp_ref) << format_ulp_value(r.ulp_compiler_vs_reference)
+                << "  " << std::setw(16) << format_ns(r.compile_ns)
                 << "  " << std::setw(16) << "-"
                 << "  " << std::setw(16) << "-"
                 << "  " << r.expr << "\n";
@@ -780,6 +875,7 @@ int main(int argc, char* argv[])
                 << "  " << std::setw((int)max_ulp_len_mexce_comp) << format_ulp_value(r.ulp_mexce_vs_compiler)
                 << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
                 << "  " << std::setw((int)max_ulp_len_comp_ref) << format_ulp_value(r.ulp_compiler_vs_reference)
+                << "  " << std::setw(16) << format_ns(r.compile_ns)
                 << "  " << std::setw(16) << "-"
                 << "  " << std::setw(16) << "-"
                 << "  " << r.expr << "\n";
@@ -810,6 +906,7 @@ int main(int argc, char* argv[])
                 << "  " << std::setw((int)max_ulp_len_mexce_comp) << format_ulp_value(r.ulp_mexce_vs_compiler)
                 << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
                 << "  " << std::setw((int)max_ulp_len_comp_ref) << format_ulp_value(r.ulp_compiler_vs_reference)
+                << "  " << std::setw(16) << format_ns(r.compile_ns)
                 << "  " << std::setw(16) << format_ns(r.avg_ns)
                 << "  " << std::setw(16) << (r.native_eval_ok ? format_ns(r.native_avg_ns) : "-")
                 << "  " << r.expr << "\n";
