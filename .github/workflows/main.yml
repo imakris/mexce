@@ -1,0 +1,40 @@
+name: Build and Test mexce
+
+# Trigger the workflow on push or pull request events for the main/master branch
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: Build and Test on ${{ matrix.os }}
+    strategy:
+      # Run a job for each OS in this list. macOS is excluded as it's an unsupported architecture.
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      # 1. Checks out your repository so the job can access your code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Configure the project using CMake
+      #    No special dependencies are needed. OpenMP is supported by the default compilers.
+      - name: Configure CMake
+        run: cmake -B build -S .
+
+      # 3. Build the project
+      #    This will compile the 'benchmark' executable.
+      - name: Build with CMake
+        run: cmake --build build --config Release
+
+      # 4. Run the validation tests
+      #    This executes the 'benchmark' executable with a small iteration count using CTest.
+      #    The '-C Release' flag is important for Visual Studio on Windows.
+      #    --output-on-failure will print test output only if a test fails.
+      - name: Run Tests with CTest
+        run: ctest --test-dir build -C Release --output-on-failure
