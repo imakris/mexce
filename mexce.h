@@ -566,8 +566,10 @@ Token_type get_infix_rank(char infix_op)
         case '^': return INFIX_1;
     }
 
+    // LCOV_EXCL_START
     assert(false);
     return UNDEFINED_TOKEN_TYPE;
+    // LCOV_EXCL_STOP
 }
 
 
@@ -1327,7 +1329,10 @@ void emit_apply_op_with_value(impl::mexce_charstream& s, const T& v)
         case M64FP:  s < 0xdc < OP; break;  // f[OP]  qword ptr [eax/rax]
 
         // the FPU has limited support for 64-bit integers and M64INT cannot be supported here
-        default: assert(false);
+        default:
+            // LCOV_EXCL_START
+            assert(false);
+            // LCOV_EXCL_STOP
     }
 }
 
@@ -2005,7 +2010,12 @@ struct Token
 };
 
 
-template <typename> inline Numeric_data_type get_ndt()  { assert(false); return Numeric_data_type(); }
+template <typename> inline Numeric_data_type get_ndt()  {
+    // LCOV_EXCL_START
+    assert(false);
+    return Numeric_data_type();
+    // LCOV_EXCL_STOP
+}
 template <> inline Numeric_data_type get_ndt<double >() { return M64FP;  }
 template <> inline Numeric_data_type get_ndt<float  >() { return M32FP;  }
 template <> inline Numeric_data_type get_ndt<int16_t>() { return M16INT; }
