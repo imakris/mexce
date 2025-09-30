@@ -1,3 +1,4 @@
+#define MEXCE_ENABLE_DEBUG_UTILS
 #include "mexce.h"
 
 #include <algorithm>
