@@ -96,8 +96,12 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+      - name: Run tests (JUnit)
+        run: |
+          ctest --test-dir "$BUILD_DIR" --output-on-failure --output-junit test-results.xml
+      
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
         uses: codecov/test-results-action@v1
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+          files: build/test-results.xml
