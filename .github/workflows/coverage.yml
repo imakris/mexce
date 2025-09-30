@@ -48,30 +48,28 @@ jobs:
       - name: Build
         run: cmake --build "$BUILD_DIR" -j
 
-      - name: Test
+      - name: Test (also write JUnit)
         working-directory: ${{ env.BUILD_DIR }}
         run: |
           if [ "${{ matrix.compiler }}" = "clang" ]; then
             export LLVM_PROFILE_FILE="code-%p-%m.profraw"
           fi
-          ctest --output-on-failure
+          ctest --output-on-failure --output-junit test-results.xml
 
+      # GCC: capture coverage after tests (no initial capture since tests already ran)
       - name: Coverage (lcov/gcc)
         if: matrix.compiler == 'gcc'
         working-directory: ${{ env.BUILD_DIR }}
         run: |
-          lcov --quiet --capture --initial --directory . \
-               --rc geninfo_unexecuted_blocks=1 \
-               --output-file base.info
           lcov --quiet --capture --directory . \
                --rc geninfo_unexecuted_blocks=1 \
-               --output-file test.info
-          lcov --quiet -a base.info -a test.info -o lcov.info
+               --output-file lcov.info
           lcov --quiet --remove lcov.info '*/test/*' '/usr/*' \
                --ignore-errors unused \
                --output-file lcov.info
           lcov --list lcov.info || true
 
+      # Clang/LLVM source-based coverage
       - name: Coverage (llvm-cov/clang)
         if: matrix.compiler == 'clang'
         working-directory: ${{ env.BUILD_DIR }}
@@ -93,13 +91,10 @@ jobs:
           disable_search: true
           flags: ${{ matrix.compiler }}
           fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        # Public repos can upload tokenless; leave this unset or keep your secret if you want.
+        # env:
+        #   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-      - name: Run tests (JUnit)
-        run: |
-          ctest --test-dir "$BUILD_DIR" --output-on-failure --output-junit test-results.xml
-      
       - name: Upload test results to Codecov
         if: ${{ !cancelled() }}
         uses: codecov/test-results-action@v1
