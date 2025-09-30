@@ -27,7 +27,8 @@ jobs:
           if [ "${{ matrix.compiler }}" = "gcc" ]; then
             sudo apt-get install -y gcc g++ lcov
           else
-            sudo apt-get install -y clang llvm llvm-tools
+            # NOTE: ubuntu-24.04 doesn't have 'llvm-tools' pkg; 'llvm' includes llvm-cov/profdata
+            sudo apt-get install -y clang llvm
           fi
 
       - name: Configure (${{ matrix.compiler }})
@@ -51,7 +52,7 @@ jobs:
         working-directory: ${{ env.BUILD_DIR }}
         run: |
           if [ "${{ matrix.compiler }}" = "clang" ]; then
-            # Instruct clang to emit raw profiles during test runs
+            # Emit raw profiles during test runs
             export LLVM_PROFILE_FILE="code-%p-%m.profraw"
           fi
           ctest --output-on-failure
@@ -61,17 +62,22 @@ jobs:
         if: matrix.compiler == 'gcc'
         working-directory: ${{ env.BUILD_DIR }}
         run: |
-          # 1) Baseline before tests (captures zeroed counters for all objects)
-          lcov --quiet --capture --initial --directory . --output-file base.info
+          # 1) Baseline before tests (zero counters for all objects)
+          lcov --quiet --capture --initial --directory . \
+               --rc geninfo_unexecuted_blocks=1 \
+               --output-file base.info
 
           # 2) Capture after tests
-          lcov --quiet --capture --directory . --output-file test.info
+          lcov --quiet --capture --directory . \
+               --rc geninfo_unexecuted_blocks=1 \
+               --output-file test.info
 
           # 3) Merge baseline + test run
           lcov --quiet -a base.info -a test.info -o lcov.info
 
-          # 4) Prune noise: tests, system headers, toolchains
-          lcov --quiet --remove lcov.info '*/test/*' '/usr/*' '/opt/*' \
+          # 4) Prune noise: tests, system headers (drop /opt/* which caused 'unused' error)
+          lcov --quiet --remove lcov.info '*/test/*' '/usr/*' \
+               --ignore-errors unused \
                --output-file lcov.info
 
           # 5) Quick summary
@@ -85,7 +91,7 @@ jobs:
           # Merge raw profiles from the test run
           llvm-profdata merge -sparse *.profraw -o default.profdata
 
-          # The benchmark target is your test binary produced by CMake
+          # The benchmark target is your produced executable
           BIN=./benchmark
           if [ ! -x "$BIN" ]; then
             echo "Expected test binary '$BIN' not found or not executable."
