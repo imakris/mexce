@@ -27,8 +27,8 @@ jobs:
           if [ "${{ matrix.compiler }}" = "gcc" ]; then
             sudo apt-get install -y gcc g++ lcov
           else
-            # NOTE: ubuntu-24.04 doesn't have 'llvm-tools' pkg; 'llvm' includes llvm-cov/profdata
-            sudo apt-get install -y clang llvm
+            # ubuntu-24.04: get clang/llvm and OpenMP runtime+headers
+            sudo apt-get install -y clang llvm libomp-18-dev || sudo apt-get install -y libomp-dev
           fi
 
       - name: Configure (${{ matrix.compiler }})
@@ -52,63 +52,39 @@ jobs:
         working-directory: ${{ env.BUILD_DIR }}
         run: |
           if [ "${{ matrix.compiler }}" = "clang" ]; then
-            # Emit raw profiles during test runs
             export LLVM_PROFILE_FILE="code-%p-%m.profraw"
           fi
           ctest --output-on-failure
 
-      # -------------------- GCC / gcov -> lcov --------------------
       - name: Coverage (lcov/gcc)
         if: matrix.compiler == 'gcc'
         working-directory: ${{ env.BUILD_DIR }}
         run: |
-          # 1) Baseline before tests (zero counters for all objects)
           lcov --quiet --capture --initial --directory . \
                --rc geninfo_unexecuted_blocks=1 \
                --output-file base.info
-
-          # 2) Capture after tests
           lcov --quiet --capture --directory . \
                --rc geninfo_unexecuted_blocks=1 \
                --output-file test.info
-
-          # 3) Merge baseline + test run
           lcov --quiet -a base.info -a test.info -o lcov.info
-
-          # 4) Prune noise: tests, system headers (drop /opt/* which caused 'unused' error)
           lcov --quiet --remove lcov.info '*/test/*' '/usr/*' \
                --ignore-errors unused \
                --output-file lcov.info
-
-          # 5) Quick summary
           lcov --list lcov.info || true
 
-      # -------------------- Clang / llvm-cov ----------------------
       - name: Coverage (llvm-cov/clang)
         if: matrix.compiler == 'clang'
         working-directory: ${{ env.BUILD_DIR }}
         run: |
-          # Merge raw profiles from the test run
           llvm-profdata merge -sparse *.profraw -o default.profdata
-
-          # The benchmark target is your produced executable
           BIN=./benchmark
           if [ ! -x "$BIN" ]; then
             echo "Expected test binary '$BIN' not found or not executable."
             ls -la
             exit 1
           fi
-
-          # Export LCOV for upload
-          llvm-cov export \
-            -format=lcov \
-            -instr-profile default.profdata \
-            "$BIN" > lcov.info
-
-          # Human-readable summary (non-fatal)
-          llvm-cov report \
-            -instr-profile default.profdata \
-            "$BIN" || true
+          llvm-cov export -format=lcov -instr-profile default.profdata "$BIN" > lcov.info
+          llvm-cov report -instr-profile default.profdata "$BIN" || true
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v5
@@ -117,6 +93,5 @@ jobs:
           flags: ${{ matrix.compiler }}
           fail_ci_if_error: true
           verbose: true
-        # For private repos, uncomment and set a secret:
         # env:
         #   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
