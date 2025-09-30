@@ -3,6 +3,7 @@
 A single-header, dependency-free JIT compiler for mathematical expressions.
 
 [![Build & Benchmark](https://github.com/imakris/mexce/actions/workflows/main.yml/badge.svg)](https://github.com/imakris/mexce/actions/workflows/main.yml)
+
 [![codecov](https://codecov.io/gh/imakris/mexce/branch/master/graph/badge.svg)](https://app.codecov.io/gh/imakris/mexce?branch=master)
 
 ## Overview
