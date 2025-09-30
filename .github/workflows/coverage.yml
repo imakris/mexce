@@ -27,8 +27,8 @@ jobs:
           if [ "${{ matrix.compiler }}" = "gcc" ]; then
             sudo apt-get install -y gcc g++ lcov
           else
-            # ubuntu-24.04: get clang/llvm and OpenMP runtime+headers
-            sudo apt-get install -y clang llvm libomp-18-dev || sudo apt-get install -y libomp-dev
+            # ubuntu-24.04: get clang/llvm, OpenMP, and lcov for post-filtering
+            sudo apt-get install -y clang llvm libomp-18-dev lcov || sudo apt-get install -y libomp-dev lcov
           fi
 
       - name: Configure (${{ matrix.compiler }})
@@ -56,20 +56,18 @@ jobs:
           fi
           ctest --output-on-failure --output-junit test-results.xml
 
-      # GCC: capture coverage after tests (no initial capture since tests already ran)
+      # GCC: strict capture (includes unexecuted lines/files), then keep only your lib header
       - name: Coverage (lcov/gcc)
         if: matrix.compiler == 'gcc'
         working-directory: ${{ env.BUILD_DIR }}
         run: |
-          lcov --quiet --capture --directory . \
-               --rc geninfo_unexecuted_blocks=1 \
-               --output-file lcov.info
-          lcov --quiet --remove lcov.info '*/test/*' '/usr/*' \
-               --ignore-errors unused \
-               --output-file lcov.info
+          lcov --quiet --capture --initial --directory . --rc geninfo_unexecuted_blocks=1 -o base.info
+          lcov --quiet --capture --directory . --rc geninfo_unexecuted_blocks=1 -o test.info
+          lcov --quiet -a base.info -a test.info -o lcov.all.info
+          lcov --quiet --extract lcov.all.info "*/mexce.h" -o lcov.info
           lcov --list lcov.info || true
 
-      # Clang/LLVM source-based coverage
+      # Clang/LLVM: export to LCOV, then filter to mexce.h
       - name: Coverage (llvm-cov/clang)
         if: matrix.compiler == 'clang'
         working-directory: ${{ env.BUILD_DIR }}
@@ -81,11 +79,8 @@ jobs:
             ls -la
             exit 1
           fi
-          llvm-cov export \
-            -format=lcov \
-            -instr-profile default.profdata \
-            -ignore-filename-regex='(^|/)test/|(^|/)\.?usr/' \
-            "$BIN" > lcov.info
+          llvm-cov export -format=lcov -instr-profile default.profdata "$BIN" > lcov.all.info
+          lcov --quiet --extract lcov.all.info "*/mexce.h" -o lcov.info
           llvm-cov report -instr-profile default.profdata "$BIN" || true
 
       - name: Upload coverage to Codecov
@@ -96,7 +91,7 @@ jobs:
           disable_search: true
           flags: ${{ matrix.compiler }}
           fail_ci_if_error: false
-        # Public repos can upload tokenless; leave this unset or keep your secret if you want.
+        # Public repos can upload tokenless; uncomment if you prefer using a secret:
         # env:
         #   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
@@ -105,7 +100,7 @@ jobs:
         uses: codecov/test-results-action@v1
         with:
           files: build/test-results.xml
- 
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4

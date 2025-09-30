@@ -1,0 +1,37 @@
+codecov:
+  require_ci_to_pass: false
+  notify:
+    # wait for both matrix jobs (gcc + clang) before finalizing statuses
+    after_n_builds: 2
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+      gcc:
+        flags: gcc
+        target: auto
+        threshold: 1%
+      clang:
+        flags: clang
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
+
+ignore:
+  - "test/**"
+
+# define flags so Codecov can “carry forward” when one matrix leg doesn’t run
+flags:
+  gcc:
+    carryforward: true
+  clang:
+    carryforward: true
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
