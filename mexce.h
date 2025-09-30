@@ -278,6 +278,35 @@ double evaluator::evaluate(const std::string& expression)
 
 namespace impl {
 
+#ifdef MEXCE_ENABLE_DEBUG_UTILS
+namespace test_hooks {
+    inline bool& allocation_failure_flag() {
+        static bool flag = false;
+        return flag;
+    }
+
+    inline bool& mprotect_failure_flag() {
+        static bool flag = false;
+        return flag;
+    }
+
+    inline bool force_allocation_failure() {
+        return allocation_failure_flag();
+    }
+
+    inline bool force_mprotect_failure() {
+        return mprotect_failure_flag();
+    }
+
+    inline void set_force_allocation_failure(bool value) {
+        allocation_failure_flag() = value;
+    }
+
+    inline void set_force_mprotect_failure(bool value) {
+        mprotect_failure_flag() = value;
+    }
+}
+#endif
 
 #ifdef _WIN32
 inline
@@ -293,6 +322,15 @@ size_t get_page_size()
 inline
 uint8_t* get_executable_buffer(size_t sz)
 {
+#ifdef MEXCE_ENABLE_DEBUG_UTILS
+    if (test_hooks::force_allocation_failure()) {
+#ifdef _WIN32
+        return nullptr;
+#elif defined(__linux__)
+        return reinterpret_cast<uint8_t*>(MAP_FAILED);
+#endif
+    }
+#endif
 #ifdef _WIN32
     (void)sz; // prevent warning
     return (uint8_t*)VirtualAlloc(0, sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -313,6 +351,12 @@ double (*lock_executable_buffer(uint8_t* buffer, size_t sz))()
     }
     FlushInstructionCache(GetCurrentProcess(), buffer, sz);
 #elif defined(__linux__)
+#ifdef MEXCE_ENABLE_DEBUG_UTILS
+    if (test_hooks::force_mprotect_failure()) {
+        munmap((void*)buffer, sz);
+        throw std::runtime_error("mprotect(PROT_READ|PROT_EXEC) failed");
+    }
+#endif
     if (mprotect((void*)buffer, sz, PROT_READ | PROT_EXEC) != 0) {
         munmap((void*)buffer, sz);
         throw std::runtime_error("mprotect(PROT_READ|PROT_EXEC) failed");
@@ -566,7 +610,7 @@ Token_type get_infix_rank(char infix_op)
         case '^': return INFIX_1;
     }
 
-    assert(false);
+    assert(false); // unreachable: all callers validate infix_op via is_operator
     return UNDEFINED_TOKEN_TYPE;
 }
 
@@ -1327,7 +1371,7 @@ void emit_apply_op_with_value(impl::mexce_charstream& s, const T& v)
         case M64FP:  s < 0xdc < OP; break;  // f[OP]  qword ptr [eax/rax]
 
         // the FPU has limited support for 64-bit integers and M64INT cannot be supported here
-        default: assert(false);
+        default: assert(false); // unreachable: callers guard against M64INT operands
     }
 }
 
@@ -2347,7 +2391,7 @@ void evaluator::set_expression(std::string e)
             case FUNCTION_LEFT_PARENTHESIS:
                 break;
             default:
-                throw(mpe("internal error", 0));
+                throw(mpe("internal error", 0)); // unreachable: all token types handled above
         }
     }
     while(!tstack.empty()) {
