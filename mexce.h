@@ -280,31 +280,10 @@ namespace impl {
 
 #ifdef MEXCE_ENABLE_DEBUG_UTILS
 namespace test_hooks {
-    inline bool& allocation_failure_flag() {
-        static bool flag = false;
-        return flag;
-    }
-
-    inline bool& mprotect_failure_flag() {
-        static bool flag = false;
-        return flag;
-    }
-
-    inline bool force_allocation_failure() {
-        return allocation_failure_flag();
-    }
-
-    inline bool force_mprotect_failure() {
-        return mprotect_failure_flag();
-    }
-
-    inline void set_force_allocation_failure(bool value) {
-        allocation_failure_flag() = value;
-    }
-
-    inline void set_force_mprotect_failure(bool value) {
-        mprotect_failure_flag() = value;
-    }
+    bool force_allocation_failure();
+    bool force_mprotect_failure();
+    void set_force_allocation_failure(bool value);
+    void set_force_mprotect_failure(bool value);
 }
 #endif
 
