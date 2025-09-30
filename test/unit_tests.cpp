@@ -8,10 +8,15 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <new>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#if defined(__linux__)
+#include <sys/mman.h>
+#endif
 
 namespace {
 
@@ -264,6 +269,19 @@ void test_pow_optimizer_special_cases(TestSuite& suite) {
     suite.expect_near("pow_optimizer_generic_path", eval.evaluate(), std::pow(x, 3.3));
 }
 
+void test_pow_optimizer_integer_branches(TestSuite& suite) {
+    mexce::evaluator eval;
+    double x = 3.0;
+    eval.bind(x, "x");
+
+    eval.set_expression("pow(x, 3)");
+    suite.expect_near("pow_optimizer_integer_positive", eval.evaluate(), std::pow(x, 3.0));
+
+    x = 4.0;
+    eval.set_expression("pow(x, -3)");
+    suite.expect_near("pow_optimizer_integer_negative", eval.evaluate(), std::pow(x, -3.0));
+}
+
 void test_helper_functions_and_element(TestSuite& suite) {
     using namespace mexce::impl;
 
@@ -340,6 +358,86 @@ void test_memory_management(TestSuite& suite) {
     uint8_t* buffer = mexce::impl::get_executable_buffer(size);
     suite.expect_true("get_executable_buffer", buffer != nullptr);
     mexce::impl::free_executable_buffer(reinterpret_cast<double(*)()>(buffer), size);
+}
+
+void test_memory_management_failures(TestSuite& suite) {
+    using mexce::impl::test_hooks::set_force_allocation_failure;
+    using mexce::impl::test_hooks::set_force_mprotect_failure;
+
+    set_force_allocation_failure(true);
+    mexce::evaluator eval;
+    double value = 1.0;
+    eval.bind(value, "v");
+    suite.expect_throw<std::bad_alloc>("get_executable_buffer_failure", [&] {
+        eval.set_expression("v");
+    });
+    set_force_allocation_failure(false);
+
+    size_t size = 4096;
+    uint8_t* buffer = mexce::impl::get_executable_buffer(size);
+    bool allocation_ok = buffer != nullptr;
+#if defined(__linux__)
+    allocation_ok = allocation_ok && buffer != reinterpret_cast<uint8_t*>(MAP_FAILED);
+#endif
+    suite.expect_true("allocation_for_mprotect_failure", allocation_ok);
+
+    set_force_mprotect_failure(true);
+#if defined(_WIN32)
+    const char* expected_protect_failure = "VirtualProtect(PAGE_EXECUTE_READ) failed";
+#elif defined(__linux__)
+    const char* expected_protect_failure = "mprotect(PROT_READ|PROT_EXEC) failed";
+#else
+    const char* expected_protect_failure = "";
+#endif
+    bool buffer_released_by_failure = false;
+    suite.expect_throw<std::runtime_error>("lock_executable_buffer_failure", [&] {
+        try {
+            mexce::impl::lock_executable_buffer(buffer, size);
+        }
+        catch (...) {
+            buffer_released_by_failure = true;
+            set_force_mprotect_failure(false);
+            throw;
+        }
+    }, expected_protect_failure);
+
+    set_force_mprotect_failure(false);
+    if (!buffer_released_by_failure) {
+        mexce::impl::free_executable_buffer(reinterpret_cast<double(*)()>(buffer), size);
+    }
+}
+
+void test_emit_apply_op_with_value_variants(TestSuite& suite) {
+    using namespace mexce::impl;
+
+    mexce_charstream stream_constant;
+    auto constant = std::make_shared<Constant>(1, 2.0);
+    emit_apply_op_with_value<0x00>(stream_constant, constant);
+    suite.expect_true("emit_apply_op_with_value_constant", stream_constant.s.str().size() > 0);
+
+    mexce_charstream stream_var16;
+    int16_t v16 = 7;
+    auto var16 = std::make_shared<Variable>(2, &v16, "v16", M16INT);
+    emit_apply_op_with_value<0x08>(stream_var16, var16);
+    suite.expect_true("emit_apply_op_with_value_var16", stream_var16.s.str().size() > 0);
+
+    mexce_charstream stream_var32;
+    int32_t v32 = 11;
+    auto var32 = std::make_shared<Variable>(3, &v32, "v32", M32INT);
+    emit_apply_op_with_value<0x20>(stream_var32, var32);
+    suite.expect_true("emit_apply_op_with_value_var32", stream_var32.s.str().size() > 0);
+
+    mexce_charstream compile_stream16;
+    elist_t elist16;
+    elist16.push_back(Element(var16));
+    compile_elist(compile_stream16, elist16.begin(), elist16.end());
+    suite.expect_true("compile_elist_var16", compile_stream16.s.str().size() > 0);
+
+    mexce_charstream compile_stream32;
+    elist_t elist32;
+    elist32.push_back(Element(var32));
+    compile_elist(compile_stream32, elist32.begin(), elist32.end());
+    suite.expect_true("compile_elist_var32", compile_stream32.s.str().size() > 0);
 }
 
 void test_asmd_optimizer_branches(TestSuite& suite) {
@@ -450,6 +548,27 @@ void test_parsing_errors(TestSuite& suite) {
     }, "Unexpected end of expression");
 }
 
+void test_additional_parsing_errors(TestSuite& suite) {
+    suite.expect_throw<mexce::mexce_parsing_exception>("min_without_arguments", [] {
+        mexce::evaluator().set_expression("min()");
+    }, "Expected more arguments");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("min_missing_second_numeric", [] {
+        mexce::evaluator().set_expression("min(1)");
+    }, "Expected more arguments");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("min_missing_second_identifier", [] {
+        mexce::evaluator eval;
+        double value = 1.0;
+        eval.bind(value, "v");
+        eval.set_expression("min(v)");
+    }, "Expected more arguments");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("min_missing_second_parenthesized", [] {
+        mexce::evaluator().set_expression("min((1))");
+    }, "Expected more arguments");
+}
+
 } // namespace
 
 int main() {
@@ -463,12 +582,16 @@ int main() {
     test_min_max_and_arithmetic(suite);
     test_constants_and_single_shot(suite);
     test_pow_optimizer_special_cases(suite);
+    test_pow_optimizer_integer_branches(suite);
     test_helper_functions_and_element(suite);
     test_binding_and_unbinding(suite);
     test_mexce_parsing_exception_class(suite);
     test_memory_management(suite);
+    test_memory_management_failures(suite);
+    test_emit_apply_op_with_value_variants(suite);
     test_asmd_optimizer_branches(suite);
     test_parsing_errors(suite);
+    test_additional_parsing_errors(suite);
 
     if (!suite.failures.empty()) {
         std::cerr << "mexce unit tests failed (" << suite.failures.size() << ")" << std::endl;
