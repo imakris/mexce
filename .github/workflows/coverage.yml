@@ -81,10 +81,15 @@ jobs:
             ls -la
             exit 1
           fi
-          llvm-cov export -format=lcov -instr-profile default.profdata "$BIN" > lcov.info
+          llvm-cov export \
+            -format=lcov \
+            -instr-profile default.profdata \
+            -ignore-filename-regex='(^|/)test/|(^|/)\.?usr/' \
+            "$BIN" > lcov.info
           llvm-cov report -instr-profile default.profdata "$BIN" || true
 
       - name: Upload coverage to Codecov
+        if: always()
         uses: codecov/codecov-action@v5
         with:
           files: build/lcov.info
@@ -96,7 +101,16 @@ jobs:
         #   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
+        if: always()
         uses: codecov/test-results-action@v1
         with:
           files: build/test-results.xml
+ 
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.compiler }}-coverage
+          path: |
+            build/lcov.info
+            build/test-results.xml
