@@ -281,10 +281,12 @@ void test_helper_functions_and_element(TestSuite& suite) {
     suite.expect_true("element_default_type", default_element.type == Element_type::CCONST);
     suite.expect_true("element_default_id", default_element.id == 0);
 
+    mexce::evaluator eval; // Needed for make_function
     double value = 4.0;
     auto variable = std::make_shared<Variable>(1, &value, "value", M32FP);
     auto constant = std::make_shared<Constant>(2, 3.0);
-    auto add_function = std::make_shared<Function>(3, "add", 2, 0, 0, nullptr);
+    auto add_function = make_function(&eval, "add");
+    add_function->id = 3;
 
     elist_t elist;
     elist.push_back(Element(variable));
@@ -463,6 +465,87 @@ void test_parsing_errors(TestSuite& suite) {
     }, "Unexpected end of expression");
 }
 
+// New consolidated test function for advanced coverage
+void test_advanced_coverage_and_edge_cases(TestSuite& suite) {
+    // 1. Test unbind() with a referenced variable and variadic recursion
+    // Covers: template <typename = void> void unbind() {}
+    // Covers: if (it->second->referenced) { set_expression("0"); }
+    {
+        mexce::evaluator eval;
+        double x = 1.0, y = 2.0;
+        eval.bind(x, "x", y, "y");
+        eval.set_expression("x + y");
+        suite.expect_near("unbind_pre_state", eval.evaluate(), 3.0);
+
+        // Unbinding a referenced variable ("x") forces the expression to reset to "0".
+        // The call also recurses, eventually hitting the empty base case for unbind().
+        eval.unbind("x", "y");
+
+        suite.expect_near("unbind_referenced_resets_expression", eval.evaluate(), 0.0);
+        
+        // Also prove that both variables are now unbound.
+        suite.expect_throw<mexce::mexce_parsing_exception>("unbind_verifies_x_is_gone", [&] {
+            eval.set_expression("x");
+        }, "x is not a known constant, variable or function name");
+    }
+
+    // 2. Test the error path of lock_executable_buffer()
+    // Covers: throw std::runtime_error("mprotect(...) failed");
+    {
+        const size_t sz = 4096;
+        uint8_t* buf = mexce::impl::get_executable_buffer(sz);
+        suite.expect_true("get_executable_buffer_succeeded", buf != nullptr);
+
+        // Passing a zero size is an invalid argument for the underlying OS calls,
+        // which forces the error handling path to be taken.
+        suite.expect_throw<std::runtime_error>(
+            "lock_executable_buffer_zero_size_throws",
+            [&]{ (void)mexce::impl::lock_executable_buffer(buf, 0); }
+        );
+
+        // We must still free the buffer using its original, correct size.
+        mexce::impl::free_executable_buffer(reinterpret_cast<double(*)()>(buf), sz);
+    }
+
+    // 3. Test elist_to_string formatting for unary and multi-argument functions
+    // Covers: lrs = string("(") + symbolic_op + ...
+    // Covers: lrs += ", ";
+    {
+        using namespace mexce::impl;
+        mexce::evaluator eval; // needed for make_function
+        double value = 4.0;
+        auto var = std::make_shared<Variable>(1, &value, "value", M64FP);
+        auto const_val = std::make_shared<Constant>(2, 10.0);
+
+        // Test unary operator formatting
+        auto neg_fn = make_function(&eval, "neg");
+        elist_t e_unary;
+        e_unary.push_back(Element(var));
+        e_unary.push_back(Element(neg_fn));
+        suite.expect_true("elist_to_string_unary_op", elist_to_string(e_unary) == "(-value)");
+
+        // Test multi-argument formatting (which adds the comma)
+        auto logb_fn = make_function(&eval, "logb");
+        elist_t e_multi;
+        e_multi.push_back(Element(var));
+        e_multi.push_back(Element(const_val));
+        e_multi.push_back(Element(logb_fn));
+        suite.expect_true("elist_to_string_multi_arg", elist_to_string(e_multi) == "logb(value, 10)");
+    }
+
+    // 4. Test the pow_optimizer path for non-power-of-two integers
+    // Covers: if (diff_high && diff_low) { ... fmulp ... }
+    {
+        mexce::evaluator eval;
+        double x = 2.0;
+        eval.bind(x, "x");
+        // An exponent of 3 forces the optimizer to use a temporary value
+        // (by squaring x) and then multiply again, requiring the cleanup instruction.
+        eval.set_expression("pow(x, 3)");
+        suite.expect_near("pow_optimizer_temp_cleanup_path", eval.evaluate(), 8.0);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -482,6 +565,7 @@ int main() {
     test_memory_management(suite);
     test_asmd_optimizer_branches(suite);
     test_parsing_errors(suite);
+    test_advanced_coverage_and_edge_cases(suite);
 
     if (!suite.failures.empty()) {
         std::cerr << "mexce unit tests failed (" << suite.failures.size() << ")" << std::endl;
