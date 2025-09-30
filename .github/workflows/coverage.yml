@@ -1,0 +1,88 @@
+name: coverage
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    env:
+      BUILD_DIR: build
+      CTEST_OUTPUT_ON_FAILURE: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            sudo apt-get install -y gcc g++ gcovr lcov
+          else
+            sudo apt-get install -y clang llvm llvm-tools
+            # gcovr still useful for Cobertura if desired
+            sudo apt-get install -y gcovr
+          fi
+
+      - name: Configure (${{ matrix.compiler }})
+        run: |
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON
+          else
+            cmake -S . -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          fi
+
+      - name: Build
+        run: cmake --build "$BUILD_DIR" -j
+
+      - name: Test
+        working-directory: ${{ env.BUILD_DIR }}
+        run: |
+          if [ "${{ matrix.compiler }}" = "clang" ]; then
+            # Write raw profiles next to binaries
+            export LLVM_PROFILE_FILE="code-%p-%m.profraw"
+          fi
+          ctest --output-on-failure
+
+      # --- GCC path: use gcovr to generate reports (Cobertura + lcov) ---
+      - name: Coverage (gcovr/gcc)
+        if: matrix.compiler == 'gcc'
+        working-directory: ${{ env.BUILD_DIR }}
+        run: |
+          # Cobertura (XML) is great for dashboards; lcov.info for Codecov
+          gcovr -r .. --exclude 'test/.*' --xml-pretty -o coverage.xml
+          gcovr -r .. --exclude 'test/.*' --lcov -o lcov.info
+
+      # --- Clang path: source-based coverage -> lcov via llvm-profdata/llvm-cov ---
+      - name: Coverage (llvm-cov/clang)
+        if: matrix.compiler == 'clang'
+        working-directory: ${{ env.BUILD_DIR }}
+        run: |
+          # Merge raw profiles -> profdata
+          llvm-profdata merge -sparse *.profraw -o default.profdata
+          # Export lcov tracefile directly
+          # Replace 'your_test_binary' with any produced test binaries if needed; using all objects works too.
+          # Below, find all executables produced by the build and pass them to llvm-cov.
+          bins=$(find . -type f -executable ! -name '*.sh' ! -name '*.py')
+          llvm-cov export -format=lcov -instr-profile default.profdata $bins > lcov.info
+          # Optionally also produce a textual summary:
+          llvm-cov show -instr-profile default.profdata $bins > coverage.txt || true
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          # Prefer lcov; Codecov accepts multiple inputs
+          files: |
+            ${{ env.BUILD_DIR }}/lcov.info
+            ${{ env.BUILD_DIR }}/coverage.xml
+          flags: ${{ matrix.compiler }}
+          fail_ci_if_error: true
+          verbose: true

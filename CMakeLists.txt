@@ -1,6 +1,22 @@
 cmake_minimum_required(VERSION 3.16)
 project(mexce_benchmark LANGUAGES CXX)
 
+option(ENABLE_COVERAGE "Build with coverage instrumentation" OFF)
+
+if(ENABLE_COVERAGE)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-O0 -g)
+
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      add_compile_options(--coverage)
+      add_link_options(--coverage)
+    else()
+      add_compile_options(-fprofile-instr-generate -fcoverage-mapping)
+      add_link_options(-fprofile-instr-generate)
+    endif()
+  endif()
+endif()
+
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
