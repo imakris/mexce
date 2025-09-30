@@ -34,6 +34,10 @@ endif()
 
 target_compile_options(benchmark PRIVATE ${MEXCE_BENCHMARK_LOCAL_FLAGS})
 
+add_executable(unit_tests test/unit_tests.cpp)
+target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(unit_tests PRIVATE ${MEXCE_BENCHMARK_LOCAL_FLAGS})
+
 set(MEXCE_BENCHMARK_COMPILER "${CMAKE_CXX_COMPILER_ID}")
 if (CMAKE_CXX_COMPILER_VERSION)
     string(APPEND MEXCE_BENCHMARK_COMPILER " ${CMAKE_CXX_COMPILER_VERSION}")
@@ -79,6 +83,7 @@ target_compile_definitions(benchmark PRIVATE
 )
 
 enable_testing()
+add_test(NAME mexce_unit_tests COMMAND unit_tests)
 add_test(NAME benchmark_quick
          COMMAND benchmark 5 ${CMAKE_BINARY_DIR}/benchmark_quick_results.txt)
 add_test(NAME benchmark_output_first
