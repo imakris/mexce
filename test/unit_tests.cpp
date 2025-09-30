@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,30 @@ struct TestSuite {
     void expect_true(const std::string& name, bool value) {
         if (!value) {
             failures.push_back(name + " failed");
+        }
+    }
+
+    template <typename Exception, typename Func>
+    void expect_throw(const std::string& name, Func func, const std::string& expected_message = std::string()) {
+        try {
+            func();
+            failures.push_back(name + " failed: expected exception");
+        }
+        catch (const Exception& ex) {
+            if (!expected_message.empty() && expected_message != ex.what()) {
+                std::ostringstream oss;
+                oss << name << " failed: expected message \"" << expected_message
+                    << "\", got \"" << ex.what() << "\"";
+                failures.push_back(oss.str());
+            }
+        }
+        catch (const std::exception& ex) {
+            std::ostringstream oss;
+            oss << name << " failed: unexpected exception type (" << ex.what() << ")";
+            failures.push_back(oss.str());
+        }
+        catch (...) {
+            failures.push_back(name + " failed: unexpected non-standard exception");
         }
     }
 };
@@ -219,6 +244,56 @@ void test_constants_and_single_shot(TestSuite& suite) {
     suite.expect_near("trig", eval.evaluate(), std::sin(x) + std::cos(y));
 }
 
+void test_parsing_failures(TestSuite& suite) {
+    mexce::evaluator eval;
+    auto quoted = [](char c) { return std::string("\"") + c + "\""; };
+
+    suite.expect_throw<std::logic_error>("empty_expression", [&]() {
+        eval.set_expression("");
+    }, "Expected an expression");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("unexpected_closing_paren", [&]() {
+        eval.set_expression("1)");
+    }, quoted(')') + " not expected");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("missing_arguments", [&]() {
+        eval.set_expression("min(1)");
+    }, "Expected more arguments");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("missing_closing_paren_before_comma", [&]() {
+        eval.set_expression("min((1,2), 3)");
+    }, std::string("Expected a ") + quoted(')'));
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("top_level_comma", [&]() {
+        eval.set_expression("1,2");
+    }, "Don't expect any arguments here");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("unknown_token", [&]() {
+        eval.set_expression("$");
+    }, quoted('$') + " not expected");
+}
+
+void test_binding_failures(TestSuite& suite) {
+    mexce::evaluator eval;
+    double value = 0.0;
+
+    suite.expect_throw<std::logic_error>("bind_existing_function", [&]() {
+        eval.bind(value, "sin");
+    }, "Attempted to bind a variable, named as an existing function");
+
+    suite.expect_throw<std::logic_error>("bind_existing_constant", [&]() {
+        eval.bind(value, "pi");
+    }, "Attempted to bind a variable, named as an existing constant");
+
+    suite.expect_throw<std::logic_error>("unbind_empty_name", [&]() {
+        eval.unbind("");
+    }, "Variable name was an empty string");
+
+    suite.expect_throw<std::logic_error>("unbind_unknown_variable", [&]() {
+        eval.unbind("unknown");
+    }, "Attempted to unbind an unknown variable");
+}
+
 } // namespace
 
 int main() {
@@ -231,6 +306,8 @@ int main() {
     test_rounding_functions(suite);
     test_min_max_and_arithmetic(suite);
     test_constants_and_single_shot(suite);
+    test_parsing_failures(suite);
+    test_binding_failures(suite);
 
     if (!suite.failures.empty()) {
         std::cerr << "mexce unit tests failed (" << suite.failures.size() << ")" << std::endl;
