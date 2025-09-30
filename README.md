@@ -4,6 +4,8 @@ A single-header, dependency-free JIT compiler for mathematical expressions.
 
 [![Build & Benchmark](https://github.com/imakris/mexce/actions/workflows/main.yml/badge.svg)](https://github.com/imakris/mexce/actions/workflows/main.yml)
 
+[![codecov](https://codecov.io/gh/imakris/mexce/branch/master/graph/badge.svg)](https://app.codecov.io/gh/imakris/mexce?branch=master)
+
 ## Overview
 
 `mexce` is a runtime compiler for scalar mathematical expressions written in C++. It parses standard C-like expressions and compiles them directly into x86/x86-64 machine code that utilizes the x87 FPU.
