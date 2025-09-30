@@ -25,7 +25,7 @@ coverage:
 ignore:
   - "test/**"
 
-# define flags so Codecov can "carry forward" when one matrix leg doesn’t run
+# define flags so Codecov can "carry forward" when one matrix leg doesn't run
 flags:
   gcc:
     carryforward: true
