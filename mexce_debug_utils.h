@@ -8,6 +8,34 @@
 // This header is intended to be included from within the mexce::impl namespace
 // in mexce.h when MEXCE_ENABLE_DEBUG_UTILS is defined.
 
+namespace test_hooks {
+    inline bool& allocation_failure_flag() {
+        static bool flag = false;
+        return flag;
+    }
+
+    inline bool& mprotect_failure_flag() {
+        static bool flag = false;
+        return flag;
+    }
+
+    inline bool force_allocation_failure() {
+        return allocation_failure_flag();
+    }
+
+    inline bool force_mprotect_failure() {
+        return mprotect_failure_flag();
+    }
+
+    inline void set_force_allocation_failure(bool value) {
+        allocation_failure_flag() = value;
+    }
+
+    inline void set_force_mprotect_failure(bool value) {
+        mprotect_failure_flag() = value;
+    }
+}
+
 inline string function_name_to_infix_operator(const string& fn)
 {
     static map<string, string> op_map = {
