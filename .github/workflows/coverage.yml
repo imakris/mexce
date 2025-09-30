@@ -89,8 +89,15 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
-          files: build/lcov.info      # only our merged/pruned LCOV file
-          disable_search: true        # don't scan for stray *.gcov
-          flags: ${{ matrix.compiler }}  # nice in the Codecov UI
+          files: build/lcov.info
+          disable_search: true
+          flags: ${{ matrix.compiler }}
+          fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
