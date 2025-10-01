@@ -99,9 +99,9 @@ Compiles and executes an expression for a single use without replacing the defau
     | 1 (highest) | `^` | `pow` | Power / Exponentiation |
     | 2 | `*`, `/` | `mul`, `div` | Multiplication, Division |
     | 3 | `+`, `-` | `add`, `sub` | Addition, Subtraction |
-    | 4 (lowest) | `<` | `less_than`| Less-than comparison |
+    | 4 (lowest) | `<`, `>` | — | Less-than and greater-than comparison |
 *   **Unary Operators:** Unary `+` and `-` are supported.
-*   **Comparison:** The `<` operator returns a `double` (`1.0` if true, `0.0` if false).
+*   **Comparison:** The `<` and `>` operators return a `double` (`1.0` if true, `0.0` if false).
 
 ## Built-in Identifiers
 
@@ -126,7 +126,6 @@ Compiles and executes an expression for a single use without replacing the defau
 | `logb(base, value)` | Logarithm with a custom base. |
 | `ylog2(y, x)` | Computes `y * log2(x)`. |
 | `ceil(x)`, `floor(x)`, `round(x)`, `int(x)` | Rounding functions. |
-| `less_than(a, b)` | Returns `1.0` if `a < b`, else `0.0`. |
 | `sign(x)` | Returns `-1.0` for negative `x`, `1.0` otherwise. |
 | `signp(x)` | Returns `1.0` for positive `x`, `0.0` otherwise. |
 | `bnd(x, period)` | Wraps `x` to the interval `[0, period)`. |

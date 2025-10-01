@@ -60,8 +60,8 @@
  * * Numeric literals may be written with decimal points or scientific
  *   notation.
  * * Unary `+` and `-` as well as the infix operators `+`, `-`, `*`, `/`, `^`
- *   (power) and `<` (less-than) are supported.  The `<` operator expands to the
- *   `lt(a, b)` function, yielding `1` when `a < b` and `0` otherwise.
+ *   (power) and the comparison operators `<` and `>` are supported.  Both yield
+ *   `1` when the comparison is true and `0` otherwise.
  * * Parentheses and comma-separated argument lists follow familiar C-like
  *   rules.
  *
@@ -84,7 +84,6 @@
  *   - `exp(x)` and `pow(a, b)` — base-e exponent and exponentiation.
  *   - `expn(x)` — exponent part of `x`, and `sfc(x)` — significand/fractional
  *     component of `x` in the range `[0.5, 1)`.
- *   - `lt(a, b)` — comparison used for the `<` operator.
  *   - `log(x)`/`ln(x)`, `log2(x)`, `log10(x)`, `logb(base, value)` and
  *     `ylog2(y, x)` (`y * log2(x)`).
  *   - `max(a, b)`, `min(a, b)` and `mod(a, b)`.
