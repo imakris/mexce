@@ -43,8 +43,8 @@ int main() {
 
     // The evaluator can also be used for single-shot evaluations
     // without changing the main expression.
-    double result = eval.evaluate("cos(pi / 4)");
-    std::cout << "Single-shot evaluation: " << result << std::endl;
+    double result = eval.evaluate("x + y * y");
+    std::cout << "Single-shot evaluation with x=0: " << result << std::endl;
 
     // Loop with the main expression
     std::cout << "\nLoop evaluation results:" << std::endl;
@@ -54,6 +54,19 @@ int main() {
 
     return 0;
 }
+```
+
+This program prints:
+
+```
+Single-shot evaluation with x=0: 0.01
+
+Loop evaluation results:
+  0.1
+  0.199833
+  0.298669
+  0.39552
+  0.489418
 ```
 
 ## API Reference
