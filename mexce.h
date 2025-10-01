@@ -61,7 +61,7 @@
  *   notation.
  * * Unary `+` and `-` as well as the infix operators `+`, `-`, `*`, `/`, `^`
  *   (power) and `<` (less-than) are supported.  The `<` operator expands to the
- *   `less_than(a, b)` function, yielding `1` when `a < b` and `0` otherwise.
+ *   `lt(a, b)` function, yielding `1` when `a < b` and `0` otherwise.
  * * Parentheses and comma-separated argument lists follow familiar C-like
  *   rules.
  *
@@ -84,7 +84,7 @@
  *   - `exp(x)` and `pow(a, b)` — base-e exponent and exponentiation.
  *   - `expn(x)` — exponent part of `x`, and `sfc(x)` — significand/fractional
  *     component of `x` in the range `[0.5, 1)`.
- *   - `less_than(a, b)` — comparison used for the `<` operator.
+ *   - `lt(a, b)` — comparison used for the `<` operator.
  *   - `log(x)`/`ln(x)`, `log2(x)`, `log10(x)`, `logb(base, value)` and
  *     `ylog2(y, x)` (`y * log2(x)`).
  *   - `max(a, b)`, `min(a, b)` and `mod(a, b)`.
@@ -365,7 +365,7 @@ enum Token_type
     INFIX_1,            // infix operator, with priority 1 ( '^', i.e. power )
     INFIX_2,            // infix operator, with priority 2 ( '*' and '/' )
     INFIX_3,            // infix operator, with priority 3 ( '+' and '-' )
-    INFIX_4,            // infix operator, with priority 4 ( '<' )
+    INFIX_4,            // infix operator, with priority 4 ( '<' and '>' )
     RIGHT_PARENTHESIS,
     LEFT_PARENTHESIS,
     COMMA,
@@ -558,7 +558,8 @@ inline
 Token_type get_infix_rank(char infix_op)
 {
     switch (infix_op) {
-        case '<': return INFIX_4;
+        case '<':
+        case '>': return INFIX_4;
         case '+':
         case '-': return INFIX_3;
         case '*':
@@ -818,9 +819,14 @@ inline Function Sign()
         0xdf, 0xf1,                                 // fcomip      st, st(1)
         0xdd, 0xd8,                                 // fstp        st(0)
         0xd9, 0xe8,                                 // fld1
+        0xd9, 0xe0,                                 // fchs        ; default -1
+        0xd9, 0xee,                                 // fldz
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xda, 0xc9,                                 // fcmove      st, st(1)
         0xd9, 0xe8,                                 // fld1
-        0xd9, 0xe0,                                 // fchs
+        0xd9, 0xc9,                                 // fxch        st(1)
         0xda, 0xc1,                                 // fcmovb      st, st(1)
+        0xdd, 0xd9,                                 // fstp        st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
     return Function(0, "sign", 1, 1, sizeof(code), code);
@@ -1235,6 +1241,7 @@ inline Function Mod()
 }
 
 
+
 inline Function Less_than()
 {
     uint8_t code[] = {
@@ -1247,6 +1254,88 @@ inline Function Less_than()
     };
     return Function(0, "less_than", 2, 0, sizeof(code), code);
 }
+
+
+inline Function Lt()
+{
+    uint8_t code[] = {
+        0xdf, 0xf1,                                 // fcomip      st,st(1)   ; compare b vs a
+        0xdd, 0xd8,                                 // fstp        st(0)
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xee,                                 // fldz
+        0xdb, 0xc1,                                 // fcmova      st,st(1)   ; b > a  ⇒ a < b
+        0xdd, 0xd9,                                 // fstp        st(1)
+    };
+    return Function(0, "lt", 2, 0, sizeof(code), code);
+}
+
+inline Function Le()
+{
+    uint8_t code[] = {
+        0xdf, 0xf1,                                 // fcomip      st,st(1)
+        0xdd, 0xd8,                                 // fstp        st(0)
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xee,                                 // fldz
+        0xdb, 0xc1,                                 // fcmovnb
+        0xdd, 0xd9,                                 // fstp        st(1)
+    };
+    return Function(0, "le", 2, 0, sizeof(code), code);
+}
+
+inline Function Gt()
+{
+    uint8_t code[] = {
+        0xdf, 0xf1,                                 // fcomip      st,st(1)
+        0xdd, 0xd8,                                 // fstp        st(0)
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xee,                                 // fldz
+        0xda, 0xc1,                                 // fcmovb      st,st(1)   ; b < a  ⇒ a > b
+        0xdd, 0xd9,                                 // fstp        st(1)
+    };
+    return Function(0, "gt", 2, 0, sizeof(code), code);
+}
+
+inline Function Ge()
+{
+    uint8_t code[] = {
+        0xdf, 0xf1,                                 // fcomip      st,st(1)
+        0xdd, 0xd8,                                 // fstp        st(0)
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xee,                                 // fldz
+        0xda, 0xd1,                                 // fcmovbe     st,st(1)   ; b ≤ a ⇒ a ≥ b
+        0xdd, 0xd9,                                 // fstp        st(1)
+    };
+    return Function(0, "ge", 2, 0, sizeof(code), code);
+}
+
+
+inline Function Eq()
+{
+    uint8_t code[] = {
+        0xdf, 0xf1,                                 // fcomip      st,st(1)
+        0xdd, 0xd8,                                 // fstp        st(0)
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xee,                                 // fldz
+        0xda, 0xc9,                                 // fcmove      st,st(1)
+        0xdd, 0xd9,                                 // fstp        st(1)
+    };
+    return Function(0, "eq", 2, 0, sizeof(code), code);
+}
+
+
+inline Function Ne()
+{
+    uint8_t code[] = {
+        0xdf, 0xf1,                                 // fcomip      st,st(1)
+        0xdd, 0xd8,                                 // fstp        st(0)
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xee,                                 // fldz
+        0xdb, 0xc9,                                 // fcmovne     st,st(1)
+        0xdd, 0xd9,                                 // fstp        st(1)
+    };
+    return Function(0, "ne", 2, 0, sizeof(code), code);
+}
+
 
 
 inline Function Bnd()
@@ -1447,7 +1536,8 @@ inline string infix_operator_to_function_name(const string& op)
         { "*", "mul" },
         { "/", "div" },
         { "^", "pow" },
-        { "<", "less_than" }
+        { "<", "lt"  },
+        { ">", "gt"  },
     };
     auto it = op_map.find(op);
     assert(it != op_map.end());
@@ -1463,7 +1553,8 @@ inline string function_name_to_infix_operator(const string& fn)
         { "mul", "*" },
         { "div", "/" },
         { "pow", "^" },
-        { "less_than", "<" }
+        { "lt" , "<" },
+        { "gt" , ">" }
     };
     auto it = op_map.find(fn);
     if (it == op_map.end()) {
@@ -1954,7 +2045,7 @@ inline const map<string, Function>& make_function_map()
     static map<string, Function> ret;
     if (ret.empty()) { // Initialize only once
         Function f[] = {
-            Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(), Less_than(),
+            Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(), Lt(), Gt(), Le(), Ge(), Eq(), Ne(),
             Log(), Log2(), Ln(), Log10(), Logb(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
             Bnd(), Add(), Sub(), Neg(), Mul(), Div(), Bias(), Gain()
         };
@@ -2001,7 +2092,14 @@ struct Token
     int             priority    = 0;
     size_t          position    = 0;
     string          content;
+
     Token() = default;
+    ~Token() = default;
+    Token(const Token& other) = default;
+    Token(Token&& other) noexcept = default;
+    Token& operator=(const Token& other) = default;
+    Token& operator=(Token&& other) noexcept = default;
+
     Token(int type, size_t position, char content):
         type      ( type               ),
         priority  ( type               ),
@@ -2142,15 +2240,12 @@ void evaluator::set_expression(std::string e)
                     break;
                 }
                 if (e[i] == ')') {
-                    if (bdarray.back().first != 0)
-                        throw (mpe("Expected an expression", i));
-                    if (bdarray.back().second != 0)
-                        throw (mpe("Expected more arguments", i));
-                    tokens.push_back(Token(FUNCTION_RIGHT_PARENTHESIS, i, ')'));
-                    function_parentheses--;
-                    bdarray.pop_back();
-                    state = 5;
-                    break;
+                    // Leading ')' at start of an expression.
+                    if (function_parentheses <= 0) {
+                        throw (mpe("Expected a \")\"", i));
+                    }
+                    // Inside a function-arg list but saw ')' immediately: missing argument.
+                    throw (mpe("Expected an expression", i));
                 }
                 /* FALLTHROUGH */
             case 4: //just read an infix operator

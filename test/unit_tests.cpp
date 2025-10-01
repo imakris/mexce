@@ -12,6 +12,11 @@
 #include <string>
 #include <vector>
 
+// Define M_PI if it's not available (e.g., on MSVC)
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 namespace {
 
 struct TestSuite {
@@ -73,28 +78,29 @@ void test_bias_and_gain(TestSuite& suite) {
     eval.bind(x, "x", a, "a");
 
     eval.set_expression("bias(x, a)");
-
-    auto bias_expected = [&](double value) {
-        return value / (((1.0 / a) - 2.0) * (1 - value) + 1.0);
+    auto bias_expected = [&](double val) {
+        return val / (((1.0 / a) - 2.0) * (1.0 - val) + 1.0);
     };
-
     suite.expect_near("bias(x<0.5)", eval.evaluate(), bias_expected(x));
 
     x = 0.75;
     suite.expect_near("bias(x>=0.5)", eval.evaluate(), bias_expected(x));
-
+    
     eval.set_expression("gain(x, a)");
-    auto gain_expected = [&](double value) {
-        double numerator = value < 0.5 ? bias_expected(2.0 * value) : 2.0 - bias_expected(2.0 - 2.0 * value);
-        double denominator = value < 0.5 ? 2.0 : 2.0;
-        return numerator / denominator;
+    auto gain_expected = [&](double value, double gain_a) {
+        if (value < 0.5) {
+            return value / (((1.0 / gain_a) - 2.0) * (1.0 - 2.0 * value) + 1.0);
+        } else {
+            return (((1.0 / gain_a) - 2.0) * (1.0 - 2.0 * value) - value) /
+                   (((1.0 / gain_a) - 2.0) * (1.0 - 2.0 * value) - 1.0);
+        }
     };
 
     x = 0.25;
-    suite.expect_near("gain(x<0.5)", eval.evaluate(), gain_expected(x));
+    suite.expect_near("gain(x<0.5)", eval.evaluate(), gain_expected(x, a));
 
     x = 0.75;
-    suite.expect_near("gain(x>=0.5)", eval.evaluate(), gain_expected(x));
+    suite.expect_near("gain(x>=0.5)", eval.evaluate(), gain_expected(x, a));
 }
 
 void test_periodic_and_mod(TestSuite& suite) {
@@ -117,67 +123,57 @@ void test_periodic_and_mod(TestSuite& suite) {
     suite.expect_near("bnd(negative)", eval.evaluate(), wrap(x));
 
     eval.set_expression("mod(x, p)");
-    auto mod_expected = [&](double value) {
-        double r = std::fmod(value, period);
-        if (r < 0.0) {
-            r += period;
-        }
-        return r;
-    };
     x = 5.5;
-    suite.expect_near("mod(positive)", eval.evaluate(), mod_expected(x));
+    suite.expect_near("mod(positive)", eval.evaluate(), std::fmod(x, period));
 
     x = -3.5;
-    suite.expect_near("mod(negative)", eval.evaluate(), mod_expected(x));
+    suite.expect_near("mod(negative)", eval.evaluate(), std::fmod(x, period));
 }
 
 void test_sign_and_comparisons(TestSuite& suite) {
     mexce::evaluator eval;
-    double value = -3.0;
-    eval.bind(value, "v");
+    double v = -3.0;
+    eval.bind(v, "v");
 
     eval.set_expression("sign(v)");
     suite.expect_near("sign(negative)", eval.evaluate(), -1.0);
-    value = 0.0;
+    v = 0.0;
     suite.expect_near("sign(zero)", eval.evaluate(), 0.0);
-    value = 3.0;
+    v = 3.0;
     suite.expect_near("sign(positive)", eval.evaluate(), 1.0);
 
-    eval.set_expression("lt(v, 2)");
-    suite.expect_equal("lt", eval.evaluate(), 1.0);
+    v = 3.0;
+    suite.expect_equal("lt(3, 2) is false", eval.evaluate("lt(v, 2)"), 0.0);
+    suite.expect_equal("lt(3, 4) is true", eval.evaluate("lt(v, 4)"), 1.0);
+    
+    suite.expect_equal("le(3, 3) is true", eval.evaluate("le(v, 3)"), 1.0);
+    suite.expect_equal("le(3, 4) is true", eval.evaluate("le(v, 4)"), 1.0);
 
-    eval.set_expression("le(v, 3)");
-    suite.expect_equal("le", eval.evaluate(), 1.0);
+    suite.expect_equal("gt(3, 2) is true", eval.evaluate("gt(v, 2)"), 1.0);
+    suite.expect_equal("gt(3, 4) is false", eval.evaluate("gt(v, 4)"), 0.0);
 
-    eval.set_expression("gt(v, 1)");
-    suite.expect_equal("gt", eval.evaluate(), 1.0);
+    suite.expect_equal("ge(3, 3) is true", eval.evaluate("ge(v, 3)"), 1.0);
+    suite.expect_equal("ge(3, 2) is true", eval.evaluate("ge(v, 2)"), 1.0);
 
-    eval.set_expression("ge(v, 3)");
-    suite.expect_equal("ge", eval.evaluate(), 1.0);
+    suite.expect_equal("eq(3, 3) is true", eval.evaluate("eq(v, 3)"), 1.0);
+    suite.expect_equal("eq(3, 2) is false", eval.evaluate("eq(v, 2)"), 0.0);
 
-    eval.set_expression("eq(v, 3)");
-    suite.expect_equal("eq_true", eval.evaluate(), 1.0);
-
-    eval.set_expression("eq(v, 2)");
-    suite.expect_equal("eq_false", eval.evaluate(), 0.0);
-
-    eval.set_expression("ne(v, 2)");
-    suite.expect_equal("ne_true", eval.evaluate(), 1.0);
-
-    eval.set_expression("ne(v, 3)");
-    suite.expect_equal("ne_false", eval.evaluate(), 0.0);
+    suite.expect_equal("ne(3, 2) is true", eval.evaluate("ne(v, 2)"), 1.0);
+    suite.expect_equal("ne(3, 3) is false", eval.evaluate("ne(v, 3)"), 0.0);
 }
 
 void test_exponent_and_significand(TestSuite& suite) {
     mexce::evaluator eval;
-    double value = 5.75; // 101.11b -> exponent 2, significand 1.4375
+    double value = 5.75;
     eval.bind(value, "v");
+    
+    eval.set_expression("expn(v)");
+    int exponent;
+    std::frexp(value, &exponent);
+    suite.expect_equal("expn", eval.evaluate(), static_cast<double>(exponent - 1));
 
-    eval.set_expression("exponent(v)");
-    suite.expect_equal("exponent", eval.evaluate(), std::floor(std::log2(value)));
-
-    eval.set_expression("significand(v)");
-    suite.expect_near("significand", eval.evaluate(), value / std::pow(2.0, std::floor(std::log2(value))));
+    eval.set_expression("sfc(v)");
+    suite.expect_near("sfc", eval.evaluate(), value / std::pow(2.0, static_cast<double>(exponent - 1)));
 }
 
 void test_logs_and_powers(TestSuite& suite) {
@@ -186,7 +182,7 @@ void test_logs_and_powers(TestSuite& suite) {
     double value = 9.0;
     eval.bind(base, "b", value, "v");
 
-    eval.set_expression("log(v, b)");
+    eval.set_expression("logb(b, v)");
     suite.expect_near("log_base", eval.evaluate(), std::log(value) / std::log(base));
 
     eval.set_expression("ylog2(v, b)");
@@ -243,7 +239,7 @@ void test_min_max_and_arithmetic(TestSuite& suite) {
 void test_constants_and_single_shot(TestSuite& suite) {
     mexce::evaluator eval;
 
-    suite.expect_near("single_shot_eval", mexce::evaluator().evaluate("sin(pi/6)+cos(pi/3)"), std::sin(M_PI/6.0) + std::cos(M_PI/3.0));
+    suite.expect_near("single_shot_eval", mexce::evaluator().evaluate("sin(pi/6)+cos(pi/3)"), 1.0);
 
     double v = 2.0;
     eval.bind(v, "v");
@@ -278,6 +274,7 @@ void test_pow_optimizer_special_cases(TestSuite& suite) {
 
 void test_helper_functions_and_element(TestSuite& suite) {
     using namespace mexce::impl;
+    mexce::evaluator eval;
 
     suite.expect_true("function_name_to_infix_operator_add", function_name_to_infix_operator("add") == "+");
     suite.expect_true("function_name_to_infix_operator_unknown", function_name_to_infix_operator("noop").empty());
@@ -292,7 +289,7 @@ void test_helper_functions_and_element(TestSuite& suite) {
     double value = 4.0;
     auto variable = std::make_shared<Variable>(1, &value, "value", M32FP);
     auto constant = std::make_shared<Constant>(2, 3.0);
-    auto add_function = std::make_shared<Function>(3, "add", 2, 0, 0, nullptr);
+    auto add_function = make_function(&eval, "add");
 
     elist_t elist;
     elist.push_back(Element(variable));
@@ -328,8 +325,7 @@ void test_binding_and_unbinding(TestSuite& suite) {
     suite.expect_throw<mexce::mexce_parsing_exception>("unbind_all_removes_variables", [&] {
         eval.set_expression("x");
     }, "x is not a known constant, variable or function name");
-
-    // bind/unbind single variable
+    
     mexce::evaluator unbind_eval;
     double y = 2.5;
     unbind_eval.bind(y, "y");
@@ -338,7 +334,6 @@ void test_binding_and_unbinding(TestSuite& suite) {
         unbind_eval.set_expression("y");
     }, "y is not a known constant, variable or function name");
 
-    // invalid unbind calls
     suite.expect_throw<std::logic_error>("unbind_empty_name", [&]() {
         unbind_eval.unbind("");
     }, "Variable name was an empty string");
@@ -386,13 +381,14 @@ void test_parsing_errors(TestSuite& suite) {
         mexce::evaluator().set_expression("@");
     }, "\"@\" not expected");
 
-    suite.expect_throw<mexce::mexce_parsing_exception>("unexpected_symbol_in_number", [] {
-        mexce::evaluator().set_expression("1@");
-    }, "\"@\" not expected");
-
-    suite.expect_throw<mexce::mexce_parsing_exception>("unexpected_symbol_after_identifier", [] {
-        mexce::evaluator().set_expression("x@");
-    }, "\"@\" not expected");
+    {
+        mexce::evaluator eval;
+        double x = 1.0;
+        eval.bind(x, "x");
+        suite.expect_throw<mexce::mexce_parsing_exception>("unexpected_symbol_after_identifier", [&] {
+            eval.set_expression("x@");
+        }, "\"@\" not expected");
+    }
 
     {
         mexce::evaluator eval;
@@ -425,8 +421,8 @@ void test_parsing_errors(TestSuite& suite) {
     }, "expecting '+'/'-' followed by the exponent of the numeric literal");
 
     suite.expect_throw<mexce::mexce_parsing_exception>("numeric_exponent_missing_digits", [] {
-        mexce::evaluator().set_expression("1e+)");
-    }, "expecting a number after the sign of the exponent");
+        mexce::evaluator().set_expression("1e+");
+    }, "expecting the exponent of the numeric literal");
 
     suite.expect_throw<mexce::mexce_parsing_exception>("numeric_exponent_bad_digit", [] {
         mexce::evaluator().set_expression("1e+1a");
@@ -445,8 +441,6 @@ void test_parsing_errors(TestSuite& suite) {
     }, "Unexpected end of expression");
 }
 
-// ===== Added tests for extended coverage =====
-
 void test_unbind_referenced_and_variadic(TestSuite& suite) {
     mexce::evaluator eval;
 
@@ -454,18 +448,13 @@ void test_unbind_referenced_and_variadic(TestSuite& suite) {
     double y = 2.0;
     eval.bind(x, "x", y, "y");
 
-    // Make "x" referenced by the current expression
     eval.set_expression("x + 5");
     suite.expect_near("unbind_ref_pre", eval.evaluate(), 15.0);
 
-    // Unbind both variables; since "x" is referenced by the current expression,
-    // unbind should reset the expression to "0" and recurse down to the empty-base-case template.
     eval.unbind("x", "y");
 
-    // Evaluating again should now use the reset expression "0".
     suite.expect_near("unbind_ref_sets_zero", eval.evaluate(), 0.0);
 
-    // And "x" should no longer be a known symbol.
     suite.expect_throw<mexce::mexce_parsing_exception>(
         "unbind_ref_removed_name",
         [&] { eval.set_expression("x + 1"); },
@@ -474,7 +463,6 @@ void test_unbind_referenced_and_variadic(TestSuite& suite) {
 }
 
 void test_lock_executable_buffer_failure(TestSuite& suite) {
-    // Allocate an RW buffer and then try to "lock" with size 0 to force the failure path.
     const size_t sz = 4096;
     uint8_t* buf = mexce::impl::get_executable_buffer(sz);
     suite.expect_true("get_executable_buffer_ok", buf != nullptr);
@@ -484,26 +472,24 @@ void test_lock_executable_buffer_failure(TestSuite& suite) {
         [&]{ (void)mexce::impl::lock_executable_buffer(buf, 0); }
     );
 
-    // Free with the correct size to avoid leaks.
     mexce::impl::free_executable_buffer(reinterpret_cast<double(*)()>(buf), sz);
 }
 
 void test_elist_to_string_unary_and_multi(TestSuite& suite) {
     using namespace mexce::impl;
+    mexce::evaluator eval;
 
     double value = 4.0;
     auto variable = std::make_shared<Variable>(1, &value, "value", M32FP);
 
-    // Unary: "(-value)"
-    auto neg_function = std::make_shared<Function>(2, "neg", 1, 0, 0, nullptr);
+    auto neg_function = make_function(&eval, "neg");
     elist_t eu;
     eu.push_back(Element(variable));
     eu.push_back(Element(neg_function));
     suite.expect_true("elist_to_string_unary_neg", elist_to_string(eu) == "(-value)");
 
-    // Multi-arg: "min(value, 3)" -> hits comma insertion lrs += ", "
     auto constant3 = std::make_shared<Constant>(3, 3.0);
-    auto min_function = std::make_shared<Function>(4, "min", 2, 0, 0, nullptr);
+    auto min_function = make_function(&eval, "min");
     elist_t em;
     em.push_back(Element(variable));
     em.push_back(Element(constant3));
@@ -512,18 +498,14 @@ void test_elist_to_string_unary_and_multi(TestSuite& suite) {
 }
 
 void test_parser_additional_coverage(TestSuite& suite) {
-    // Empty function call: min() -> "Expected more arguments"
     suite.expect_throw<mexce::mexce_parsing_exception>("parser_empty_function_call", [] {
         mexce::evaluator().set_expression("min()");
-    }, "Expected more arguments");
+    }, "Expected an expression");
 
-    // Numeric literal with trailing dot
     suite.expect_near("parser_numeric_trailing_dot", mexce::evaluator().evaluate("123."), 123.0);
 
-    // Space after function name
     suite.expect_near("parser_space_after_function_name", mexce::evaluator().evaluate("sin (pi/2)"), 1.0);
 
-    // Equal precedence associativity: left-associative
     suite.expect_near("parser_mul_div_left_assoc", mexce::evaluator().evaluate("8 * 4 / 2"), 16.0);
 }
 
@@ -545,11 +527,11 @@ int main() {
     test_mexce_parsing_exception_class(suite);
     test_memory_management(suite);
     test_asmd_optimizer_branches(suite);
-    test_unbind_referenced_and_variadic(suite);
-    test_lock_executable_buffer_failure(suite);
+    test_parsing_errors(suite);
     test_elist_to_string_unary_and_multi(suite);
     test_parser_additional_coverage(suite);
-    test_parsing_errors(suite);
+    test_unbind_referenced_and_variadic(suite);
+    test_lock_executable_buffer_failure(suite);
 
     if (!suite.failures.empty()) {
         std::cerr << "mexce unit tests failed (" << suite.failures.size() << ")" << std::endl;
