@@ -320,6 +320,12 @@ void test_binding_and_unbinding(TestSuite& suite) {
     double expected = x + f + i16 + i32 + static_cast<double>(i64);
     suite.expect_near("multi_type_binding", eval.evaluate(), expected);
 
+    eval.set_expression("i16");
+    suite.expect_near("direct_int16_binding", eval.evaluate(), static_cast<double>(i16));
+
+    eval.set_expression("i32");
+    suite.expect_near("direct_int32_binding", eval.evaluate(), static_cast<double>(i32));
+
     eval.unbind_all();
 
     suite.expect_throw<mexce::mexce_parsing_exception>("unbind_all_removes_variables", [&] {
