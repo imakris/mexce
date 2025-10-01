@@ -270,6 +270,10 @@ void test_pow_optimizer_special_cases(TestSuite& suite) {
     x = 2.0;
     eval.set_expression("pow(x, 3.3)");
     suite.expect_near("pow_optimizer_generic_path", eval.evaluate(), std::pow(x, 3.3));
+
+    x = 3.0;
+    eval.set_expression("pow(x, 7)");
+    suite.expect_near("pow_optimizer_diff_low_branch", eval.evaluate(), std::pow(x, 7.0));
 }
 
 void test_helper_functions_and_element(TestSuite& suite) {
