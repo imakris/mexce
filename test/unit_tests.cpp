@@ -418,6 +418,22 @@ void test_parsing_errors(TestSuite& suite) {
         mexce::evaluator().set_expression("1a");
     }, "\"a\" not expected");
 
+    suite.expect_throw<mexce::mexce_parsing_exception>("unknown_identifier_before_closing_paren", [] {
+        mexce::evaluator().set_expression("(foo)");
+    }, "foo is not a known constant or variable name");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("unknown_identifier_before_operator", [] {
+        mexce::evaluator().set_expression("bar+1");
+    }, "bar is not a known constant or variable name");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("unknown_identifier_before_comma", [] {
+        mexce::evaluator().set_expression("min(foo,1)");
+    }, "foo is not a known constant or variable name");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("unknown_function_name", [] {
+        mexce::evaluator().set_expression("baz(1)");
+    }, "baz is not a known function name");
+
     suite.expect_throw<mexce::mexce_parsing_exception>("closing_paren_after_number", [] {
         mexce::evaluator().set_expression("1)");
     }, "\")\" not expected");
