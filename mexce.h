@@ -305,6 +305,9 @@ uint8_t* get_executable_buffer(size_t sz)
 inline
 double (*lock_executable_buffer(uint8_t* buffer, size_t sz))()
 {
+    if (sz == 0) {
+        throw std::runtime_error("lock_executable_buffer requires a non-zero size");
+    }
 #ifdef _WIN32
     DWORD old_protect = 0;
     if (!VirtualProtect(buffer, sz, PAGE_EXECUTE_READ, &old_protect)) {
