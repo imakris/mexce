@@ -559,20 +559,18 @@ void link_arguments(elist_t& elist)
 inline
 Token_type get_infix_rank(char infix_op)
 {
+    auto ret = UNDEFINED_TOKEN_TYPE;
     switch (infix_op) {
         case '<':
-        case '>': return INFIX_4;
+        case '>': ret = INFIX_4; break;
         case '+':
-        case '-': return INFIX_3;
+        case '-': ret = INFIX_3; break;
         case '*':
-        case '/': return INFIX_2;
-        case '^': return INFIX_1;
+        case '/': ret = INFIX_2; break;
+        case '^': ret = INFIX_1; break;
     }
-
-    // LCOV_EXCL_START
-    assert(false);
-    return UNDEFINED_TOKEN_TYPE;
-    // LCOV_EXCL_STOP
+    assert(ret != UNDEFINED_TOKEN_TYPE);
+    return ret;
 }
 
 
@@ -1398,17 +1396,15 @@ void emit_apply_op_with_value(impl::mexce_charstream& s, const T& v)
     s < 0xb8;                               // mov            eax, dword ptr
 #endif
     s << v->address;                        //                   [the address]
+
+    // the FPU has limited support for 64-bit integers and M64INT cannot be supported here
+    assert(v->numeric_data_type != M64INT);
+
     switch(v->numeric_data_type) {
         case M16INT: s < 0xde < OP; break;  // f[OP]  word  ptr [eax/rax]
         case M32INT: s < 0xda < OP; break;  // f[OP]  dword ptr [eax/rax]
         case M32FP:  s < 0xd8 < OP; break;  // f[OP]  dword ptr [eax/rax]
         case M64FP:  s < 0xdc < OP; break;  // f[OP]  qword ptr [eax/rax]
-
-        // the FPU has limited support for 64-bit integers and M64INT cannot be supported here
-        default:
-            // LCOV_EXCL_START
-            assert(false);
-            // LCOV_EXCL_STOP
     }
 }
 
