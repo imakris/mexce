@@ -452,16 +452,43 @@ void test_parsing_errors(TestSuite& suite) {
         mexce::evaluator().set_expression("min(3.0)");
     }, "Expected more arguments");
 
+    {
+        mexce::evaluator eval;
+        double x = 1.0;
+        eval.bind(x, "x");
+        suite.expect_throw<mexce::mexce_parsing_exception>(
+            "missing_function_argument_variable_with_space",
+            [&] { eval.set_expression("min(x )"); },
+            "Expected more arguments"
+        );
+    }
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("missing_function_argument_space_after_literal", [] {
+        mexce::evaluator().set_expression("min(1 )");
+    }, "Expected more arguments");
+
     suite.expect_throw<mexce::mexce_parsing_exception>("closing_paren_after_decimal_literal", [] {
         mexce::evaluator().set_expression("3.0)");
+    }, "\")\" not expected");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("closing_paren_after_literal_with_space", [] {
+        mexce::evaluator().set_expression("1 )");
     }, "\")\" not expected");
 
     suite.expect_throw<mexce::mexce_parsing_exception>("comma_requires_closing_paren_numeric", [] {
         mexce::evaluator().set_expression("(1,2)");
     }, "Expected a \")\"");
 
+    suite.expect_throw<mexce::mexce_parsing_exception>("comma_requires_closing_paren_numeric_with_space", [] {
+        mexce::evaluator().set_expression("(1 ,2)");
+    }, "Expected a \")\"");
+
     suite.expect_throw<mexce::mexce_parsing_exception>("too_many_function_arguments", [] {
         mexce::evaluator().set_expression("min(1,2,3)");
+    }, "Don't expect any arguments here");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("too_many_function_arguments_space_before_comma", [] {
+        mexce::evaluator().set_expression("min(1,2 ,3)");
     }, "Don't expect any arguments here");
 
     suite.expect_throw<mexce::mexce_parsing_exception>("numeric_exponent_missing_sign", [] {
@@ -475,6 +502,10 @@ void test_parsing_errors(TestSuite& suite) {
     suite.expect_throw<mexce::mexce_parsing_exception>("numeric_exponent_bad_digit", [] {
         mexce::evaluator().set_expression("1e+1a");
     }, "\"a\" not expected");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("unexpected_character_after_space", [] {
+        mexce::evaluator().set_expression("1 ?");
+    }, "\"?\" not expected");
 
     suite.expect_throw<mexce::mexce_parsing_exception>("missing_opening_parenthesis", [] {
         mexce::evaluator().set_expression("sin 1)");
