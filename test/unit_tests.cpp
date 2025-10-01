@@ -448,6 +448,14 @@ void test_parsing_errors(TestSuite& suite) {
         mexce::evaluator().set_expression("min(1)");
     }, "Expected more arguments");
 
+    suite.expect_throw<mexce::mexce_parsing_exception>("missing_function_argument_decimal_literal", [] {
+        mexce::evaluator().set_expression("min(3.0)");
+    }, "Expected more arguments");
+
+    suite.expect_throw<mexce::mexce_parsing_exception>("closing_paren_after_decimal_literal", [] {
+        mexce::evaluator().set_expression("3.0)");
+    }, "\")\" not expected");
+
     suite.expect_throw<mexce::mexce_parsing_exception>("comma_requires_closing_paren_numeric", [] {
         mexce::evaluator().set_expression("(1,2)");
     }, "Expected a \")\"");
