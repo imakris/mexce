@@ -343,6 +343,24 @@ void test_binding_and_unbinding(TestSuite& suite) {
     }, "Attempted to unbind an unknown variable");
 }
 
+void test_binding_name_conflicts(TestSuite& suite) {
+    mexce::evaluator eval_function_name;
+    double value = 1.0;
+
+    suite.expect_throw<std::logic_error>(
+        "bind_existing_function_name",
+        [&]() { eval_function_name.bind(value, "sin"); },
+        "Attempted to bind a variable, named as an existing function"
+    );
+
+    mexce::evaluator eval_constant_name;
+    suite.expect_throw<std::logic_error>(
+        "bind_existing_constant_name",
+        [&]() { eval_constant_name.bind(value, "pi"); },
+        "Attempted to bind a variable, named as an existing constant"
+    );
+}
+
 void test_mexce_parsing_exception_class(TestSuite& suite) {
     mexce::mexce_parsing_exception ex("custom message", 3);
     suite.expect_true("mexce_parsing_exception_message", std::string(ex.what()) == "custom message");
@@ -524,6 +542,7 @@ int main() {
     test_pow_optimizer_special_cases(suite);
     test_helper_functions_and_element(suite);
     test_binding_and_unbinding(suite);
+    test_binding_name_conflicts(suite);
     test_mexce_parsing_exception_class(suite);
     test_memory_management(suite);
     test_asmd_optimizer_branches(suite);
