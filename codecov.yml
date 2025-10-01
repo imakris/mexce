@@ -11,11 +11,11 @@ coverage:
         target: auto
         threshold: 1%
       gcc:
-        flags: gcc
+        flags: [gcc]
         target: auto
         threshold: 1%
       clang:
-        flags: clang
+        flags: [clang]
         target: auto
         threshold: 1%
     patch:
