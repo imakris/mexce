@@ -1243,21 +1243,6 @@ inline Function Mod()
 }
 
 
-
-inline Function Less_than()
-{
-    uint8_t code[] = {
-        0xdf, 0xf1,                                 // fcomip      st,st(1)
-        0xdd, 0xd8,                                 // fstp        st(0)
-        0xd9, 0xe8,                                 // fld1
-        0xd9, 0xee,                                 // fldz
-        0xdb, 0xd1,                                 // fcmovnb     st,st(1)
-        0xdd, 0xd9,                                 // fstp        st(1)
-    };
-    return Function(0, "less_than", 2, 0, sizeof(code), code);
-}
-
-
 inline Function Lt()
 {
     uint8_t code[] = {
