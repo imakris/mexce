@@ -1,4 +1,57 @@
+#ifdef __linux__
+#include <cerrno>
+#include <sys/mman.h>
+
+namespace mexce_test_overrides {
+
+inline bool& force_mmap_failure_flag()
+{
+    static bool flag = false;
+    return flag;
+}
+
+inline bool& force_mprotect_failure_flag()
+{
+    static bool flag = false;
+    return flag;
+}
+
+} // namespace mexce_test_overrides
+
+extern "C" void* mexce_test_override_mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
+{
+    if (mexce_test_overrides::force_mmap_failure_flag()) {
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
+#undef mmap
+    void* result = ::mmap(addr, length, prot, flags, fd, offset);
+#define mmap mexce_test_override_mmap
+    return result;
+}
+
+extern "C" int mexce_test_override_mprotect(void* addr, size_t len, int prot)
+{
+    if (mexce_test_overrides::force_mprotect_failure_flag()) {
+        errno = EACCES;
+        return -1;
+    }
+#undef mprotect
+    int rc = ::mprotect(addr, len, prot);
+#define mprotect mexce_test_override_mprotect
+    return rc;
+}
+
+#define mmap mexce_test_override_mmap
+#define mprotect mexce_test_override_mprotect
+#endif
+
 #include "mexce.h"
+
+#ifdef __linux__
+#undef mmap
+#undef mprotect
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -18,6 +71,22 @@
 #endif
 
 namespace {
+
+struct ScopedTestFlag {
+    bool& flag;
+    bool previous;
+
+    ScopedTestFlag(bool& flag_ref, bool value)
+        : flag(flag_ref), previous(flag_ref)
+    {
+        flag = value;
+    }
+
+    ~ScopedTestFlag()
+    {
+        flag = previous;
+    }
+};
 
 struct TestSuite {
     std::vector<std::string> failures;
@@ -592,6 +661,31 @@ void test_parser_additional_coverage(TestSuite& suite) {
     suite.expect_near("parser_mul_div_left_assoc", mexce::evaluator().evaluate("8 * 4 / 2"), 16.0);
 }
 
+#ifdef __linux__
+void test_executable_buffer_failure_paths(TestSuite& suite)
+{
+    mexce::evaluator eval;
+    double x = 1.0;
+    eval.bind(x, "x");
+
+    {
+        ScopedTestFlag force_mmap_failure(mexce_test_overrides::force_mmap_failure_flag(), true);
+        suite.expect_throw<std::bad_alloc>("mmap_failure_triggers_bad_alloc", [&] {
+            eval.set_expression("x + 1");
+        });
+    }
+
+    {
+        ScopedTestFlag force_mprotect_failure(mexce_test_overrides::force_mprotect_failure_flag(), true);
+        suite.expect_throw<std::runtime_error>(
+            "mprotect_failure_triggers_runtime_error",
+            [&] { eval.set_expression("x + 1"); },
+            "mprotect(PROT_READ|PROT_EXEC) failed"
+        );
+    }
+}
+#endif
+
 } // namespace
 
 int main() {
@@ -616,6 +710,9 @@ int main() {
     test_parser_additional_coverage(suite);
     test_unbind_referenced_and_variadic(suite);
     test_lock_executable_buffer_failure(suite);
+#ifdef __linux__
+    test_executable_buffer_failure_paths(suite);
+#endif
 
     if (!suite.failures.empty()) {
         std::cerr << "mexce unit tests failed (" << suite.failures.size() << ")" << std::endl;
