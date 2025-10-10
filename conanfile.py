@@ -7,7 +7,7 @@ import os
 
 class MexceConan(ConanFile):
     name = "mexce"
-    version = "1.0.0"
+    version = "1.0.1"
     license = "BSD-2-Clause"
     homepage = "https://github.com/imakris/mexce"
     url = "https://github.com/conan-io/conan-center-index"
