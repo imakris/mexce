@@ -118,6 +118,7 @@
 #include <deque>
 #include <exception>
 #include <iomanip>
+#include <limits>
 #include <list>
 #include <map>
 #include <memory>
@@ -1700,24 +1701,78 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     f->args.clear();
 
     // reduce constants
-    double ac[2] = {neutral, neutral};
+    long double ac_value[2] = {static_cast<long double>(neutral), static_cast<long double>(neutral)};
+    long double ac_abs_accum[2] = {0.0L, 0.0L};
+    size_t      ac_terms[2] = {0, 0};
+
     for (int i=0; i<2; i++) {
         for (auto e = f->absorbed[i].begin(); e!=f->absorbed[i].end(); ) {
             auto next_e = next(e);
             if (e->size()==1 && e->front().type == Element_type::CCONST) {
                 auto v = e->front().c;
+                long double v_ld = static_cast<long double>(v->value);
+
                 if (fclass==1) {
-                    ac[i] += v->value;
+                    ac_value[i] += v_ld;
+                    ac_abs_accum[i] += std::abs(v_ld);
                 }
                 else {
-                    ac[i] *= v->value;
+                    ac_value[i] *= v_ld;
+                    ac_abs_accum[i] += std::abs(v_ld);
                 }
+
+                ++ac_terms[i];
                 f->absorbed[i].erase(e);
             }
             e = next_e;
         }
     }
-    double ac_final = (fclass==1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
+
+    auto compute_int_nearby = [](long double value, long double tolerance) -> long double {
+        if (std::isfinite(static_cast<double>(value)) &&
+            std::abs(value) < static_cast<long double>(std::numeric_limits<long long>::max())) {
+            long double nearest = static_cast<long double>(std::llround(value));
+            if (std::abs(value - nearest) <= tolerance) {
+                return nearest;
+            }
+        }
+        return value;
+    };
+
+    long double ac_final_ld;
+
+    if (fclass==1) {
+        long double diff = ac_value[0] - ac_value[1];
+        size_t term_count = ac_terms[0] + ac_terms[1];
+        long double scale = ac_abs_accum[0] + ac_abs_accum[1];
+        const long double eps = std::numeric_limits<double>::epsilon();
+        long double tolerance = eps * (static_cast<long double>(term_count) + 1.0L)
+                                      * std::max(1.0L, scale);
+
+        if (std::abs(diff) <= tolerance) {
+            diff = 0.0L;
+        }
+
+        diff = compute_int_nearby(diff, tolerance);
+        ac_final_ld = diff;
+    }
+    else {
+        long double ratio = ac_value[0] / ac_value[1];
+        size_t term_count = ac_terms[0] + ac_terms[1];
+        const long double eps = std::numeric_limits<double>::epsilon();
+        long double scale = std::max(std::abs(ac_value[0]), std::abs(ac_value[1]));
+        long double tolerance = eps * (static_cast<long double>(term_count) + 1.0L)
+                                      * std::max(1.0L, scale);
+
+        if (std::abs(ratio - 1.0L) <= tolerance * std::max(1.0L, std::abs(ratio))) {
+            ratio = (ratio < 0.0L) ? -1.0L : 1.0L;
+        }
+
+        ratio = compute_int_nearby(ratio, tolerance * std::max(1.0L, std::abs(ratio)));
+        ac_final_ld = ratio;
+    }
+
+    double ac_final = static_cast<double>(ac_final_ld);
 
     // sort and gather chunks
     map<elist_t, int, elist_comparison> sig_map;
