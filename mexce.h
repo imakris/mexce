@@ -1825,38 +1825,69 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
             }
 
-            if (e.second >= -2 && e.second <=2) {  // cannot be 0, it has been handled above
-                compile_elist(s, e.first.begin(), e.first.end());
+            bool divide_on_combine = false;
 
-                if (e.second == 1) {
-                    // a^1 == a
-                    // we loaded the expression, there is nothing further to do
+            if (constant_multiplied) {
+                int factor = e.second;
+                int abs_factor = abs(factor);
+
+                if (abs_factor == 1) {
+                    compile_elist(s, e.first.begin(), e.first.end());
                 }
                 else
-                if (e.second == -1) {   //  1/a
-                    s < 0xd9 < 0xe8;    // fld1
-                    s < 0xde < 0xf1;    // fdivrp   st(1), st
-                }
-                else
-                if (e.second == 2) {    //  a*a
+                if (abs_factor == 2) {
+                    compile_elist(s, e.first.begin(), e.first.end());
                     s < 0xdc < 0xc8;    // fmul st(0), st(0)
                 }
-                else
-                if (e.second == -2) {   //  1/(a*a)
-                    s < 0xdc < 0xc8;    // fmul st(0), st(0)
-                    s < 0xd9 < 0xe8;    // fld1
-                    s < 0xde < 0xf1;    // fdivrp   st(1), st
+                else {
+                    elist_t pow_list = e.first;
+                    pow_list.push_back(Element(make_intermediate_constant(ev, abs_factor)));
+                    auto pow_f = make_function(ev, "pow");
+                    pow_list.push_back(Element(pow_f));
+                    link_arguments(pow_list);
+                    pow_f->optimizer(prev(pow_list.end()), ev, &pow_list);
+
+                    compile_elist(s, pow_list.begin(), pow_list.end());
+                }
+
+                if (factor < 0) {
+                    divide_on_combine = true;
                 }
             }
             else {
-                elist_t pow_list = e.first;
-                pow_list.push_back(Element(make_intermediate_constant(ev, e.second)));
-                auto pow_f = make_function(ev, "pow");
-                pow_list.push_back(Element(pow_f));
-                link_arguments(pow_list);
-                pow_f->optimizer(prev(pow_list.end()), ev, &pow_list);
+                if (e.second >= -2 && e.second <=2) {  // cannot be 0, it has been handled above
+                    compile_elist(s, e.first.begin(), e.first.end());
 
-                compile_elist(s, pow_list.begin(), pow_list.end());
+                    if (e.second == 1) {
+                        // a^1 == a
+                        // we loaded the expression, there is nothing further to do
+                    }
+                    else
+                    if (e.second == -1) {   //  1/a
+                        s < 0xd9 < 0xe8;    // fld1
+                        s < 0xde < 0xf1;    // fdivrp   st(1), st
+                    }
+                    else
+                    if (e.second == 2) {    //  a*a
+                        s < 0xdc < 0xc8;    // fmul st(0), st(0)
+                    }
+                    else
+                    if (e.second == -2) {   //  1/(a*a)
+                        s < 0xdc < 0xc8;    // fmul st(0), st(0)
+                        s < 0xd9 < 0xe8;    // fld1
+                        s < 0xde < 0xf1;    // fdivrp   st(1), st
+                    }
+                }
+                else {
+                    elist_t pow_list = e.first;
+                    pow_list.push_back(Element(make_intermediate_constant(ev, e.second)));
+                    auto pow_f = make_function(ev, "pow");
+                    pow_list.push_back(Element(pow_f));
+                    link_arguments(pow_list);
+                    pow_f->optimizer(prev(pow_list.end()), ev, &pow_list);
+
+                    compile_elist(s, pow_list.begin(), pow_list.end());
+                }
             }
 
             if (!constant_multiplied) {
@@ -1871,7 +1902,12 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 constant_multiplied = true;
             }
             else {
-                s < 0xde < 0xc9;                       // fmulp       st(1), st
+                if (divide_on_combine) {
+                    s < 0xde < 0xf9;                   // fdivp       st(1), st
+                }
+                else {
+                    s < 0xde < 0xc9;                   // fmulp       st(1), st
+                }
             }
         }
 
