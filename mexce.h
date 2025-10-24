@@ -113,6 +113,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cinttypes>
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -878,6 +879,9 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         else
         if (r_d == v_d && a_d <= 65536.0) {
 
+            auto exponent_ll = static_cast<long long>(r_d);
+            uint64_t exponent_mag = static_cast<uint64_t>(std::llabs(exponent_ll));
+
             // find the closest power of two
             uint32_t npo2 = (uint32_t)a_d;
             npo2--;
@@ -938,6 +942,28 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                     // now we get rid of the temporary we used earlier
                     s < 0xde < 0xc9;            // fmulp st(1), st(0)
                 }
+            }
+            else if (exponent_mag > 1 && exponent_mag <= 32 && (exponent_mag & (exponent_mag - 1)) != 0) {
+                s < 0xd9 < 0xe8           // fld1
+                  < 0xd9 < 0xc9;          // fxch st(1)
+
+                uint64_t work = exponent_mag;
+                while (true) {
+                    if (work & 1) {
+                        s < 0xd9 < 0xc0       // fld st(0)
+                          < 0xde < 0xca;     // fmulp st(2), st
+                    }
+
+                    work >>= 1;
+                    if (work == 0) {
+                        break;
+                    }
+
+                    s < 0xd9 < 0xc0           // fld st(0)
+                      < 0xde < 0xc9;         // fmulp st(1), st
+                }
+
+                s < 0xdd < 0xd8;            // fstp st(0)
             }
             else {
                 matched = false;
