@@ -125,6 +125,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 
@@ -1697,10 +1698,49 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     }
     double ac_final = (fclass==1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
 
-    // sort and gather chunks
-    map<elist_t, int, elist_comparison> sig_map;
-    for (auto &e : f->absorbed[0]) { sig_map[e]++; }
-    for (auto &e : f->absorbed[1]) { sig_map[e]--; }
+    using term_entry = std::pair<elist_t, int>;
+    std::vector<term_entry> terms;
+    terms.reserve(f->absorbed[0].size() + f->absorbed[1].size());
+
+    auto drain_absorbed = [&](list<elist_t>& source, int sign)
+    {
+        for (auto it = source.begin(); it != source.end(); ) {
+            terms.emplace_back(std::move(*it), sign);
+            it = source.erase(it);
+        }
+    };
+
+    drain_absorbed(f->absorbed[0], +1);
+    drain_absorbed(f->absorbed[1], -1);
+
+    elist_comparison compare_terms;
+    std::sort(terms.begin(), terms.end(),
+        [&](const term_entry& lhs, const term_entry& rhs)
+        {
+            return compare_terms(lhs.first, rhs.first);
+        });
+
+    size_t unique_terms = 0;
+    for (size_t idx = 0; idx < terms.size(); ++idx) {
+        if (unique_terms != 0) {
+            auto& prev_term = terms[unique_terms - 1].first;
+            auto& current_term = terms[idx].first;
+            if (!compare_terms(current_term, prev_term) && !compare_terms(prev_term, current_term)) {
+                terms[unique_terms - 1].second += terms[idx].second;
+                if (terms[unique_terms - 1].second == 0) {
+                    --unique_terms;
+                }
+                continue;
+            }
+        }
+
+        if (unique_terms != idx) {
+            terms[unique_terms].first = std::move(terms[idx].first);
+            terms[unique_terms].second = terms[idx].second;
+        }
+        ++unique_terms;
+    }
+    terms.resize(unique_terms);
 
     mexce_charstream s;
 
@@ -1710,28 +1750,28 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
         bool constant_added = false;
 
-        for (auto &e : sig_map) {
+        for (auto &term : terms) {
 
-            if (e.second == 0) {
+            if (term.second == 0) {
                 // factor 0 in add_sub means 0*a which has no effect.
                 continue;
             }
 
             // if the stack is not empty and the elist is only one element and the
-            // factor in e.second is 1 or -1,
+            // factor in term.second is 1 or -1,
             // we can multiply directly from memory, to save one place in the FPU
             // stack. This is a tradeoff, as it might be slightly slower to do so.
 
-            if (constant_added && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0)
+            if (constant_added && term.first.size() == 1 && abs(term.second)==1)
             {
-                auto& elem = e.first.front();
+                auto& elem = term.first.front();
                 if (elem.type == Element_type::CCONST && elem.c->numeric_data_type != M64INT) {
-                    if (e.second == 1) emit_apply_op_with_value<0x00>(s, elem.c);
+                    if (term.second == 1) emit_apply_op_with_value<0x00>(s, elem.c);
                     else emit_apply_op_with_value<0x20>(s, elem.c);
                     continue;
                 }
                 if (elem.type == Element_type::CVAR && elem.v->numeric_data_type != M64INT) {
-                    if (e.second == 1) {
+                    if (term.second == 1) {
                         emit_apply_op_with_value<0x00>(s, elem.v);
                     }
                     else {
@@ -1741,27 +1781,27 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
             }
 
-            compile_elist(s, e.first.begin(), e.first.end());
+            compile_elist(s, term.first.begin(), term.first.end());
 
-            if (e.second == 1) {
+            if (term.second == 1) {
                 // 1*a == a
                 // we loaded the expression, there is nothing further to do
             }
             else
-            if (e.second == -1) {
+            if (term.second == -1) {
                 s < 0xd9 < 0xe0;  // fchs
             }
             else
-            if (e.second == 2) {
+            if (term.second == 2) {
                 s < 0xd8 < 0xc0;  // fadd st(0), st(0)
             }
             else
-            if (e.second == -2) {
+            if (term.second == -2) {
                 s < 0xd8 < 0xc0;  // fadd st(0), st(0)
                 s < 0xd9 < 0xe0;  // fchs
             }
             else {
-                emit_apply_op_with_constant<0x08>(ev, s, e.second);
+                emit_apply_op_with_constant<0x08>(ev, s, term.second);
             }
 
             if (!constant_added) {
@@ -1790,23 +1830,23 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
         bool constant_multiplied = false;
 
-        for (auto &e : sig_map) {
+        for (auto &term : terms) {
 
-            if (e.second == 0) {
+            if (term.second == 0) {
                 // factor 0 in mul_div means a^0, which has no effect.
                 continue;
             }
 
             // if the stack is not empty and the elist is only one element and the
-            // factor in e.second is 1 or -1,
+            // factor in term.second is 1 or -1,
             // we can multiply directly from memory, to save one place in the FPU
             // stack. This is a tradeoff, as it might be slightly slower to do so.
 
-            if (constant_multiplied && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0)
+            if (constant_multiplied && term.first.size() == 1 && abs(term.second)==1)
             {
-                auto& elem = e.first.front();
+                auto& elem = term.first.front();
                 if (elem.type == Element_type::CCONST && elem.c->numeric_data_type != M64INT) {
-                    if (e.second == 1) {
+                    if (term.second == 1) {
                         emit_apply_op_with_value<0x08>(s, elem.c);
                     }
                     else {
@@ -1815,7 +1855,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                     continue;
                 }
                 if (elem.type == Element_type::CVAR && elem.v->numeric_data_type != M64INT) {
-                    if (e.second == 1) {
+                    if (term.second == 1) {
                         emit_apply_op_with_value<0x08>(s, elem.v);
                     }
                     else {
@@ -1825,32 +1865,32 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
             }
 
-            if (e.second >= -2 && e.second <=2) {  // cannot be 0, it has been handled above
-                compile_elist(s, e.first.begin(), e.first.end());
+            if (term.second >= -2 && term.second <= 2) {  // cannot be 0, it has been handled above
+                compile_elist(s, term.first.begin(), term.first.end());
 
-                if (e.second == 1) {
+                if (term.second == 1) {
                     // a^1 == a
                     // we loaded the expression, there is nothing further to do
                 }
                 else
-                if (e.second == -1) {   //  1/a
+                if (term.second == -1) {   //  1/a
                     s < 0xd9 < 0xe8;    // fld1
                     s < 0xde < 0xf1;    // fdivrp   st(1), st
                 }
                 else
-                if (e.second == 2) {    //  a*a
+                if (term.second == 2) {    //  a*a
                     s < 0xdc < 0xc8;    // fmul st(0), st(0)
                 }
                 else
-                if (e.second == -2) {   //  1/(a*a)
+                if (term.second == -2) {   //  1/(a*a)
                     s < 0xdc < 0xc8;    // fmul st(0), st(0)
                     s < 0xd9 < 0xe8;    // fld1
                     s < 0xde < 0xf1;    // fdivrp   st(1), st
                 }
             }
             else {
-                elist_t pow_list = e.first;
-                pow_list.push_back(Element(make_intermediate_constant(ev, e.second)));
+                elist_t pow_list = term.first;
+                pow_list.push_back(Element(make_intermediate_constant(ev, term.second)));
                 auto pow_f = make_function(ev, "pow");
                 pow_list.push_back(Element(pow_f));
                 link_arguments(pow_list);
