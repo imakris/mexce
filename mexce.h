@@ -1698,9 +1698,36 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     double ac_final = (fclass==1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
 
     // sort and gather chunks
-    map<elist_t, int, elist_comparison> sig_map;
-    for (auto &e : f->absorbed[0]) { sig_map[e]++; }
-    for (auto &e : f->absorbed[1]) { sig_map[e]--; }
+    using term_entry = pair<const elist_t*, int>;
+    vector<term_entry> gathered;
+    gathered.reserve(f->absorbed[0].size() + f->absorbed[1].size());
+    for (auto &chunk : f->absorbed[0]) {
+        gathered.emplace_back(&chunk, 1);
+    }
+    for (auto &chunk : f->absorbed[1]) {
+        gathered.emplace_back(&chunk, -1);
+    }
+
+    elist_comparison cmp;
+    sort(gathered.begin(), gathered.end(), [&](const term_entry& lhs, const term_entry& rhs) {
+        return cmp(*lhs.first, *rhs.first);
+    });
+
+    vector<term_entry> merged;
+    merged.reserve(gathered.size());
+    for (auto &entry : gathered) {
+        if (!merged.empty()) {
+            auto &back = merged.back();
+            if (!cmp(*back.first, *entry.first) && !cmp(*entry.first, *back.first)) {
+                back.second += entry.second;
+                if (back.second == 0) {
+                    merged.pop_back();
+                }
+                continue;
+            }
+        }
+        merged.push_back(entry);
+    }
 
     mexce_charstream s;
 
@@ -1710,21 +1737,22 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
         bool constant_added = false;
 
-        for (auto &e : sig_map) {
+        for (auto &e : merged) {
 
             if (e.second == 0) {
-                // factor 0 in add_sub means 0*a which has no effect.
                 continue;
             }
+
+            const auto& chunk = *e.first;
 
             // if the stack is not empty and the elist is only one element and the
             // factor in e.second is 1 or -1,
             // we can multiply directly from memory, to save one place in the FPU
             // stack. This is a tradeoff, as it might be slightly slower to do so.
 
-            if (constant_added && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0)
+            if (constant_added && next(chunk.begin()) == chunk.end() && std::abs(e.second)==1)
             {
-                auto& elem = e.first.front();
+                auto& elem = chunk.front();
                 if (elem.type == Element_type::CCONST && elem.c->numeric_data_type != M64INT) {
                     if (e.second == 1) emit_apply_op_with_value<0x00>(s, elem.c);
                     else emit_apply_op_with_value<0x20>(s, elem.c);
@@ -1741,27 +1769,34 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
             }
 
-            compile_elist(s, e.first.begin(), e.first.end());
+            compile_elist(s, chunk.begin(), chunk.end());
 
-            if (e.second == 1) {
+            int coeff = e.second;
+            bool subtract_term = false;
+            if (coeff < 0 && constant_added) {
+                subtract_term = true;
+                coeff = -coeff;
+            }
+
+            if (coeff == 1) {
                 // 1*a == a
                 // we loaded the expression, there is nothing further to do
             }
             else
-            if (e.second == -1) {
+            if (coeff == -1) {
                 s < 0xd9 < 0xe0;  // fchs
             }
             else
-            if (e.second == 2) {
+            if (coeff == 2) {
                 s < 0xd8 < 0xc0;  // fadd st(0), st(0)
             }
             else
-            if (e.second == -2) {
+            if (coeff == -2) {
                 s < 0xd8 < 0xc0;  // fadd st(0), st(0)
                 s < 0xd9 < 0xe0;  // fchs
             }
             else {
-                emit_apply_op_with_constant<0x08>(ev, s, e.second);
+                emit_apply_op_with_constant<0x08>(ev, s, static_cast<double>(coeff));
             }
 
             if (!constant_added) {
@@ -1776,7 +1811,12 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 constant_added = true;
             }
             else {
-                s < 0xde < 0xc1;  // faddp       st(1), st
+                if (subtract_term) {
+                    s < 0xde < 0xe9;  // fsubp       st(1), st
+                }
+                else {
+                    s < 0xde < 0xc1;  // faddp       st(1), st
+                }
             }
         }
 
@@ -1790,21 +1830,22 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
         bool constant_multiplied = false;
 
-        for (auto &e : sig_map) {
+        for (auto &e : merged) {
 
             if (e.second == 0) {
-                // factor 0 in mul_div means a^0, which has no effect.
                 continue;
             }
+
+            const auto& chunk = *e.first;
 
             // if the stack is not empty and the elist is only one element and the
             // factor in e.second is 1 or -1,
             // we can multiply directly from memory, to save one place in the FPU
             // stack. This is a tradeoff, as it might be slightly slower to do so.
 
-            if (constant_multiplied && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0)
+            if (constant_multiplied && next(chunk.begin()) == chunk.end() && std::abs(e.second)==1)
             {
-                auto& elem = e.first.front();
+                auto& elem = chunk.front();
                 if (elem.type == Element_type::CCONST && elem.c->numeric_data_type != M64INT) {
                     if (e.second == 1) {
                         emit_apply_op_with_value<0x08>(s, elem.c);
@@ -1826,7 +1867,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             }
 
             if (e.second >= -2 && e.second <=2) {  // cannot be 0, it has been handled above
-                compile_elist(s, e.first.begin(), e.first.end());
+                compile_elist(s, chunk.begin(), chunk.end());
 
                 if (e.second == 1) {
                     // a^1 == a
@@ -1849,7 +1890,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
             }
             else {
-                elist_t pow_list = e.first;
+                elist_t pow_list = chunk;
                 pow_list.push_back(Element(make_intermediate_constant(ev, e.second)));
                 auto pow_f = make_function(ev, "pow");
                 pow_list.push_back(Element(pow_f));
