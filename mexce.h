@@ -866,90 +866,143 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
         double v_d = v->value;
         double r_d = round(v_d);
-        double a_d = abs(v_d);
 
-        bool matched = true;
+        bool matched = false;
         mexce_charstream s;
 
         // a special case, that the exponent is 0.5
         if (v_d == 0.5) {
             s < 0xd9 < 0xfa;                // fsqrt
-        }
-        else
-        if (r_d == v_d && a_d <= 65536.0) {
-
-            // find the closest power of two
-            uint32_t npo2 = (uint32_t)a_d;
-            npo2--;
-            npo2 |= npo2 >> 1;
-            npo2 |= npo2 >> 2;
-            npo2 |= npo2 >> 4;
-            npo2 |= npo2 >> 8;
-            npo2 |= npo2 >> 16;
-            npo2++;
-            npo2>>=1;
-
-            double diff_high = npo2*2 - a_d;
-            double diff_low  = a_d - npo2;
-
-            if (a_d == 0.0) {
-                s < 0xdd < 0xd8             // fstp st(0)
-                  < 0xd9 < 0xe8;            // fld1
-            }
-            else
-            if (a_d == 1.0) {
-                // do nothing
-            }
-            else
-            if (diff_high < 28 &&  diff_low < 28) {
-                if (diff_high && diff_low) {
-                    // the exponent is not an exact po2, thus we will have to multiply
-                    // or divide to get to the result, thus we keep the base in st(1)
-                    s < 0xd9 < 0xc0;        // fld  st(0)
-                }
-                while (npo2 >>= 1) {        // multiply to reach npo2
-                    s < 0xdc < 0xc8;        // fmul st(0)
-                }
-
-                if (diff_high < diff_low) {
-                    s < 0xdc < 0xc8;        // fmul st(0)
-
-                    // divide as many times as the difference
-                    // and then get rid of the temporary
-                    if (diff_high > 0.0) {
-                        while (--diff_high) {
-                            s < 0xd8 < 0xf1;    // fdivr  st(0), st(1)
-                        }
-                        s < 0xde < 0xf1;        // fdivrp st(1), st(0)
-                    }
-                }
-                else {
-                    // multiply as many times as the difference
-                    // and then get rid of the temporary
-                    if (diff_low > 0) {
-                        while (--diff_low) {
-                            s < 0xd8 < 0xc9;    // fmul  st(0), st(1)
-                        }
-                        s < 0xde < 0xc9;        // fmulp st(1), st(0)
-                    }
-                }
-
-                if (diff_high &&  diff_low) {
-                    // now we get rid of the temporary we used earlier
-                    s < 0xde < 0xc9;            // fmulp st(1), st(0)
-                }
-            }
-            else {
-                matched = false;
-            }
-
-            if (matched && v_d < 0) {
-                s < 0xd9 < 0xe8                 // fld1
-                  < 0xde < 0xf1;                // fdivrp  st(1),st   // inverse
-            }
+            matched = true;
         }
         else {
-            matched = false;
+            if (r_d == v_d && std::isfinite(v_d)) {
+                auto emit_inverse = [&]() {
+                    s < 0xd9 < 0xe8;        // fld1
+                    s < 0xde < 0xf1;        // fdivrp      st(1), st
+                };
+
+                auto emit_small_integer = [&](int64_t exp_int) -> bool {
+                    uint64_t abs_exp = exp_int < 0 ? static_cast<uint64_t>(-exp_int) : static_cast<uint64_t>(exp_int);
+
+                    switch (abs_exp) {
+                        case 0:
+                            s < 0xdd < 0xd8         // fstp        st(0)
+                              < 0xd9 < 0xe8;        // fld1
+                            return true;
+                        case 1:
+                            if (exp_int < 0) {
+                                emit_inverse();
+                            }
+                            return true;
+                        case 2:
+                            s < 0xdc < 0xc8;        // fmul        st(0), st(0)
+                            if (exp_int < 0) {
+                                emit_inverse();
+                            }
+                            return true;
+                        case 3:
+                            s < 0xd9 < 0xc0;        // fld         st(0)
+                            s < 0xdc < 0xc8;        // fmul        st(0), st(0)
+                            s < 0xde < 0xc9;        // fmulp       st(1), st
+                            if (exp_int < 0) {
+                                emit_inverse();
+                            }
+                            return true;
+                        case 4:
+                            s < 0xdc < 0xc8;        // fmul        st(0), st(0)
+                            s < 0xd9 < 0xc0;        // fld         st(0)
+                            s < 0xdc < 0xc8;        // fmul        st(0), st(0)
+                            s < 0xdd < 0xd9;        // fstp        st(1)
+                            if (exp_int < 0) {
+                                emit_inverse();
+                            }
+                            return true;
+                        default:
+                            return false;
+                    }
+                };
+
+                int64_t exp_int = static_cast<int64_t>(r_d);
+                if (emit_small_integer(exp_int)) {
+                    matched = true;
+                }
+                else {
+                    double a_d = std::fabs(v_d);
+
+                    if (a_d <= 65536.0) {
+                        matched = true;
+
+                        uint32_t npo2 = static_cast<uint32_t>(a_d);
+                        npo2--;
+                        npo2 |= npo2 >> 1;
+                        npo2 |= npo2 >> 2;
+                        npo2 |= npo2 >> 4;
+                        npo2 |= npo2 >> 8;
+                        npo2 |= npo2 >> 16;
+                        npo2++;
+                        npo2 >>= 1;
+
+                        double diff_high = npo2 * 2 - a_d;
+                        double diff_low  = a_d - npo2;
+
+                        if (a_d == 0.0) {
+                            s < 0xdd < 0xd8         // fstp        st(0)
+                              < 0xd9 < 0xe8;        // fld1
+                        }
+                        else
+                        if (a_d == 1.0) {
+                            // do nothing
+                        }
+                        else
+                        if (diff_high < 28 && diff_low < 28) {
+                            if (diff_high && diff_low) {
+                                // the exponent is not an exact po2, thus we will have to multiply
+                                // or divide to get to the result, thus we keep the base in st(1)
+                                s < 0xd9 < 0xc0;    // fld         st(0)
+                            }
+                            while (npo2 >>= 1) {    // multiply to reach npo2
+                                s < 0xdc < 0xc8;    // fmul        st(0)
+                            }
+
+                            if (diff_high < diff_low) {
+                                s < 0xdc < 0xc8;    // fmul        st(0)
+
+                                // divide as many times as the difference
+                                // and then get rid of the temporary
+                                if (diff_high > 0.0) {
+                                    while (--diff_high) {
+                                        s < 0xd8 < 0xf1;    // fdivr  st(0), st(1)
+                                    }
+                                    s < 0xde < 0xf1;        // fdivrp st(1), st(0)
+                                }
+                            }
+                            else {
+                                // multiply as many times as the difference
+                                // and then get rid of the temporary
+                                if (diff_low > 0) {
+                                    while (--diff_low) {
+                                        s < 0xd8 < 0xc9;    // fmul  st(0), st(1)
+                                    }
+                                    s < 0xde < 0xc9;        // fmulp st(1), st(0)
+                                }
+                            }
+
+                            if (diff_high && diff_low) {
+                                // now we get rid of the temporary we used earlier
+                                s < 0xde < 0xc9;        // fmulp       st(1), st
+                            }
+                        }
+                        else {
+                            matched = false;
+                        }
+
+                        if (matched && v_d < 0) {
+                            emit_inverse();            // inverse for negative exponents
+                        }
+                    }
+                }
+            }
         }
 
         if (!matched) {
@@ -1700,24 +1753,25 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     f->args.clear();
 
     // reduce constants
-    double ac[2] = {neutral, neutral};
+    long double ac[2] = {neutral, neutral};
     for (int i=0; i<2; i++) {
         for (auto e = f->absorbed[i].begin(); e!=f->absorbed[i].end(); ) {
             auto next_e = next(e);
             if (e->size()==1 && e->front().type == Element_type::CCONST) {
                 auto v = e->front().c;
                 if (fclass==1) {
-                    ac[i] += v->value;
+                    ac[i] += static_cast<long double>(v->value);
                 }
                 else {
-                    ac[i] *= v->value;
+                    ac[i] *= static_cast<long double>(v->value);
                 }
                 f->absorbed[i].erase(e);
             }
             e = next_e;
         }
     }
-    double ac_final = (fclass==1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
+    long double ac_final_ld = (fclass==1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
+    double ac_final = static_cast<double>(ac_final_ld);
 
     // sort and gather chunks
     map<elist_t, int, elist_comparison> sig_map;
