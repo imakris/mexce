@@ -1394,6 +1394,25 @@ void emit_apply_op_with_constant(evaluator* ev, impl::mexce_charstream& s, doubl
 }
 
 
+inline bool emit_small_integer_power(impl::mexce_charstream& s, int exponent)
+{
+    switch (exponent) {
+        case 3:
+            s < 0xd9 < 0xc0;  // fld st(0)
+            s < 0xdc < 0xc8;  // fmul st(0), st(0)
+            s < 0xde < 0xc9;  // fmulp st(1), st
+            return true;
+        case 4:
+            s < 0xdc < 0xc8;  // fmul st(0), st(0)
+            s < 0xd9 < 0xc0;  // fld st(0)
+            s < 0xde < 0xc9;  // fmulp st(1), st
+            return true;
+        default:
+            return false;
+    }
+}
+
+
 
 inline
 void emit_load_constant(evaluator* ev, impl::mexce_charstream& s, double v)
@@ -1849,14 +1868,31 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
             }
             else {
-                elist_t pow_list = e.first;
-                pow_list.push_back(Element(make_intermediate_constant(ev, e.second)));
-                auto pow_f = make_function(ev, "pow");
-                pow_list.push_back(Element(pow_f));
-                link_arguments(pow_list);
-                pow_f->optimizer(prev(pow_list.end()), ev, &pow_list);
+                const int exponent = e.second;
+                const int abs_exponent = exponent < 0 ? -exponent : exponent;
 
-                compile_elist(s, pow_list.begin(), pow_list.end());
+                if (abs_exponent >= 3 && abs_exponent <= 4) {
+                    compile_elist(s, e.first.begin(), e.first.end());
+
+                    if (!emit_small_integer_power(s, abs_exponent)) {
+                        assert(false);
+                    }
+
+                    if (exponent < 0) {
+                        s < 0xd9 < 0xe8;    // fld1
+                        s < 0xde < 0xf1;    // fdivrp   st(1), st
+                    }
+                }
+                else {
+                    elist_t pow_list = e.first;
+                    pow_list.push_back(Element(make_intermediate_constant(ev, static_cast<double>(exponent))));
+                    auto pow_f = make_function(ev, "pow");
+                    pow_list.push_back(Element(pow_f));
+                    link_arguments(pow_list);
+                    pow_f->optimizer(prev(pow_list.end()), ev, &pow_list);
+
+                    compile_elist(s, pow_list.begin(), pow_list.end());
+                }
             }
 
             if (!constant_multiplied) {
