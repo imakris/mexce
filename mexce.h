@@ -125,6 +125,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 
@@ -1394,6 +1395,45 @@ void emit_apply_op_with_constant(evaluator* ev, impl::mexce_charstream& s, doubl
 }
 
 
+inline
+void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
+{
+    using namespace impl;
+
+    assert(exponent >= 1);
+
+    if (exponent == 1) {
+        return;
+    }
+
+    if (exponent == 2) {
+        s < 0xdc < 0xc8;        // fmul st(0), st(0)
+        return;
+    }
+
+    uint32_t remaining = exponent;
+
+    s < 0xd9 < 0xe8         // fld1
+      < 0xd9 < 0xc9;        // fxch        (base in st0, result in st1)
+
+    while (true) {
+        if (remaining & 1U) {
+            s < 0xdc < 0xc9;    // fmul st(1), st
+        }
+
+        remaining >>= 1U;
+        if (!remaining) {
+            break;
+        }
+
+        s < 0xdc < 0xc8;        // fmul st(0), st(0)
+    }
+
+    s < 0xd9 < 0xc9         // fxch        (result to st0)
+      < 0xdd < 0xd9;        // fstp st(1)
+}
+
+
 
 inline
 void emit_load_constant(evaluator* ev, impl::mexce_charstream& s, double v)
@@ -1621,7 +1661,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     int fclass = (fname == "add" || fname == "sub") ? 1 : (fname == "mul" || fname == "div") ? 2 : 0;
     assert(fclass);
 
-    double neutral = fclass==1 ? 0.0 : 1.0;
+    double neutral = fclass == 1 ? 0.0 : 1.0;
 
     bool arg2_inv = (fname == "sub" || fname == "div");
 
@@ -1648,9 +1688,9 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             elist->erase(arg0_chunk.first, arg0_chunk.second);
 
             pf->absorbed[ parent_inv_op].insert(pf->absorbed[ parent_inv_op].end(),
-                f->absorbed[0].begin(), f->absorbed[0].end() );
+                f->absorbed[0].begin(), f->absorbed[0].end());
             pf->absorbed[!parent_inv_op].insert(pf->absorbed[!parent_inv_op].end(),
-                f->absorbed[1].begin(), f->absorbed[1].end() );
+                f->absorbed[1].begin(), f->absorbed[1].end());
 
             pf->force_not_constant = true;
 
@@ -1677,206 +1717,234 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     // at this point, this is a function of 0 arguments, all of them were absorbed
     f->args.clear();
 
-    // reduce constants
-    double ac[2] = {neutral, neutral};
-    for (int i=0; i<2; i++) {
-        for (auto e = f->absorbed[i].begin(); e!=f->absorbed[i].end(); ) {
+    // reduce constants with extended precision
+    long double ac[2] = {neutral, neutral};
+    for (int i = 0; i < 2; i++) {
+        for (auto e = f->absorbed[i].begin(); e != f->absorbed[i].end();) {
             auto next_e = next(e);
-            if (e->size()==1 && e->front().type == Element_type::CCONST) {
+            if (e->size() == 1 && e->front().type == Element_type::CCONST) {
                 auto v = e->front().c;
-                if (fclass==1) {
-                    ac[i] += v->value;
+                if (fclass == 1) {
+                    ac[i] += static_cast<long double>(v->value);
                 }
                 else {
-                    ac[i] *= v->value;
+                    ac[i] *= static_cast<long double>(v->value);
                 }
                 f->absorbed[i].erase(e);
             }
             e = next_e;
         }
     }
-    double ac_final = (fclass==1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
+    long double ac_final_ld = (fclass == 1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
+    double ac_final = static_cast<double>(ac_final_ld);
 
-    // sort and gather chunks
-    map<elist_t, int, elist_comparison> sig_map;
-    for (auto &e : f->absorbed[0]) { sig_map[e]++; }
-    for (auto &e : f->absorbed[1]) { sig_map[e]--; }
+    struct absorbed_term {
+        elist_t chunk;
+        int     factor;
+    };
+
+    vector<absorbed_term> terms;
+    terms.reserve(f->absorbed[0].size() + f->absorbed[1].size());
+
+    auto drain_terms = [&](int index, int contribution) {
+        for (auto &chunk : f->absorbed[index]) {
+            terms.push_back({std::move(chunk), contribution});
+        }
+        f->absorbed[index].clear();
+    };
+
+    drain_terms(0, 1);
+    drain_terms(1, -1);
+
+    elist_comparison comp;
+    std::sort(terms.begin(), terms.end(), [&](const absorbed_term& lhs, const absorbed_term& rhs) {
+        return comp(lhs.chunk, rhs.chunk);
+    });
+
+    vector<absorbed_term> merged;
+    merged.reserve(terms.size());
+    for (auto &term : terms) {
+        if (!merged.empty() && !comp(term.chunk, merged.back().chunk) && !comp(merged.back().chunk, term.chunk)) {
+            merged.back().factor += term.factor;
+            if (merged.back().factor == 0) {
+                merged.pop_back();
+            }
+        }
+        else if (term.factor != 0) {
+            merged.push_back({std::move(term.chunk), term.factor});
+        }
+    }
 
     mexce_charstream s;
 
-    // TODO: assert that none of the values are constant
+    if (fclass == 1) {
+        bool have_value = false;
+        bool constant_added = (ac_final == neutral);
 
-    if (fclass==1) {    // NOTE: children can be mul/div, but they cannot be add/sub
+        auto ensure_constant = [&]() {
+            if (have_value && !constant_added && ac_final != neutral) {
+                emit_apply_op_with_constant<0x00>(ev, s, ac_final);
+                constant_added = true;
+            }
+        };
 
-        bool constant_added = false;
-
-        for (auto &e : sig_map) {
-
-            if (e.second == 0) {
-                // factor 0 in add_sub means 0*a which has no effect.
+        for (auto &term : merged) {
+            int factor = term.factor;
+            if (factor == 0) {
                 continue;
             }
 
-            // if the stack is not empty and the elist is only one element and the
-            // factor in e.second is 1 or -1,
-            // we can multiply directly from memory, to save one place in the FPU
-            // stack. This is a tradeoff, as it might be slightly slower to do so.
+            if (have_value) {
+                ensure_constant();
+            }
 
-            if (constant_added && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0)
-            {
-                auto& elem = e.first.front();
+            bool handled_direct = false;
+            if (have_value && abs(factor) == 1 && term.chunk.size() == 1) {
+                auto &elem = term.chunk.front();
                 if (elem.type == Element_type::CCONST && elem.c->numeric_data_type != M64INT) {
-                    if (e.second == 1) emit_apply_op_with_value<0x00>(s, elem.c);
-                    else emit_apply_op_with_value<0x20>(s, elem.c);
-                    continue;
+                    if (factor == 1) {
+                        emit_apply_op_with_value<0x00>(s, elem.c);
+                    }
+                    else {
+                        emit_apply_op_with_value<0x20>(s, elem.c);
+                    }
+                    handled_direct = true;
                 }
-                if (elem.type == Element_type::CVAR && elem.v->numeric_data_type != M64INT) {
-                    if (e.second == 1) {
+                else if (elem.type == Element_type::CVAR && elem.v->numeric_data_type != M64INT) {
+                    if (factor == 1) {
                         emit_apply_op_with_value<0x00>(s, elem.v);
                     }
                     else {
                         emit_apply_op_with_value<0x20>(s, elem.v);
                     }
-                    continue;
+                    handled_direct = true;
                 }
             }
 
-            compile_elist(s, e.first.begin(), e.first.end());
-
-            if (e.second == 1) {
-                // 1*a == a
-                // we loaded the expression, there is nothing further to do
+            if (handled_direct) {
+                continue;
             }
-            else
-            if (e.second == -1) {
+
+            compile_elist(s, term.chunk.begin(), term.chunk.end());
+
+            if (factor == 1) {
+                // no-op
+            }
+            else if (factor == -1) {
                 s < 0xd9 < 0xe0;  // fchs
             }
-            else
-            if (e.second == 2) {
+            else if (factor == 2) {
                 s < 0xd8 < 0xc0;  // fadd st(0), st(0)
             }
-            else
-            if (e.second == -2) {
-                s < 0xd8 < 0xc0;  // fadd st(0), st(0)
+            else if (factor == -2) {
+                s < 0xd8 < 0xc0;
                 s < 0xd9 < 0xe0;  // fchs
             }
             else {
-                emit_apply_op_with_constant<0x08>(ev, s, e.second);
+                emit_apply_op_with_constant<0x08>(ev, s, static_cast<double>(factor));
             }
 
-            if (!constant_added) {
-                // add the constant
-
-                // doing this here and not in the beginning requires one place
-                // less in the fpu stack (and 1 instruction less too)
-
+            if (!have_value) {
+                have_value = true;
                 if (ac_final != neutral) {
                     emit_apply_op_with_constant<0x00>(ev, s, ac_final);
+                    constant_added = true;
                 }
-                constant_added = true;
             }
             else {
                 s < 0xde < 0xc1;  // faddp       st(1), st
             }
         }
 
-        if (!constant_added) { // we did nothing, we should at least load the constant
+        if (!have_value) {
             emit_load_constant(ev, s, ac_final);
+        }
+        else {
+            ensure_constant();
         }
     }
     else {
-        // NOTE: children can be powers, but they cannot be mul/div.
-        // They can also be add/sub, but this is not interesting for optimization.
+        bool have_value = false;
+        bool constant_multiplied = (ac_final == neutral);
 
-        bool constant_multiplied = false;
+        auto ensure_constant = [&]() {
+            if (have_value && !constant_multiplied && ac_final != neutral) {
+                emit_apply_op_with_constant<0x08>(ev, s, ac_final);
+                constant_multiplied = true;
+            }
+        };
 
-        for (auto &e : sig_map) {
-
-            if (e.second == 0) {
-                // factor 0 in mul_div means a^0, which has no effect.
+        for (auto &term : merged) {
+            int factor = term.factor;
+            if (factor == 0) {
                 continue;
             }
 
-            // if the stack is not empty and the elist is only one element and the
-            // factor in e.second is 1 or -1,
-            // we can multiply directly from memory, to save one place in the FPU
-            // stack. This is a tradeoff, as it might be slightly slower to do so.
+            if (have_value) {
+                ensure_constant();
+            }
 
-            if (constant_multiplied && next(e.first.begin()) == e.first.end() && abs(e.second)==1.0)
-            {
-                auto& elem = e.first.front();
+            bool handled_direct = false;
+            if (have_value && abs(factor) == 1 && term.chunk.size() == 1) {
+                auto &elem = term.chunk.front();
                 if (elem.type == Element_type::CCONST && elem.c->numeric_data_type != M64INT) {
-                    if (e.second == 1) {
+                    if (factor == 1) {
                         emit_apply_op_with_value<0x08>(s, elem.c);
                     }
                     else {
                         emit_apply_op_with_value<0x30>(s, elem.c);
                     }
-                    continue;
+                    handled_direct = true;
                 }
-                if (elem.type == Element_type::CVAR && elem.v->numeric_data_type != M64INT) {
-                    if (e.second == 1) {
+                else if (elem.type == Element_type::CVAR && elem.v->numeric_data_type != M64INT) {
+                    if (factor == 1) {
                         emit_apply_op_with_value<0x08>(s, elem.v);
                     }
                     else {
                         emit_apply_op_with_value<0x30>(s, elem.v);
                     }
-                    continue;
+                    handled_direct = true;
                 }
             }
 
-            if (e.second >= -2 && e.second <=2) {  // cannot be 0, it has been handled above
-                compile_elist(s, e.first.begin(), e.first.end());
+            if (handled_direct) {
+                continue;
+            }
 
-                if (e.second == 1) {
-                    // a^1 == a
-                    // we loaded the expression, there is nothing further to do
-                }
-                else
-                if (e.second == -1) {   //  1/a
+            compile_elist(s, term.chunk.begin(), term.chunk.end());
+
+            uint32_t abs_factor = static_cast<uint32_t>(abs(factor));
+            if (abs_factor > 1U) {
+                emit_integer_power_sequence(s, abs_factor);
+            }
+
+            if (factor < 0) {
+                if (!have_value) {
                     s < 0xd9 < 0xe8;    // fld1
                     s < 0xde < 0xf1;    // fdivrp   st(1), st
                 }
-                else
-                if (e.second == 2) {    //  a*a
-                    s < 0xdc < 0xc8;    // fmul st(0), st(0)
-                }
-                else
-                if (e.second == -2) {   //  1/(a*a)
-                    s < 0xdc < 0xc8;    // fmul st(0), st(0)
-                    s < 0xd9 < 0xe8;    // fld1
-                    s < 0xde < 0xf1;    // fdivrp   st(1), st
+                else {
+                    s < 0xde < 0xf9;    // fdivp    st(1), st
                 }
             }
-            else {
-                elist_t pow_list = e.first;
-                pow_list.push_back(Element(make_intermediate_constant(ev, e.second)));
-                auto pow_f = make_function(ev, "pow");
-                pow_list.push_back(Element(pow_f));
-                link_arguments(pow_list);
-                pow_f->optimizer(prev(pow_list.end()), ev, &pow_list);
-
-                compile_elist(s, pow_list.begin(), pow_list.end());
+            else if (have_value) {
+                s < 0xde < 0xc9;        // fmulp   st(1), st
             }
 
-            if (!constant_multiplied) {
-                // add the constant
-
-                // doing this here and not in the beginning requires one place
-                // less in the fpu stack (and 1 instruction less too)
-
+            if (!have_value) {
+                have_value = true;
                 if (ac_final != neutral) {
                     emit_apply_op_with_constant<0x08>(ev, s, ac_final);
+                    constant_multiplied = true;
                 }
-                constant_multiplied = true;
-            }
-            else {
-                s < 0xde < 0xc9;                       // fmulp       st(1), st
             }
         }
 
-        if (!constant_multiplied) { // we did nothing, we should at least load the constant
+        if (!have_value) {
             emit_load_constant(ev, s, ac_final);
+        }
+        else {
+            ensure_constant();
         }
     }
 
@@ -1886,7 +1954,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.s.str().size(), cc, nullptr);
 
     *it = Element(f_opt);
-    return;
 }
 
 
