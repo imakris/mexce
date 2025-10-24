@@ -328,6 +328,10 @@ void test_pow_optimizer_special_cases(TestSuite& suite) {
     eval.set_expression("pow(x, 0.5)");
     suite.expect_near("pow_optimizer_sqrt", eval.evaluate(), std::sqrt(x));
 
+    x = 4.0;
+    eval.set_expression("pow(x, -0.5)");
+    suite.expect_near("pow_optimizer_inverse_sqrt", eval.evaluate(), 1.0 / std::sqrt(x));
+
     x = 16.0;
     eval.set_expression("pow(x, 0)");
     suite.expect_near("pow_optimizer_zero_exponent", eval.evaluate(), 1.0);
