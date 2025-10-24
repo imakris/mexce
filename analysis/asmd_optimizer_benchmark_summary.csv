@@ -1,0 +1,15 @@
+branch,avg_compile_us,avg_runtime_ns,compiler_runtime_ns,total_compile_sec,total_exec_ms,exact_matches,matches_1_16,matches_gt_65536
+master,206.709,12.000,10.000,9.142516,52.851054,20164,23494,15
+codex/optimize-asmd-and-run-benchmark-stlq24,209.213,12.000,10.000,9.253289,52.912966,20164,23494,15
+codex/optimize-asmd-and-run-benchmark-2ut8ap,192.650,11.000,10.000,8.520717,49.084709,20164,23494,15
+codex/optimize-asmd-and-run-benchmark-ykpt1y,199.410,11.000,10.000,8.819701,50.321112,20325,23345,15
+codex/optimize-asmd-and-run-benchmark,203.880,12.000,10.000,9.017427,53.023782,20164,23494,15
+codex/improve-asmd-optimizer-and-benchmark-qwj19s,211.625,12.000,11.000,9.359942,54.793940,20164,23494,15
+codex/improve-asmd-optimizer-and-benchmark-s6rmtm,198.835,11.000,10.000,8.794265,50.341012,20164,23494,15
+codex/improve-asmd-optimizer-and-benchmark-gw5o3x,199.552,12.000,10.000,8.826002,51.708557,20164,23494,15
+codex/improve-asmd-optimizer-and-benchmark,197.202,12.000,10.000,8.722065,51.486494,20164,23494,15
+codex/improve-asmd-optimizer-and-run-benchmark-unsjv5,208.978,12.000,11.000,9.242877,52.245869,20164,23494,15
+codex/improve-asmd-optimizer-and-run-benchmark-w6gusv,198.515,11.000,10.000,8.780121,50.472255,20164,23494,15
+codex/improve-asmd-optimizer-and-run-benchmark-shydiw,201.476,12.000,10.000,8.911097,50.882674,20164,23494,15
+codex/improve-asmd-optimizer-and-run-benchmark,196.460,12.000,10.000,8.689223,51.387026,20164,23494,15
+work,107.753,10.000,8.000,4.765808,43.558393,20325,23345,15
