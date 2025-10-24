@@ -878,69 +878,50 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         else
         if (r_d == v_d && a_d <= 65536.0) {
 
-            // find the closest power of two
-            uint32_t npo2 = (uint32_t)a_d;
-            npo2--;
-            npo2 |= npo2 >> 1;
-            npo2 |= npo2 >> 2;
-            npo2 |= npo2 >> 4;
-            npo2 |= npo2 >> 8;
-            npo2 |= npo2 >> 16;
-            npo2++;
-            npo2>>=1;
+            uint64_t exponent = static_cast<uint64_t>(a_d);
 
-            double diff_high = npo2*2 - a_d;
-            double diff_low  = a_d - npo2;
-
-            if (a_d == 0.0) {
+            if (exponent == 0) {
                 s < 0xdd < 0xd8             // fstp st(0)
                   < 0xd9 < 0xe8;            // fld1
             }
             else
-            if (a_d == 1.0) {
-                // do nothing
+            if (exponent == 1) {
+                // base^1 == base, nothing to emit
             }
             else
-            if (diff_high < 28 &&  diff_low < 28) {
-                if (diff_high && diff_low) {
-                    // the exponent is not an exact po2, thus we will have to multiply
-                    // or divide to get to the result, thus we keep the base in st(1)
-                    s < 0xd9 < 0xc0;        // fld  st(0)
-                }
-                while (npo2 >>= 1) {        // multiply to reach npo2
-                    s < 0xdc < 0xc8;        // fmul st(0)
-                }
-
-                if (diff_high < diff_low) {
-                    s < 0xdc < 0xc8;        // fmul st(0)
-
-                    // divide as many times as the difference
-                    // and then get rid of the temporary
-                    if (diff_high > 0.0) {
-                        while (--diff_high) {
-                            s < 0xd8 < 0xf1;    // fdivr  st(0), st(1)
-                        }
-                        s < 0xde < 0xf1;        // fdivrp st(1), st(0)
-                    }
-                }
-                else {
-                    // multiply as many times as the difference
-                    // and then get rid of the temporary
-                    if (diff_low > 0) {
-                        while (--diff_low) {
-                            s < 0xd8 < 0xc9;    // fmul  st(0), st(1)
-                        }
-                        s < 0xde < 0xc9;        // fmulp st(1), st(0)
-                    }
-                }
-
-                if (diff_high &&  diff_low) {
-                    // now we get rid of the temporary we used earlier
-                    s < 0xde < 0xc9;            // fmulp st(1), st(0)
+            if (exponent == 2) {
+                s < 0xdc < 0xc8;            // fmul st(0), st(0)
+            }
+            else
+            if (exponent == 3) {
+                s < 0xd9 < 0xc0             // fld  st(0)
+                  < 0xdc < 0xc8             // fmul st(0), st(0)
+                  < 0xde < 0xc9;            // fmulp st(1), st(0)
+            }
+            else
+            if ((exponent & (exponent - 1)) == 0) { // power of two
+                uint64_t pow_two = exponent;
+                while (pow_two > 1) {
+                    s < 0xdc < 0xc8;        // fmul st(0), st(0)
+                    pow_two >>= 1;
                 }
             }
             else {
-                matched = false;
+                s < 0xd9 < 0xe8             // fld1
+                  < 0xd9 < 0xc9;            // fxch st(1)
+
+                uint64_t e = exponent;
+                while (e > 0) {
+                    if (e & 1ULL) {
+                        s < 0xdc < 0xc9;    // fmul st(1), st(0)
+                    }
+                    e >>= 1ULL;
+                    if (e) {
+                        s < 0xdc < 0xc8;    // fmul st(0), st(0)
+                    }
+                }
+
+                s < 0xdd < 0xd8;            // fstp st(0)
             }
 
             if (matched && v_d < 0) {
