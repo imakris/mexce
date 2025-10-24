@@ -1700,24 +1700,39 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     f->args.clear();
 
     // reduce constants
-    double ac[2] = {neutral, neutral};
+    long double ac[2] = {neutral, neutral};
     for (int i=0; i<2; i++) {
         for (auto e = f->absorbed[i].begin(); e!=f->absorbed[i].end(); ) {
             auto next_e = next(e);
             if (e->size()==1 && e->front().type == Element_type::CCONST) {
                 auto v = e->front().c;
                 if (fclass==1) {
-                    ac[i] += v->value;
+                    ac[i] += static_cast<long double>(v->value);
                 }
                 else {
-                    ac[i] *= v->value;
+                    ac[i] *= static_cast<long double>(v->value);
                 }
                 f->absorbed[i].erase(e);
             }
             e = next_e;
         }
     }
-    double ac_final = (fclass==1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
+    long double ac_final_ld = (fclass==1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
+
+    const long double neutral_ld = static_cast<long double>(neutral);
+    const long double epsilon = 1e-15L;
+    if (fclass == 1) {
+        if (fabsl(ac_final_ld) < epsilon) {
+            ac_final_ld = neutral_ld;
+        }
+    }
+    else {
+        if (fabsl(ac_final_ld - neutral_ld) < epsilon) {
+            ac_final_ld = neutral_ld;
+        }
+    }
+
+    double ac_final = static_cast<double>(ac_final_ld);
 
     // sort and gather chunks
     map<elist_t, int, elist_comparison> sig_map;
