@@ -125,6 +125,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -450,6 +451,11 @@ struct Function
 
     bool                force_not_constant = false;
 
+#ifdef MEXCE_64
+    std::vector<double> rip_constants;
+    std::vector<std::pair<size_t, size_t>> rip_fixups;
+#endif
+
     Function(
         uint64_t    i,
         const string& n,
@@ -490,7 +496,39 @@ struct Element {
 
 
 
-struct mexce_charstream { stringstream s; };
+struct mexce_charstream {
+    stringstream s;
+    bool use_rip_constants = false;
+#ifdef MEXCE_64
+    std::vector<double> rip_constants;
+    std::vector<std::pair<size_t, size_t>> rip_fixups;
+    std::unordered_map<uint64_t, size_t> rip_constant_lookup;
+
+    size_t register_constant(double value)
+    {
+        assert(use_rip_constants);
+        union { double d; uint64_t u; } bits{value};
+        auto it = rip_constant_lookup.find(bits.u);
+        if (it != rip_constant_lookup.end()) {
+            return it->second;
+        }
+
+        size_t index = rip_constants.size();
+        rip_constants.push_back(value);
+        rip_constant_lookup.emplace(bits.u, index);
+        return index;
+    }
+
+    void emit_rip_disp32(size_t constant_index)
+    {
+        assert(use_rip_constants);
+        size_t offset = static_cast<size_t>(s.tellp());
+        int32_t zero = 0;
+        s.write(reinterpret_cast<const char*>(&zero), sizeof(zero));
+        rip_fixups.emplace_back(offset, constant_index);
+    }
+#endif
+};
 
 template<typename T>
 mexce_charstream& operator << (mexce_charstream &s, T data) {
@@ -505,6 +543,73 @@ mexce_charstream& operator < (mexce_charstream &s, int v) {
     return s;
 }
 
+
+struct constant_pool_info {
+#ifdef MEXCE_64
+    std::vector<double> constants;
+    std::vector<std::pair<size_t, size_t>> fixups;
+#endif
+};
+
+
+inline
+void finalize_stream_into(mexce_charstream& stream, std::string& code, constant_pool_info& pool)
+{
+    code = stream.s.str();
+#ifdef MEXCE_64
+    if (stream.use_rip_constants) {
+        pool.constants = stream.rip_constants;
+        pool.fixups = stream.rip_fixups;
+    }
+    else {
+        pool.constants.clear();
+        pool.fixups.clear();
+    }
+#else
+    (void)pool;
+#endif
+}
+
+
+inline
+std::string materialize_code_with_constants(const std::string& code, const constant_pool_info& pool)
+{
+#ifdef MEXCE_64
+    if (pool.constants.empty()) {
+        return code;
+    }
+
+    auto result = code;
+    std::vector<size_t> constant_offsets(pool.constants.size());
+
+    size_t alignment = (8 - (result.size() & 7)) & 7;
+    if (alignment) {
+        result.append(alignment, '\0');
+    }
+
+    for (size_t i = 0; i < pool.constants.size(); ++i) {
+        constant_offsets[i] = result.size();
+        double value = pool.constants[i];
+        const char* raw = reinterpret_cast<const char*>(&value);
+        result.append(raw, sizeof(double));
+    }
+
+    for (const auto& fixup : pool.fixups) {
+        size_t disp_offset = fixup.first;
+        size_t constant_index = fixup.second;
+        size_t target = constant_offsets[constant_index];
+        int64_t disp = static_cast<int64_t>(target) - static_cast<int64_t>(disp_offset + sizeof(int32_t));
+        int32_t disp32 = static_cast<int32_t>(disp);
+        assert(static_cast<int64_t>(disp32) == disp);
+        std::memcpy(&result[disp_offset], &disp32, sizeof(disp32));
+    }
+
+    return result;
+#else
+    (void)pool;
+    return code;
+#endif
+}
 
 
 inline
@@ -871,6 +976,9 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
         bool matched = true;
         mexce_charstream s;
+#ifdef MEXCE_64
+        s.use_rip_constants = true;
+#endif
 
         // a special case, that the exponent is 0.5
         if (v_d == 0.5) {
@@ -956,8 +1064,15 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         }
 
 
-        uint8_t* cc = push_intermediate_code(ev, s.s.str());
-        auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2-matched, 0, s.s.str().size(), cc, nullptr);
+        constant_pool_info pool;
+        std::string code;
+        finalize_stream_into(s, code, pool);
+        uint8_t* cc = push_intermediate_code(ev, code);
+        auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2-matched, 0, code.size(), cc, nullptr);
+#ifdef MEXCE_64
+        f_opt->rip_constants = std::move(pool.constants);
+        f_opt->rip_fixups = std::move(pool.fixups);
+#endif
 
         if (matched) {
             f_opt->args.resize(1);
@@ -1373,15 +1488,29 @@ void emit_apply_op_with_constant(evaluator* ev, impl::mexce_charstream& s, doubl
     auto constant = make_intermediate_constant(ev, v);
 
 #ifdef MEXCE_64
+    if (s.use_rip_constants) {
+        size_t constant_index = s.register_constant(constant->value);
+        uint8_t modrm = static_cast<uint8_t>((OP & 0x38U) | 0x05U);
+
+        // Constants are always emitted as 64-bit floating point values.
+        assert(constant->numeric_data_type == M64FP);
+        s < 0xdc < modrm;                   // f[OP]  qword ptr [rip+disp32]
+        s.emit_rip_disp32(constant_index);
+        return;
+    }
+
     s < 0x48 < 0xb8;                        // mov            rax, qword ptr
+    s << constant->address;                 //                   [the address]
+    assert(constant->numeric_data_type == M64FP);
+    s < 0xdc < OP;                          // f[OP]  qword ptr [rax]
 #else
     s < 0xb8;                               // mov            eax, dword ptr
-#endif
     s << constant->address;                 //                   [the address]
 
     // Constants are always emitted as 64-bit floating point values.
     assert(constant->numeric_data_type == M64FP);
-    s < 0xdc < OP;                          // f[OP]  qword ptr [eax/rax]
+    s < 0xdc < OP;                          // f[OP]  qword ptr [eax]
+#endif
 }
 
 
@@ -1451,6 +1580,13 @@ void emit_load_constant(evaluator* ev, impl::mexce_charstream& s, double v)
     auto sc = make_intermediate_constant(ev, v);
 
 #ifdef MEXCE_64
+    if (s.use_rip_constants) {
+        size_t constant_index = s.register_constant(sc->value);
+        s < 0xdd < 0x05;                        // fld            [rip+disp32]
+        s.emit_rip_disp32(constant_index);
+        return;
+    }
+
     s < 0x48 < 0xb8;                            // mov            rax, qword ptr
     s << (void*)(sc->address);
     s < 0xdd < 0x00;                            // fld            [rax]
@@ -1498,9 +1634,16 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             case Element_type::CCONST: {
                 auto tn = it->c;
 #ifdef MEXCE_64
-                code_buffer << (uint16_t)0xb848;
-                code_buffer << (void*)tn->address;
-                code_buffer < 0xdd < 0x00;
+                if (code_buffer.use_rip_constants) {
+                    size_t constant_index = code_buffer.register_constant(tn->value);
+                    code_buffer < 0xdd < 0x05;
+                    code_buffer.emit_rip_disp32(constant_index);
+                }
+                else {
+                    code_buffer << (uint16_t)0xb848;
+                    code_buffer << (void*)tn->address;
+                    code_buffer < 0xdd < 0x00;
+                }
 #else
                 code_buffer < 0xdd < 0x05;
                 code_buffer << (void*)(tn->address);
@@ -1509,7 +1652,23 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             }
             case Element_type::CFUNC: {
                 auto tf = it->f;
+#ifdef MEXCE_64
+                size_t base_offset = static_cast<size_t>(code_buffer.s.tellp());
                 code_buffer.s.write(tf->code.data(), tf->code.size());
+                if (code_buffer.use_rip_constants && !tf->rip_fixups.empty()) {
+                    std::vector<size_t> index_map(tf->rip_constants.size());
+                    for (size_t i = 0; i < tf->rip_constants.size(); ++i) {
+                        index_map[i] = code_buffer.register_constant(tf->rip_constants[i]);
+                    }
+                    for (const auto& fixup : tf->rip_fixups) {
+                        size_t adjusted_offset = base_offset + fixup.first;
+                        size_t mapped_index = index_map[fixup.second];
+                        code_buffer.rip_fixups.emplace_back(adjusted_offset, mapped_index);
+                    }
+                }
+#else
+                code_buffer.s.write(tf->code.data(), tf->code.size());
+#endif
                 break;
             }
         }
@@ -1766,6 +1925,9 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     }
 
     mexce_charstream s;
+#ifdef MEXCE_64
+    s.use_rip_constants = true;
+#endif
 
     if (fclass == 1) {
         bool have_value = false;
@@ -1886,8 +2048,15 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     string new_name = (fclass == 1) ? "add_sub_opt" : "mul_div_opt";
 
-    uint8_t* cc = push_intermediate_code(ev, s.s.str());
-    auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.s.str().size(), cc, nullptr);
+    constant_pool_info pool;
+    std::string code;
+    finalize_stream_into(s, code, pool);
+    uint8_t* cc = push_intermediate_code(ev, code);
+    auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, code.size(), cc, nullptr);
+#ifdef MEXCE_64
+    f_opt->rip_constants = std::move(pool.constants);
+    f_opt->rip_fixups = std::move(pool.fixups);
+#endif
 
     *it = Element(f_opt);
 }
@@ -2629,6 +2798,9 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     };
 
     mexce_charstream code_buffer;
+#ifdef MEXCE_64
+    code_buffer.use_rip_constants = true;
+#endif
 
 #ifdef MEXCE_64
     // On x64 we are using rax to fetch/store addresses
@@ -2645,10 +2817,14 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 #endif
 
     // copy the return sequence
+    size_t return_sequence_offset = static_cast<size_t>(code_buffer.s.tellp());
     code_buffer.s.write((const char*)return_sequence, sizeof(return_sequence));
 
-    auto code = code_buffer.s.str();
-    m_buffer_size = code.size();
+    constant_pool_info pool;
+    std::string code;
+    finalize_stream_into(code_buffer, code, pool);
+    auto executable_code = materialize_code_with_constants(code, pool);
+    m_buffer_size = executable_code.size();
     auto buffer = get_executable_buffer(m_buffer_size);
 
 #ifdef _WIN32
@@ -2661,14 +2837,14 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     }
 #endif
 
-    memcpy(buffer, &code[0], m_buffer_size);
+    std::memcpy(buffer, executable_code.data(), m_buffer_size);
 
 #ifdef MEXCE_64
-    // load the intermediate variable's address to rax
-    *((uint64_t*)(buffer+code.size()-16)) = (uint64_t)&m_x64_return_var;
+    size_t return_placeholder = return_sequence_offset + 2;
+    *reinterpret_cast<uint64_t*>(buffer + return_placeholder) = reinterpret_cast<uint64_t>(&m_x64_return_var);
 #endif
 
-    evaluate_fptr = lock_executable_buffer(buffer, code.size());
+    evaluate_fptr = lock_executable_buffer(buffer, executable_code.size());
 }
 
 } // mexce
