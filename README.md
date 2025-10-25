@@ -147,7 +147,7 @@ Compiles and executes an expression for a single use without replacing the defau
 | `sfc(x)` | Returns the significand (fractional part) of `x`. |
 
 ### Configuration
-*   **`MEXCE_ACCURACY`:** Define this macro before including `mexce.h` to enable higher-precision polynomial refinements for `sin()` and `cos()`, trading a small runtime cost for improved accuracy.
+*   **`MEXCE_ACCURACY`:** Optionally define this macro to an integer before including `mexce.h` to request deeper Chebyshev/minimax ladders for `sin()` and `cos()`. By default mexce evaluates the degree-10 minimax series, striking a balance between latency and sub-ULP accuracy; lowering the value moves toward smaller ladders, while larger values (clamped at the degree-15 set) unlock additional terms for even tighter error bounds at the cost of a few extra fused multiply-adds.
 
 ## Performance Analysis
 
