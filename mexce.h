@@ -1365,33 +1365,23 @@ struct elist_comparison {
 };
 
 
-template <uint8_t OP, typename T>
-void emit_apply_op_with_value(impl::mexce_charstream& s, const T& v)
+template <uint8_t OP>
+void emit_apply_op_with_constant(evaluator* ev, impl::mexce_charstream& s, double v)
 {
     using namespace impl;
+
+    auto constant = make_intermediate_constant(ev, v);
+
 #ifdef MEXCE_64
     s < 0x48 < 0xb8;                        // mov            rax, qword ptr
 #else
     s < 0xb8;                               // mov            eax, dword ptr
 #endif
-    s << v->address;                        //                   [the address]
+    s << constant->address;                 //                   [the address]
 
-    // the FPU has limited support for 64-bit integers and M64INT cannot be supported here
-    assert(v->numeric_data_type != M64INT);
-
-    switch(v->numeric_data_type) {
-        case M16INT: s < 0xde < OP; break;  // f[OP]  word  ptr [eax/rax]
-        case M32INT: s < 0xda < OP; break;  // f[OP]  dword ptr [eax/rax]
-        case M32FP:  s < 0xd8 < OP; break;  // f[OP]  dword ptr [eax/rax]
-        case M64FP:  s < 0xdc < OP; break;  // f[OP]  qword ptr [eax/rax]
-    }
-}
-
-
-template <uint8_t OP>
-void emit_apply_op_with_constant(evaluator* ev, impl::mexce_charstream& s, double v)
-{
-    emit_apply_op_with_value<OP>(s, impl::make_intermediate_constant(ev, v));
+    // Constants are always emitted as 64-bit floating point values.
+    assert(constant->numeric_data_type == M64FP);
+    s < 0xdc < OP;                          // f[OP]  qword ptr [eax/rax]
 }
 
 
@@ -1798,33 +1788,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 ensure_constant();
             }
 
-            bool handled_direct = false;
-            if (have_value && abs(factor) == 1 && term.chunk.size() == 1) {
-                auto &elem = term.chunk.front();
-                if (elem.type == Element_type::CCONST && elem.c->numeric_data_type != M64INT) {
-                    if (factor == 1) {
-                        emit_apply_op_with_value<0x00>(s, elem.c);
-                    }
-                    else {
-                        emit_apply_op_with_value<0x20>(s, elem.c);
-                    }
-                    handled_direct = true;
-                }
-                else if (elem.type == Element_type::CVAR && elem.v->numeric_data_type != M64INT) {
-                    if (factor == 1) {
-                        emit_apply_op_with_value<0x00>(s, elem.v);
-                    }
-                    else {
-                        emit_apply_op_with_value<0x20>(s, elem.v);
-                    }
-                    handled_direct = true;
-                }
-            }
-
-            if (handled_direct) {
-                continue;
-            }
-
             compile_elist(s, term.chunk.begin(), term.chunk.end());
 
             if (factor == 1) {
@@ -1882,33 +1845,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             if (have_value) {
                 ensure_constant();
-            }
-
-            bool handled_direct = false;
-            if (have_value && abs(factor) == 1 && term.chunk.size() == 1) {
-                auto &elem = term.chunk.front();
-                if (elem.type == Element_type::CCONST && elem.c->numeric_data_type != M64INT) {
-                    if (factor == 1) {
-                        emit_apply_op_with_value<0x08>(s, elem.c);
-                    }
-                    else {
-                        emit_apply_op_with_value<0x30>(s, elem.c);
-                    }
-                    handled_direct = true;
-                }
-                else if (elem.type == Element_type::CVAR && elem.v->numeric_data_type != M64INT) {
-                    if (factor == 1) {
-                        emit_apply_op_with_value<0x08>(s, elem.v);
-                    }
-                    else {
-                        emit_apply_op_with_value<0x30>(s, elem.v);
-                    }
-                    handled_direct = true;
-                }
-            }
-
-            if (handled_direct) {
-                continue;
             }
 
             compile_elist(s, term.chunk.begin(), term.chunk.end());
