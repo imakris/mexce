@@ -2259,6 +2259,37 @@ void evaluator::set_expression(std::string e)
     int state = 0;
     size_t i = 0;
     int function_parentheses = 0;
+    auto emit_closing_parenthesis = [&](size_t position) {
+        if (bdarray.back().first > 0) {
+            tokens.push_back(Token(RIGHT_PARENTHESIS, position, ')'));
+            bdarray.back().first--;
+            return;
+        }
+
+        if (function_parentheses <= 0) {
+            throw (mpe("\")\" not expected", position));
+        }
+        if (bdarray.back().second != 1) {
+            throw (mpe("Expected more arguments", position));
+        }
+
+        tokens.push_back(Token(FUNCTION_RIGHT_PARENTHESIS, position, ')'));
+        function_parentheses--;
+        bdarray.pop_back();
+    };
+
+    auto emit_argument_separator = [&](size_t position) {
+        if (bdarray.back().first != 0) {
+            throw (mpe(R"MSG(Expected a ")")MSG", position));
+        }
+        if (bdarray.back().second-- < 2) {
+            throw (mpe("Don\'t expect any arguments here", position));
+        }
+
+        tokens.push_back(Token(COMMA, position, ','));
+        state = 0;
+    };
+
     for (; i < e.length(); i++) {
         switch(state) {
             case 0: //start of expression
@@ -2327,19 +2358,7 @@ void evaluator::set_expression(std::string e)
                 }
                 if (e[i] == ')') {
                     tokens.push_back(temp);
-                    if (bdarray.back().first > 0) {
-                        tokens.push_back(Token(RIGHT_PARENTHESIS, i, ')'));
-                        bdarray.back().first--;
-                    }
-                    else {
-                        if (function_parentheses <= 0)
-                            throw (mpe("\")\" not expected", i));
-                        if (bdarray.back().second != 1)
-                            throw (mpe("Expected more arguments", i));
-                        tokens.push_back(Token(FUNCTION_RIGHT_PARENTHESIS, i, ')'));
-                        function_parentheses--;
-                        bdarray.pop_back();
-                    }
+                    emit_closing_parenthesis(i);
                     state = 5;
                     break;
                 }
@@ -2351,12 +2370,7 @@ void evaluator::set_expression(std::string e)
                 }
                 if (e[i] == ',') {
                     tokens.push_back(temp);
-                    if (bdarray.back().first != 0)
-                        throw (mpe("Expected a \")\"", i));
-                    if (bdarray.back().second-- < 2)
-                        throw (mpe("Don\'t expect any arguments here", i));
-                    tokens.push_back(Token(COMMA, i, ','));
-                    state = 0;
+                    emit_argument_separator(i);
                     break;
                 }
                 if (e[i] == 'e' && state < 7) {
@@ -2415,21 +2429,7 @@ void evaluator::set_expression(std::string e)
                         throw (mpe(string(temp.content) +
                             " is not a known constant or variable name", i));
                     tokens.push_back(temp);
-                    if (bdarray.back().first > 0) {
-                        tokens.push_back(Token(RIGHT_PARENTHESIS, i, ')'));
-                        bdarray.back().first--;
-                    }
-                    else
-                    if (function_parentheses > 0) {
-                        if (bdarray.back().second != 1)
-                            throw (mpe("Expected more arguments", i));
-                        tokens.push_back(Token(FUNCTION_RIGHT_PARENTHESIS, i, ')'));
-                        function_parentheses--;
-                        bdarray.pop_back();
-                    }
-                    else {
-                        throw (mpe("\")\" not expected", i));
-                    }
+                    emit_closing_parenthesis(i);
                     state = 5;
                     break;
                 }
@@ -2461,12 +2461,7 @@ void evaluator::set_expression(std::string e)
                         throw (mpe(string(temp.content)+" is not a "
                             "known constant or variable name", i));
                     tokens.push_back(temp);
-                    if (bdarray.back().first != 0)
-                        throw (mpe("Expected a \")\"", i));
-                    if (bdarray.back().second-- < 2)
-                        throw (mpe("Don\'t expect any arguments here", i));
-                    tokens.push_back(Token(COMMA, i, ','));
-                    state = 0;
+                    emit_argument_separator(i);
                     break;
                 }
                 throw (mpe((string("\"")+e[i])+"\" not expected", i));
@@ -2479,31 +2474,12 @@ void evaluator::set_expression(std::string e)
                     break;
                 }
                 if (e[i] == ')') {
-                    if (bdarray.back().first > 0) {
-                        tokens.push_back(Token(RIGHT_PARENTHESIS, i, ')'));
-                        bdarray.back().first--;
-                    }
-                    else
-                    if (function_parentheses > 0) {
-                        if (bdarray.back().second != 1)
-                            throw (mpe("Expected more arguments", i));
-                        tokens.push_back(Token(FUNCTION_RIGHT_PARENTHESIS, i, ')'));
-                        function_parentheses--;
-                        bdarray.pop_back();
-                    }
-                    else {
-                        throw (mpe("\")\" not expected", i));
-                    }
+                    emit_closing_parenthesis(i);
                     state = 5;
                     break;
                 }
                 if (e[i] == ',') {
-                    if (bdarray.back().first != 0)
-                        throw (mpe("Expected a \")\"", i));
-                    if (bdarray.back().second-- < 2)
-                        throw (mpe("Don\'t expect any arguments here", i));
-                    tokens.push_back(Token(COMMA, i, ','));
-                    state = 0;
+                    emit_argument_separator(i);
                     break;
                 }
                 throw (mpe((string("\"")+e[i])+"\" not expected", i));
