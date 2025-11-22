@@ -1527,9 +1527,6 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
         if (current_depth > 8) {
             throw std::overflow_error("Expression too complex for x87 FPU (stack overflow)");
         }
-        if (current_depth < 0) {
-            throw std::runtime_error("Internal error: FPU stack underflow detected");
-        }
     }
 }
 
