@@ -690,6 +690,26 @@ void test_executable_buffer_failure_paths(TestSuite& suite)
 }
 #endif
 
+void test_fpu_stack_overflow(TestSuite& suite) {
+    // The x87 FPU has a strict stack limit of 8 registers.
+    // Construct an expression that requires 9 values on the stack simultaneously.
+    // Structure: max(val, max(val, max(val, ... ))) nested 8 times = 9 operands
+    mexce::evaluator eval;
+    double val = 10.0;
+    eval.bind(val, "val");
+
+    std::string expr = "val";
+    for (int i = 0; i < 8; ++i) {
+        expr = "max(val, " + expr + ")";
+    }
+
+    suite.expect_throw<std::overflow_error>(
+        "fpu_stack_overflow_depth_9",
+        [&] { eval.set_expression(expr); },
+        "Expression too complex for x87 FPU (stack overflow)"
+    );
+}
+
 } // namespace
 
 int main() {
@@ -717,6 +737,7 @@ int main() {
 #ifdef __linux__
     test_executable_buffer_failure_paths(suite);
 #endif
+    test_fpu_stack_overflow(suite);
 
     if (!suite.failures.empty()) {
         std::cerr << "mexce unit tests failed (" << suite.failures.size() << ")" << std::endl;
