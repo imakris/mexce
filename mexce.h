@@ -113,6 +113,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cinttypes>
+#include <cstdio>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -199,6 +200,10 @@ public:
     evaluator();
     ~evaluator();
 
+    // Prevent accidental double-free of executable memory buffer (Rule of Three)
+    evaluator(const evaluator&) = delete;
+    evaluator& operator=(const evaluator&) = delete;
+
     template <typename T, typename ...Args>
     void bind(T& referenced_variable, const std::string& variable_name, Args&... args);
 
@@ -227,10 +232,6 @@ private:
     uint64_t                m_next_element_id           = 0;
 
     double                (*evaluate_fptr)()            = nullptr;
-
-#ifdef MEXCE_64
-    volatile double         m_x64_return_var;
-#endif
 
     void compile_and_finalize_elist(impl::elist_const_it_t first, impl::elist_const_it_t last);
 
@@ -386,11 +387,9 @@ string double_to_hex( double v )
     static_assert(sizeof(u64) == sizeof(v), "double and uint64_t size mismatch");
     memcpy(&u64, &v, sizeof(v));
 
-    stringstream stream;
-    stream << "0x"
-        << std::setfill ('0') << std::setw(sizeof(u64)*2)
-        << std::hex << u64;
-    return stream.str();
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "0x%016" PRIx64, u64);
+    return string(buf);
 }
 
 
@@ -490,18 +489,24 @@ struct Element {
 
 
 
-struct mexce_charstream { stringstream s; };
+struct mexce_charstream {
+    vector<uint8_t> buf;
+    string str() const { return string(buf.begin(), buf.end()); }
+    void write(const char* data, size_t n) {
+        buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(data), reinterpret_cast<const uint8_t*>(data) + n);
+    }
+};
 
 template<typename T>
 mexce_charstream& operator << (mexce_charstream &s, T data) {
-    s.s.write((char*)&data, sizeof(T));
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&data);
+    s.buf.insert(s.buf.end(), p, p + sizeof(T));
     return s;
 }
 
 inline
 mexce_charstream& operator < (mexce_charstream &s, int v) {
-    char ch = (char)v;
-    s.s.write(&ch, 1);
+    s.buf.push_back(static_cast<uint8_t>(v));
     return s;
 }
 
@@ -956,8 +961,8 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         }
 
 
-        uint8_t* cc = push_intermediate_code(ev, s.s.str());
-        auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2-matched, 0, s.s.str().size(), cc, nullptr);
+        uint8_t* cc = push_intermediate_code(ev, s.str());
+        auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2-matched, 0, s.buf.size(), cc, nullptr);
 
         if (matched) {
             f_opt->args.resize(1);
@@ -1509,7 +1514,7 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             }
             case Element_type::CFUNC: {
                 auto tf = it->f;
-                code_buffer.s.write(tf->code.data(), tf->code.size());
+                code_buffer.write(tf->code.data(), tf->code.size());
                 break;
             }
         }
@@ -1886,8 +1891,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     string new_name = (fclass == 1) ? "add_sub_opt" : "mul_div_opt";
 
-    uint8_t* cc = push_intermediate_code(ev, s.s.str());
-    auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.s.str().size(), cc, nullptr);
+    uint8_t* cc = push_intermediate_code(ev, s.str());
+    auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.buf.size(), cc, nullptr);
 
     *it = Element(f_opt);
 }
@@ -2611,21 +2616,16 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
         // st(0), where it is expected to be. There is nothing further to do there
         // other than return.
         // In x64 however, the result is expected to be in xmm0, thus we should
-        // move it there and pop the FPU stack. To achieve that, we  store the
-        // result to memory and then load it to xmm0, which requires a temporary.
-        // This code is used at the very end (see below), but its size must be known here.
+        // move it there and pop the FPU stack. We use the stack as a temporary
+        // to avoid depending on any member variable address (move-safe).
 
-        //  load return address to rax (last 8 bytes - address is uninitialized)
-        0x48, 0xb8, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, 0xcd, // mov         rax, cdcdcdcdcdcdcdcdh
-
-        // store the return value
-        0xdd, 0x18,                                                 // fstp        qword ptr [rax]
-
-        // load from the return value to xmm0
-        0xf3, 0x0f, 0x7e, 0x00,                                     // movq        xmm0, mmword ptr [rax]
-        0x58,                                                       // pop rax
+        0x48, 0x83, 0xec, 0x08,                                     // sub  rsp, 8
+        0xdd, 0x1c, 0x24,                                           // fstp qword ptr [rsp]
+        0xf2, 0x0f, 0x10, 0x04, 0x24,                               // movsd xmm0, qword ptr [rsp]
+        0x48, 0x83, 0xc4, 0x08,                                     // add  rsp, 8
+        0x58,                                                       // pop  rax
 #endif
-        0xc3                                                        // return
+        0xc3                                                        // ret
     };
 
     mexce_charstream code_buffer;
@@ -2645,10 +2645,9 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 #endif
 
     // copy the return sequence
-    code_buffer.s.write((const char*)return_sequence, sizeof(return_sequence));
+    code_buffer.buf.insert(code_buffer.buf.end(), return_sequence, return_sequence + sizeof(return_sequence));
 
-    auto code = code_buffer.s.str();
-    m_buffer_size = code.size();
+    m_buffer_size = code_buffer.buf.size();
     auto buffer = get_executable_buffer(m_buffer_size);
 
 #ifdef _WIN32
@@ -2661,14 +2660,9 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     }
 #endif
 
-    memcpy(buffer, &code[0], m_buffer_size);
+    memcpy(buffer, code_buffer.buf.data(), m_buffer_size);
 
-#ifdef MEXCE_64
-    // load the intermediate variable's address to rax
-    *((uint64_t*)(buffer+code.size()-16)) = (uint64_t)&m_x64_return_var;
-#endif
-
-    evaluate_fptr = lock_executable_buffer(buffer, code.size());
+    evaluate_fptr = lock_executable_buffer(buffer, m_buffer_size);
 }
 
 } // mexce
