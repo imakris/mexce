@@ -1,5 +1,6 @@
 # Build artifacts
 benchmark
+test_overflow
 *.o
 
 # CMake generated files
