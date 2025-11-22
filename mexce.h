@@ -1415,15 +1415,15 @@ struct elist_comparison {
             }
             switch (ita->type) {
                 case Element_type::CCONST:
-                    // Compare value
-                    if (std::abs(ita->c->value - itb->c->value) > 1e-15) {
+                    // Compare value exactly (no epsilon)
+                    if (ita->c->value != itb->c->value) {
                         return ita->c->value < itb->c->value;
                     }
                     break;
                 case Element_type::CVAR:
-                    // Compare address
-                    if (ita->v->address != itb->v->address) {
-                        return ita->v->address < itb->v->address;
+                    // Compare name for stable ordering
+                    if (ita->v->name != itb->v->name) {
+                        return ita->v->name < itb->v->name;
                     }
                     break;
                 case Element_type::CFUNC:
