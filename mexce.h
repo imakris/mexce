@@ -191,6 +191,7 @@ namespace impl {
     shared_ptr<Function> make_function(evaluator* ev, const string& name);
     void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
     void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
+    pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it);
     string elist_to_string(const elist_t& elist);
     void run_cse(evaluator* ev, elist_t& elist);
 }
@@ -251,6 +252,10 @@ private:
 
     // Map FunctionID -> { Coefficient, Kernel }
     std::map<uint64_t, std::pair<double, impl::elist_t>> m_linear_terms;
+
+    // Map FunctionID -> { Kernel, Exponent }
+    // Used to optimize (a^b)^c -> a^(b*c)
+    std::map<uint64_t, std::pair<impl::elist_t, double>> m_power_terms;
 
     double                (*evaluate_fptr)()            = nullptr;
 
@@ -941,7 +946,30 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
     auto f = it->f;
 
-    // Arg 0 is Exponent (top of stack), Arg 1 is Base (below top) in list
+    // Arg 0 is Exponent (top of stack), Arg 1 is Base (below top) in list.
+    // Nested power folding: (a^b)^c -> a^(b*c) for integer exponents.
+    if (f->args[0]->type == Element_type::CCONST && f->args[1]->type == Element_type::CFUNC) {
+        double current_exp = f->args[0]->c->value;
+        uint64_t base_id = f->args[1]->f->id;
+        auto map_it = ev->m_power_terms.find(base_id);
+        if (map_it != ev->m_power_terms.end() && !map_it->second.first.empty()) {
+            double prev_exp = map_it->second.second;
+            double r_current = round(current_exp);
+            double r_prev = round(prev_exp);
+            if (abs(current_exp - r_current) < 1e-9 && abs(prev_exp - r_prev) < 1e-9) {
+                double new_exp = prev_exp * current_exp;
+                *f->args[0] = Element(make_intermediate_constant(ev, new_exp));
+
+                auto base_it = f->args[1];
+                for (const auto& e : map_it->second.first) {
+                    elist->insert(base_it, e);
+                }
+
+                f->args[1] = std::prev(base_it);
+                elist->erase(base_it);
+            }
+        }
+    }
     if (f->args[0]->type == Element_type::CCONST) {
         auto v = f->args[0]->c;
 
@@ -1019,6 +1047,9 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             auto f_opt = make_shared<Function>(ev->m_next_element_id++, optimized_name, 0, 0, final_s.buf.size(), cc, nullptr);
             f_opt->debug_desc = debug_desc;
             f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
+
+            // Side-channel recording: keep this power term's kernel/exponent so parents can fold (a^b)^c -> a^(b*c).
+            ev->m_power_terms[f_opt->id] = std::make_pair(elist_t(base_chunk_range.first, base_chunk_range.second), v_d);
 
             // Remove absorbed elements
             elist->erase(base_chunk_range.first, base_chunk_range.second); // Base
@@ -1421,31 +1452,42 @@ pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it)
 
 struct elist_comparison {
     bool operator()(const elist_t& a, const elist_t& b) const {
-
-        // empty element lists cannot exist
-        assert(a.size() && b.size());
-
-        // if their size differs, we use that for comparison
         if (a.size() != b.size()) {
-            return a.size() > b.size();
+            return a.size() < b.size();
         }
-
-        // they are the same size, thus we need to traverse both
         auto ita = a.begin();
         auto itb = b.begin();
-        for (; ita != a.end(); ita++, itb++) {
-            // start by comparing element types
+        while (ita != a.end()) {
             if (ita->type != itb->type) {
-                return ita->type > itb->type;
+                return ita->type < itb->type;
             }
-
-            // Compare deterministic IDs.
-            if (ita->id != itb->id) {
-                return ita->id < itb->id;
+            switch (ita->type) {
+                case Element_type::CCONST:
+                    // Compare value
+                    if (std::abs(ita->c->value - itb->c->value) > 1e-15) {
+                        return ita->c->value < itb->c->value;
+                    }
+                    break;
+                case Element_type::CVAR:
+                    // Compare address
+                    if (ita->v->address != itb->v->address) {
+                        return ita->v->address < itb->v->address;
+                    }
+                    break;
+                case Element_type::CFUNC:
+                    // Compare Name AND Bytecode
+                    if (ita->f->name != itb->f->name) {
+                        return ita->f->name < itb->f->name;
+                    }
+                    if (ita->f->code != itb->f->code) {
+                        return ita->f->code < itb->f->code;
+                    }
+                    break;
             }
+            ++ita;
+            ++itb;
         }
-
-        return false; // they are equal
+        return false;
     }
 };
 
@@ -2525,6 +2567,7 @@ void evaluator::set_expression(std::string e)
     m_elist.clear();
     m_cse_temps.clear(); // Clear previous CSE temps
     m_linear_terms.clear();
+    m_power_terms.clear();
 
     if (evaluate_fptr) {
         free_executable_buffer(evaluate_fptr, m_buffer_size);
