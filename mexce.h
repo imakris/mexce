@@ -1404,14 +1404,16 @@ pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it)
 
 struct elist_comparison {
     bool operator()(const elist_t& a, const elist_t& b) const {
+        // Evaluate LARGER chunks first to minimize FPU stack register pressure
         if (a.size() != b.size()) {
-            return a.size() < b.size();
+            return a.size() > b.size();
         }
         auto ita = a.begin();
         auto itb = b.begin();
         while (ita != a.end()) {
+            // Evaluate COMPLEX types (CFUNC=2) before SIMPLE types (CVAR=1, CCONST=0)
             if (ita->type != itb->type) {
-                return ita->type < itb->type;
+                return ita->type > itb->type;
             }
             switch (ita->type) {
                 case Element_type::CCONST:
