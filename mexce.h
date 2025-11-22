@@ -1864,19 +1864,37 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
                 if (it_linear != ev->m_linear_terms.end()) {
                     double coeff = it_linear->second.first;
+                    bool should_expand = false;
 
-                    if (fclass == 1) {
-                        // ADD/SUB: "2*x" becomes "x" with factor 2.0
-                        double combined_factor = contribution * coeff;
-                        terms.push_back({ it_linear->second.second, combined_factor });
-                        expanded = true;
+                    // Optimization Strategy:
+                    // 1. Always expand for MUL/DIV parent (chain multiplication)
+                    // 2. For ADD/SUB parent, only expand (distribute) if:
+                    //    a) The kernel is a single element (simple term)
+                    //    b) OR the combined factor simplifies to +/- 1.0
+                    //    Otherwise, keeping it factored is faster: (a+b+c)/k vs a/k+b/k+c/k
+                    if (fclass == 2) {
+                        should_expand = true;
+                    } else { // fclass == 1 (Add/Sub)
+                        double combined = contribution * coeff;
+                        if (it_linear->second.second.size() <= 1 || abs(abs(combined) - 1.0) < 1e-9) {
+                            should_expand = true;
+                        }
                     }
-                    else {
-                        // MUL/DIV: "2*x" becomes "x" (factor 1), and we absorb "2" into accumulator
-                        ac[index] *= static_cast<long double>(coeff);
 
-                        terms.push_back({ it_linear->second.second, contribution });
-                        expanded = true;
+                    if (should_expand) {
+                        if (fclass == 1) {
+                            // ADD/SUB: "2*x" becomes "x" with factor 2.0
+                            double combined_factor = contribution * coeff;
+                            terms.push_back({ it_linear->second.second, combined_factor });
+                            expanded = true;
+                        }
+                        else {
+                            // MUL/DIV: "2*x" becomes "x" (factor 1), and we absorb "2" into accumulator
+                            ac[index] *= static_cast<long double>(coeff);
+
+                            terms.push_back({ it_linear->second.second, contribution });
+                            expanded = true;
+                        }
                     }
                 }
             }
