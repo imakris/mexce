@@ -191,6 +191,7 @@ namespace impl {
     shared_ptr<Function> make_function(evaluator* ev, const string& name);
     void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
     void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
+    pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it);
     string elist_to_string(const elist_t& elist);
     void run_cse(evaluator* ev, elist_t& elist);
 }
@@ -248,6 +249,13 @@ private:
     impl::constant_map_t    m_constants;
     uint64_t                m_next_element_id           = 0;
     std::list<double>       m_cse_temps;               // Storage for common subexpressions
+
+    // Map FunctionID -> { Coefficient, Kernel }
+    std::map<uint64_t, std::pair<double, impl::elist_t>> m_linear_terms;
+
+    // Map FunctionID -> { Kernel, Exponent }
+    // Used to optimize (a^b)^c -> a^(b*c)
+    std::map<uint64_t, std::pair<impl::elist_t, double>> m_power_terms;
 
     double                (*evaluate_fptr)()            = nullptr;
 
@@ -938,7 +946,30 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
     auto f = it->f;
 
-    // Arg 0 is Exponent (top of stack), Arg 1 is Base (below top) in list
+    // Arg 0 is Exponent (top of stack), Arg 1 is Base (below top) in list.
+    // Nested power folding: (a^b)^c -> a^(b*c) for integer exponents.
+    if (f->args[0]->type == Element_type::CCONST && f->args[1]->type == Element_type::CFUNC) {
+        double current_exp = f->args[0]->c->value;
+        uint64_t base_id = f->args[1]->f->id;
+        auto map_it = ev->m_power_terms.find(base_id);
+        if (map_it != ev->m_power_terms.end() && !map_it->second.first.empty()) {
+            double prev_exp = map_it->second.second;
+            double r_current = round(current_exp);
+            double r_prev = round(prev_exp);
+            if (abs(current_exp - r_current) < 1e-9 && abs(prev_exp - r_prev) < 1e-9) {
+                double new_exp = prev_exp * current_exp;
+                *f->args[0] = Element(make_intermediate_constant(ev, new_exp));
+
+                auto base_it = f->args[1];
+                for (const auto& e : map_it->second.first) {
+                    elist->insert(base_it, e);
+                }
+
+                f->args[1] = std::prev(base_it);
+                elist->erase(base_it);
+            }
+        }
+    }
     if (f->args[0]->type == Element_type::CCONST) {
         auto v = f->args[0]->c;
 
@@ -1016,6 +1047,9 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             auto f_opt = make_shared<Function>(ev->m_next_element_id++, optimized_name, 0, 0, final_s.buf.size(), cc, nullptr);
             f_opt->debug_desc = debug_desc;
             f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
+
+            // Side-channel recording: keep this power term's kernel/exponent so parents can fold (a^b)^c -> a^(b*c).
+            ev->m_power_terms[f_opt->id] = std::make_pair(elist_t(base_chunk_range.first, base_chunk_range.second), v_d);
 
             // Remove absorbed elements
             elist->erase(base_chunk_range.first, base_chunk_range.second); // Base
@@ -1418,31 +1452,44 @@ pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it)
 
 struct elist_comparison {
     bool operator()(const elist_t& a, const elist_t& b) const {
-
-        // empty element lists cannot exist
-        assert(a.size() && b.size());
-
-        // if their size differs, we use that for comparison
+        // Evaluate LARGER chunks first to minimize FPU stack register pressure
         if (a.size() != b.size()) {
             return a.size() > b.size();
         }
-
-        // they are the same size, thus we need to traverse both
         auto ita = a.begin();
         auto itb = b.begin();
-        for (; ita != a.end(); ita++, itb++) {
-            // start by comparing element types
+        while (ita != a.end()) {
+            // Evaluate COMPLEX types (CFUNC=2) before SIMPLE types (CVAR=1, CCONST=0)
             if (ita->type != itb->type) {
                 return ita->type > itb->type;
             }
-
-            // Compare deterministic IDs.
-            if (ita->id != itb->id) {
-                return ita->id < itb->id;
+            switch (ita->type) {
+                case Element_type::CCONST:
+                    // Compare value exactly (no epsilon)
+                    if (ita->c->value != itb->c->value) {
+                        return ita->c->value < itb->c->value;
+                    }
+                    break;
+                case Element_type::CVAR:
+                    // Compare name for stable ordering
+                    if (ita->v->name != itb->v->name) {
+                        return ita->v->name < itb->v->name;
+                    }
+                    break;
+                case Element_type::CFUNC:
+                    // Compare Name AND Bytecode
+                    if (ita->f->name != itb->f->name) {
+                        return ita->f->name < itb->f->name;
+                    }
+                    if (ita->f->code != itb->f->code) {
+                        return ita->f->code < itb->f->code;
+                    }
+                    break;
             }
+            ++ita;
+            ++itb;
         }
-
-        return false; // they are equal
+        return false;
     }
 };
 
@@ -1751,9 +1798,9 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     assert(fclass);
 
     double neutral = fclass == 1 ? 0.0 : 1.0;
-
     bool arg2_inv = (fname == "sub" || fname == "div");
 
+    // Phase 1: Absorption (Flatten nested same-type operators)
     if (f->parent != elist->end() && f->parent->type == Element_type::CFUNC) {
         shared_ptr<Function> pf = f->parent->f;
         auto pname = pf->name;
@@ -1761,89 +1808,108 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         bool parg2_inv = (pname == "sub" || pname == "div");
 
         if (pclass && pclass == fclass) {
-
-            // the function will be absorbed by its parent
-
-            bool parent_inv_op = f->parent_arg_index == 0 && parg2_inv; // arg 0 in postfix, is the second infix argument
-
-            // this is the first infix argument (postfix order is inverse)
+            bool parent_inv_op = f->parent_arg_index == 0 && parg2_inv;
             auto arg1_chunk = get_dependent_chunk(f->args[1]);
-            pf->absorbed[parent_inv_op           ].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
+            pf->absorbed[parent_inv_op].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
             elist->erase(arg1_chunk.first, arg1_chunk.second);
-
-            // the second infix argument
             auto arg0_chunk = get_dependent_chunk(f->args[0]);
             pf->absorbed[parent_inv_op ^ arg2_inv].push_back(elist_t(arg0_chunk.first, arg0_chunk.second));
             elist->erase(arg0_chunk.first, arg0_chunk.second);
-
-            pf->absorbed[ parent_inv_op].insert(pf->absorbed[ parent_inv_op].end(),
-                f->absorbed[0].begin(), f->absorbed[0].end());
-            pf->absorbed[!parent_inv_op].insert(pf->absorbed[!parent_inv_op].end(),
-                f->absorbed[1].begin(), f->absorbed[1].end());
-
+            pf->absorbed[parent_inv_op].insert(pf->absorbed[parent_inv_op].end(), f->absorbed[0].begin(), f->absorbed[0].end());
+            pf->absorbed[!parent_inv_op].insert(pf->absorbed[!parent_inv_op].end(), f->absorbed[1].begin(), f->absorbed[1].end());
             pf->force_not_constant = true;
-
             *it = Element(make_intermediate_constant(ev, neutral));
-
             return;
         }
     }
 
-    // end of chain - simplify and generate code
-
-    // accumulate own args
-
-    // first infix argument
+    // Phase 2: Collection & Constant Reduction
     auto arg1_chunk = get_dependent_chunk(f->args[1]);
-    f->absorbed[0       ].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
+    f->absorbed[0].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
     elist->erase(arg1_chunk.first, arg1_chunk.second);
-
-    // second infix argument
     auto arg0_chunk = get_dependent_chunk(f->args[0]);
     f->absorbed[arg2_inv].push_back(elist_t(arg0_chunk.first, arg0_chunk.second));
     elist->erase(arg0_chunk.first, arg0_chunk.second);
-
-    // at this point, this is a function of 0 arguments, all of them were absorbed
     f->args.clear();
 
-    // reduce constants with extended precision
     long double ac[2] = {neutral, neutral};
     for (int i = 0; i < 2; i++) {
         for (auto e = f->absorbed[i].begin(); e != f->absorbed[i].end();) {
             auto next_e = next(e);
             if (e->size() == 1 && e->front().type == Element_type::CCONST) {
                 auto v = e->front().c;
-                if (fclass == 1) {
-                    ac[i] += static_cast<long double>(v->value);
-                }
-                else {
-                    ac[i] *= static_cast<long double>(v->value);
-                }
+                if (fclass == 1) ac[i] += static_cast<long double>(v->value);
+                else             ac[i] *= static_cast<long double>(v->value);
                 f->absorbed[i].erase(e);
             }
             e = next_e;
         }
     }
-    long double ac_final_ld = (fclass == 1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
-    double ac_final = static_cast<double>(ac_final_ld);
 
+    // Phase 3: Term Analysis & Linearization
     struct absorbed_term {
         elist_t chunk;
-        int     factor;
+        double  factor;
     };
-
     vector<absorbed_term> terms;
     terms.reserve(f->absorbed[0].size() + f->absorbed[1].size());
 
-    auto drain_terms = [&](int index, int contribution) {
+    auto drain_terms = [&](int index, double contribution) {
         for (auto &chunk : f->absorbed[index]) {
-            terms.push_back({std::move(chunk), contribution});
+            bool expanded = false;
+            // Check if this chunk is a known Linear Term ("C * Kernel")
+            if (chunk.size() == 1 && chunk.front().type == Element_type::CFUNC) {
+                uint64_t func_id = chunk.front().f->id;
+                auto it_linear = ev->m_linear_terms.find(func_id);
+
+                if (it_linear != ev->m_linear_terms.end()) {
+                    double coeff = it_linear->second.first;
+                    bool should_expand = false;
+
+                    // Optimization Strategy:
+                    // 1. Always expand for MUL/DIV parent (chain multiplication)
+                    // 2. For ADD/SUB parent, only expand (distribute) if:
+                    //    a) The kernel is a single element (simple term)
+                    //    b) OR the combined factor simplifies to +/- 1.0
+                    //    Otherwise, keeping it factored is faster: (a+b+c)/k vs a/k+b/k+c/k
+                    if (fclass == 2) {
+                        should_expand = true;
+                    } else { // fclass == 1 (Add/Sub)
+                        double combined = contribution * coeff;
+                        if (it_linear->second.second.size() <= 1 || abs(abs(combined) - 1.0) < 1e-9) {
+                            should_expand = true;
+                        }
+                    }
+
+                    if (should_expand) {
+                        if (fclass == 1) {
+                            // ADD/SUB: "2*x" becomes "x" with factor 2.0
+                            double combined_factor = contribution * coeff;
+                            terms.push_back({ it_linear->second.second, combined_factor });
+                            expanded = true;
+                        }
+                        else {
+                            // MUL/DIV: "2*x" becomes "x" (factor 1), and we absorb "2" into accumulator
+                            ac[index] *= static_cast<long double>(coeff);
+
+                            terms.push_back({ it_linear->second.second, contribution });
+                            expanded = true;
+                        }
+                    }
+                }
+            }
+            if (!expanded) {
+                terms.push_back({std::move(chunk), contribution});
+            }
         }
         f->absorbed[index].clear();
     };
 
-    drain_terms(0, 1);
-    drain_terms(1, -1);
+    drain_terms(0, 1.0);
+    drain_terms(1, -1.0);
+
+    long double ac_final_ld = (fclass == 1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
+    double ac_final = static_cast<double>(ac_final_ld);
 
     elist_comparison comp;
     std::sort(terms.begin(), terms.end(), [&](const absorbed_term& lhs, const absorbed_term& rhs) {
@@ -1855,26 +1921,24 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     for (auto &term : terms) {
         if (!merged.empty() && !comp(term.chunk, merged.back().chunk) && !comp(merged.back().chunk, term.chunk)) {
             merged.back().factor += term.factor;
-            if (merged.back().factor == 0) {
-                merged.pop_back();
-            }
+            if (abs(merged.back().factor) < 1e-12) merged.pop_back();
         }
-        else if (term.factor != 0) {
+        else if (abs(term.factor) > 1e-12) {
             merged.push_back({std::move(term.chunk), term.factor});
         }
     }
 
+    // Phase 4: Code Generation
     mexce_charstream s;
     stringstream debug_ss;
     bool debug_first = true;
 
-    if (fclass == 1) {
+    if (fclass == 1) { // ADD/SUB
         bool have_value = false;
         bool constant_added = (ac_final == neutral);
-
         auto ensure_constant = [&]() {
             if (have_value && !constant_added && ac_final != neutral) {
-                emit_apply_op_with_constant<0x00>(ev, s, ac_final);
+                emit_apply_op_with_constant<0x00>(ev, s, ac_final); // FADD
                 constant_added = true;
             }
         };
@@ -1885,45 +1949,34 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         }
 
         for (auto &term : merged) {
-            int factor = term.factor;
-            if (factor == 0) {
+            double factor = term.factor;
+            if (abs(factor) < 1e-12) {
                 continue;
             }
 
             string term_str = "(" + elist_to_string(term.chunk) + ")";
             if (factor > 0) {
                 if (!debug_first) debug_ss << "+";
-                if (factor != 1) debug_ss << factor << "*";
+                if (abs(factor - 1.0) > 1e-12) debug_ss << double_to_pretty_string(factor) << "*";
                 debug_ss << term_str;
             }
             else {
                 debug_ss << "-";
-                if (factor != -1) debug_ss << abs(factor) << "*";
+                double af = abs(factor);
+                if (abs(af - 1.0) > 1e-12) debug_ss << double_to_pretty_string(af) << "*";
                 debug_ss << term_str;
             }
             debug_first = false;
 
-            if (have_value) {
-                ensure_constant();
-            }
-
+            if (have_value) ensure_constant();
             compile_elist(s, term.chunk.begin(), term.chunk.end());
 
-            if (factor == 1) {
-                // no-op
-            }
-            else if (factor == -1) {
-                s < 0xd9 < 0xe0;  // fchs
-            }
-            else if (factor == 2) {
-                s < 0xd8 < 0xc0;  // fadd st(0), st(0)
-            }
-            else if (factor == -2) {
-                s < 0xd8 < 0xc0;
-                s < 0xd9 < 0xe0;  // fchs
-            }
+            if (factor == 1.0)       { /* no-op */ }
+            else if (factor == -1.0) { s < 0xd9 < 0xe0; } // fchs
+            else if (factor == 2.0)  { s < 0xd8 < 0xc0; } // fadd st, st
+            else if (factor == -2.0) { s < 0xd8 < 0xc0 < 0xd9 < 0xe0; }
             else {
-                emit_apply_op_with_constant<0x08>(ev, s, static_cast<double>(factor));
+                emit_apply_op_with_constant<0x08>(ev, s, factor); // FMUL (Scale Kernel)
             }
 
             if (!have_value) {
@@ -1932,26 +1985,19 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                     emit_apply_op_with_constant<0x00>(ev, s, ac_final);
                     constant_added = true;
                 }
+            } else {
+                s < 0xde < 0xc1; // faddp
             }
-            else {
-                s < 0xde < 0xc1;  // faddp       st(1), st
-            }
         }
-
-        if (!have_value) {
-            emit_load_constant(ev, s, ac_final);
-        }
-        else {
-            ensure_constant();
-        }
+        if (!have_value) emit_load_constant(ev, s, ac_final);
+        else ensure_constant();
     }
-    else {
+    else { // MUL/DIV
         bool have_value = false;
         bool constant_multiplied = (ac_final == neutral);
-
         auto ensure_constant = [&]() {
             if (have_value && !constant_multiplied && ac_final != neutral) {
-                emit_apply_op_with_constant<0x08>(ev, s, ac_final);
+                emit_apply_op_with_constant<0x08>(ev, s, ac_final); // FMUL
                 constant_multiplied = true;
             }
         };
@@ -1962,47 +2008,52 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         }
 
         for (auto &term : merged) {
-            int factor = term.factor;
-            if (factor == 0) {
+            double factor = term.factor;
+            if (abs(factor) < 1e-12) {
                 continue;
             }
+
+            double r_factor = round(factor);
+            bool is_int = (abs(factor - r_factor) < 1e-9);
+            uint32_t abs_int_factor = static_cast<uint32_t>(abs(r_factor));
 
             string term_str = "(" + elist_to_string(term.chunk) + ")";
             if (factor > 0) {
                 if (!debug_first) debug_ss << "*";
                 debug_ss << term_str;
-                if (factor != 1) debug_ss << "^" << factor;
+                if (is_int) {
+                    if (abs_int_factor != 1) debug_ss << "^" << abs_int_factor;
+                }
+                else {
+                    debug_ss << "^" << double_to_pretty_string(factor);
+                }
             }
             else {
                 if (debug_first) debug_ss << "1"; // e.g. 1/x
                 debug_ss << "/";
                 debug_ss << term_str;
-                if (factor != -1) debug_ss << "^" << abs(factor);
+                if (is_int) {
+                    if (abs_int_factor != 1) debug_ss << "^" << abs_int_factor;
+                }
+                else {
+                    debug_ss << "^" << double_to_pretty_string(abs(factor));
+                }
             }
             debug_first = false;
 
-            if (have_value) {
-                ensure_constant();
-            }
-
+            if (have_value) ensure_constant();
             compile_elist(s, term.chunk.begin(), term.chunk.end());
 
-            uint32_t abs_factor = static_cast<uint32_t>(abs(factor));
-            if (abs_factor > 1U) {
-                emit_integer_power_sequence(s, abs_factor);
+            if (is_int && abs_int_factor > 1) {
+                emit_integer_power_sequence(s, abs_int_factor);
             }
+            // Non-integer powers in mul chain not generated by current parser
 
             if (factor < 0) {
-                if (!have_value) {
-                    s < 0xd9 < 0xe8;    // fld1
-                    s < 0xde < 0xf1;    // fdivrp   st(1), st
-                }
-                else {
-                    s < 0xde < 0xf9;    // fdivp    st(1), st
-                }
-            }
-            else if (have_value) {
-                s < 0xde < 0xc9;        // fmulp   st(1), st
+                if (!have_value) { s < 0xd9 < 0xe8 < 0xde < 0xf1; } // 1/x
+                else             { s < 0xde < 0xf9; } // fdivp
+            } else if (have_value) {
+                s < 0xde < 0xc9; // fmulp
             }
 
             if (!have_value) {
@@ -2013,13 +2064,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
             }
         }
-
-        if (!have_value) {
-            emit_load_constant(ev, s, ac_final);
-        }
-        else {
-            ensure_constant();
-        }
+        if (!have_value) emit_load_constant(ev, s, ac_final);
+        else ensure_constant();
     }
 
     if (debug_first) { // Loop didn't run or output anything, just constant
@@ -2027,11 +2073,17 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     }
 
     string new_name = (fclass == 1) ? "add_sub_opt" : "mul_div_opt";
-
     uint8_t* cc = push_intermediate_code(ev, s.str());
     auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.buf.size(), cc, nullptr);
     f_opt->debug_desc = "(" + debug_ss.str() + ")";
     f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
+
+    // Phase 5: Register Linear Term (Optimization Side-Channel)
+    if (fclass == 2) {
+        if (merged.size() == 1 && abs(merged[0].factor - 1.0) < 1e-9) {
+            ev->m_linear_terms[f_opt->id] = std::make_pair(ac_final, merged[0].chunk);
+        }
+    }
 
     *it = Element(f_opt);
 }
@@ -2533,6 +2585,8 @@ void evaluator::set_expression(std::string e)
     m_intermediate_code.clear();
     m_elist.clear();
     m_cse_temps.clear(); // Clear previous CSE temps
+    m_linear_terms.clear();
+    m_power_terms.clear();
 
     if (evaluate_fptr) {
         free_executable_buffer(evaluate_fptr, m_buffer_size);
