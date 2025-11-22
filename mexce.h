@@ -1815,8 +1815,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                     }
                     else {
                         // MUL/DIV: "2*x" becomes "x" (factor 1), and we absorb "2" into accumulator
-                        if (contribution > 0) ac[index] *= static_cast<long double>(coeff);
-                        else                  ac[index] /= static_cast<long double>(coeff);
+                        ac[index] *= static_cast<long double>(coeff);
 
                         terms.push_back({ std::move(it_linear->second.second), contribution });
                         expanded = true;
