@@ -1472,6 +1472,8 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
 {
     using namespace impl;
 
+    int current_depth = 0;
+
     for (auto it = first; it != last; ++it) {
         switch (it->type) {
             case Element_type::CVAR: {
@@ -1498,6 +1500,7 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
 #ifndef MEXCE_64
                 code_buffer << (void*)(tn->address);
 #endif
+                ++current_depth;
                 break;
             }
             case Element_type::CCONST: {
@@ -1510,13 +1513,22 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
                 code_buffer < 0xdd < 0x05;
                 code_buffer << (void*)(tn->address);
 #endif
+                ++current_depth;
                 break;
             }
             case Element_type::CFUNC: {
                 auto tf = it->f;
                 code_buffer.write(tf->code.data(), tf->code.size());
+                current_depth = current_depth - static_cast<int>(tf->num_args) + 1;
                 break;
             }
+        }
+
+        if (current_depth > 8) {
+            throw std::overflow_error("Expression too complex for x87 FPU (stack overflow)");
+        }
+        if (current_depth < 0) {
+            throw std::runtime_error("Internal error: FPU stack underflow detected");
         }
     }
 }
