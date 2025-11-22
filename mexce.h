@@ -491,6 +491,7 @@ struct Element {
 
 struct mexce_charstream {
     vector<uint8_t> buf;
+    mexce_charstream() { buf.reserve(256); }
     string str() const { return string(buf.begin(), buf.end()); }
     void write(const char* data, size_t n) {
         buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(data), reinterpret_cast<const uint8_t*>(data) + n);
