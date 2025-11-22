@@ -189,6 +189,7 @@ namespace impl {
     shared_ptr<Function> make_function(evaluator* ev, const string& name);
     void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
     void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
+    string elist_to_string(const elist_t& elist); // Forward declaration
 }
 
 
@@ -217,6 +218,12 @@ public:
     double evaluate();
 
     double evaluate(const std::string& expression);
+
+    /**
+     * @brief Returns the reconstructed string of the optimized internal expression tree.
+     * Useful for debugging optimizations.
+     */
+    std::string get_optimized_expression() const;
 
 private:
 
@@ -2173,6 +2180,11 @@ double evaluator::evaluate() {
     return evaluate_fptr();
 }
 
+
+inline
+std::string evaluator::get_optimized_expression() const {
+    return impl::elist_to_string(m_elist);
+}
 
 
 inline

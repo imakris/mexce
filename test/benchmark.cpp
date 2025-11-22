@@ -285,6 +285,7 @@ int main(int argc, char* argv[])
 
     struct record_t {
         std::string expr;
+        std::string optimized_expr;
         bool compiled;
         bool eval_ok;
         bool native_available;
@@ -409,6 +410,7 @@ int main(int argc, char* argv[])
         const double compile_start = mexce::get_wtime();
         try {
             eval.set_expression(expr);
+            rec.optimized_expr = eval.get_optimized_expression();
             const double compile_end = mexce::get_wtime();
             rec.compile_ns = (uint64_t)((compile_end - compile_start) * 1e9 + 0.5L);
             rec.compiled = true;
@@ -798,6 +800,12 @@ int main(int argc, char* argv[])
     auto format_ulp_value = [](uint64_t value) -> std::string {
         return (value == UINT64_MAX) ? "-" : std::to_string(value);
     };
+    
+    auto format_double_2d = [](double val) {
+        std::stringstream ss;
+        ss << std::fixed << std::setprecision(2) << val;
+        return ss.str();
+    };
 
     auto print_row_header = [&] {
         out << std::left << std::setw(10) << "Status"
@@ -807,7 +815,8 @@ int main(int argc, char* argv[])
             << "  " << std::setw(16) << "Compile"
             << "  " << std::setw(16) << "Avg/Call (Mx)"
             << "  " << std::setw(16) << "Avg/Call (Cp)"
-            << "  " << "Expression" << "\n";
+            << "  " << std::setw(10) << "Speedup"
+            << "  " << "Expression" << " / " << "Optimized Expression" << "\n";
         out << std::string(10, '-')
             << "  " << std::string((int)max_ulp_len_mexce_comp, '-')
             << "  " << std::string((int)max_ulp_len_mexce_ref, '-')
@@ -815,7 +824,8 @@ int main(int argc, char* argv[])
             << "  " << std::string(16, '-')
             << "  " << std::string(16, '-')
             << "  " << std::string(16, '-')
-            << "  " << std::string(40, '-') << "\n";
+            << "  " << std::string(10, '-')
+            << "  " << std::string(40, '-') << " / " << std::string(40, '-') << "\n";
     };
 
     // --- Create bins for sorting ---
@@ -842,11 +852,33 @@ int main(int argc, char* argv[])
     std::sort(compile_failures.begin(), compile_failures.end(), sort_by_expression);
     std::sort(eval_failures.begin(), eval_failures.end(), sort_by_expression);
 
+    // Sort "Passed" by Speedup (Native / Mexce) ASCENDING.
+    // Speedup < 1.0: Native is slower (Mexce faster).
+    // Speedup > 1.0: Native is faster (Mexce regression).
+    // Wait, logic check:
+    // Speedup = Native_Time / Mexce_Time
+    // If Native takes 100ns and Mexce takes 10ns (Mexce fast), Speedup = 10.0.
+    // If Native takes 10ns and Mexce takes 100ns (Mexce slow), Speedup = 0.1.
+    //
+    // User wants "ascending order, according to how much faster the compiler's version is".
+    // If we sort by (Native_Time / Mexce_Time) Ascending:
+    // 0.1 (Mexce slow/Problematic) comes first.
+    // 10.0 (Mexce fast) comes last.
+    // This highlights problematic regressions first.
     std::sort(passed.begin(), passed.end(), [](const record_t* a, const record_t* b) {
-        if (a->ulp_mexce_vs_reference != b->ulp_mexce_vs_reference) {
-            return a->ulp_mexce_vs_reference > b->ulp_mexce_vs_reference; // Primary key: ULP descending
+        // Push entries without native comparison to the end of the sort order?
+        // Or sort them as 0 speedup? Let's handle native_eval_ok.
+        if (!a->native_eval_ok && b->native_eval_ok) return false; // Put 'no native' after 'has native'
+        if (a->native_eval_ok && !b->native_eval_ok) return true;
+        if (!a->native_eval_ok && !b->native_eval_ok) return a->expr < b->expr;
+
+        double speedup_a = (double)a->native_avg_ns / (std::max)(1.0, (double)a->avg_ns);
+        double speedup_b = (double)b->native_avg_ns / (std::max)(1.0, (double)b->avg_ns);
+        
+        if (std::abs(speedup_a - speedup_b) > 1e-6) {
+            return speedup_a < speedup_b; 
         }
-        return a->expr < b->expr;   // Secondary key: Alphabetical ascending
+        return a->expr < b->expr;
     });
 
     // --- Print sorted bins ---
@@ -864,6 +896,7 @@ int main(int argc, char* argv[])
                 << "  " << std::setw(16) << format_ns(r.compile_ns)
                 << "  " << std::setw(16) << "-"
                 << "  " << std::setw(16) << "-"
+                << "  " << std::setw(10) << "-"
                 << "  " << r.expr << "\n";
             if (!r.error.empty()) {
                 out << "    note: " << r.error << "\n";
@@ -885,7 +918,8 @@ int main(int argc, char* argv[])
                 << "  " << std::setw(16) << format_ns(r.compile_ns)
                 << "  " << std::setw(16) << "-"
                 << "  " << std::setw(16) << "-"
-                << "  " << r.expr << "\n";
+                << "  " << std::setw(10) << "-"
+                << "  " << r.expr << " / " << r.optimized_expr << "\n";
             if (!r.error.empty()) {
                 out << "    note: " << r.error << "\n";
             }
@@ -895,7 +929,7 @@ int main(int argc, char* argv[])
 
     // 3) Passed cases
     if (!passed.empty()) {
-        out << "Passed (sorted by ULP desc, then alphabetically):" << "\n";
+        out << "Passed (sorted by Speedup [Native/Mexce] ASC - Problematic regressions first):" << "\n";
         print_row_header();
         auto ulp_exceeds = [](uint64_t value) { return value != UINT64_MAX && value > 8192; };
         for (const auto* r_ptr : passed) {
@@ -909,6 +943,12 @@ int main(int argc, char* argv[])
                 out << "\n";
             }
 
+            std::string speedup_str = "-";
+            if (r.native_eval_ok) {
+                double speedup = (double)r.native_avg_ns / (std::max)(1.0, (double)r.avg_ns);
+                speedup_str = format_double_2d(speedup) + "x";
+            }
+
             out << std::left << std::setw(10) << "ok"
                 << "  " << std::setw((int)max_ulp_len_mexce_comp) << format_ulp_value(r.ulp_mexce_vs_compiler)
                 << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
@@ -916,7 +956,8 @@ int main(int argc, char* argv[])
                 << "  " << std::setw(16) << format_ns(r.compile_ns)
                 << "  " << std::setw(16) << format_ns(r.avg_ns)
                 << "  " << std::setw(16) << (r.native_eval_ok ? format_ns(r.native_avg_ns) : "-")
-                << "  " << r.expr << "\n";
+                << "  " << std::setw(10) << speedup_str
+                << "  " << r.expr << " / " << r.optimized_expr << "\n";
 
             if (highlight) {
                 std::ios_base::fmtflags original_flags = out.flags();
