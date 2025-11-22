@@ -189,6 +189,7 @@ namespace impl {
     shared_ptr<Function> make_function(evaluator* ev, const string& name);
     void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
     void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
+    pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it);
 }
 
 
@@ -233,6 +234,10 @@ private:
 
     // Map FunctionID -> { Coefficient, Kernel }
     std::map<uint64_t, std::pair<double, impl::elist_t>> m_linear_terms;
+
+    // Map FunctionID -> { Kernel, Exponent }
+    // Used to optimize (a^b)^c -> a^(b*c)
+    std::map<uint64_t, std::pair<impl::elist_t, double>> m_power_terms;
 
     double                (*evaluate_fptr)()            = nullptr;
 
@@ -871,6 +876,47 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
     auto f = it->f;
 
+    // ---------------------------------------------------------
+    // Optimization: Nested Power Folding (a^b)^c -> a^(b*c)
+    // ---------------------------------------------------------
+    // In postfix order: args[0] = exponent, args[1] = base
+    if (f->args[0]->type == Element_type::CCONST) {
+        double current_exp = f->args[0]->c->value;
+
+        // Check if the base is a Function that we previously recorded as a Power term
+        if (f->args[1]->type == Element_type::CFUNC) {
+            uint64_t base_id = f->args[1]->f->id;
+            auto map_it = ev->m_power_terms.find(base_id);
+
+            if (map_it != ev->m_power_terms.end()) {
+                // Found nested power!
+                double prev_exp = map_it->second.second;
+                double new_exp = prev_exp * current_exp; // Fold exponents
+
+                // Update the exponent constant element in the list
+                *f->args[0] = Element(make_intermediate_constant(ev, new_exp));
+
+                // Replace the base (which is a single Function element)
+                // with the original kernel (which is a list of elements).
+                auto base_it = f->args[1];
+
+                // Splice the kernel list into the main list right before the current base
+                for (const auto& e : map_it->second.first) {
+                    elist->insert(base_it, e);
+                }
+
+                // Update f->args[1] to point to the *last element* of the inserted kernel.
+                f->args[1] = std::prev(base_it);
+
+                // Erase the old intermediate base function
+                elist->erase(base_it);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------
+    // Existing Optimization: Constant Exponent
+    // ---------------------------------------------------------
     if (f->args[0]->type == Element_type::CCONST) {
         auto v = f->args[0]->c;
 
@@ -978,6 +1024,19 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             f_opt->args[1] = f->args[1];
         }
         *it = Element(f_opt);
+
+        // ---------------------------------------------------------
+        // Side-Channel Recording (Writer)
+        // ---------------------------------------------------------
+        // Record this power term so parents can fold it.
+        // e.g., we just compiled "a^2". Record it so "(a^2)^3" can see it.
+        double exp_val = f->args[0]->c->value;
+
+        // The kernel is the chunk defining the base.
+        auto chunk = get_dependent_chunk(f->args[1]);
+        elist_t kernel_list(chunk.first, chunk.second);
+
+        ev->m_power_terms[f_opt->id] = std::make_pair(kernel_list, exp_val);
     }
 }
 
@@ -1345,31 +1404,42 @@ pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it)
 
 struct elist_comparison {
     bool operator()(const elist_t& a, const elist_t& b) const {
-
-        // empty element lists cannot exist
-        assert(a.size() && b.size());
-
-        // if their size differs, we use that for comparison
         if (a.size() != b.size()) {
-            return a.size() > b.size();
+            return a.size() < b.size();
         }
-
-        // they are the same size, thus we need to traverse both
         auto ita = a.begin();
         auto itb = b.begin();
-        for (; ita != a.end(); ita++, itb++) {
-            // start by comparing element types
+        while (ita != a.end()) {
             if (ita->type != itb->type) {
-                return ita->type > itb->type;
+                return ita->type < itb->type;
             }
-
-            // Compare deterministic IDs.
-            if (ita->id != itb->id) {
-                return ita->id < itb->id;
+            switch (ita->type) {
+                case Element_type::CCONST:
+                    // Compare value
+                    if (std::abs(ita->c->value - itb->c->value) > 1e-15) {
+                        return ita->c->value < itb->c->value;
+                    }
+                    break;
+                case Element_type::CVAR:
+                    // Compare address
+                    if (ita->v->address != itb->v->address) {
+                        return ita->v->address < itb->v->address;
+                    }
+                    break;
+                case Element_type::CFUNC:
+                    // Compare Name AND Bytecode
+                    if (ita->f->name != itb->f->name) {
+                        return ita->f->name < itb->f->name;
+                    }
+                    if (ita->f->code != itb->f->code) {
+                        return ita->f->code < itb->f->code;
+                    }
+                    break;
             }
+            ++ita;
+            ++itb;
         }
-
-        return false; // they are equal
+        return false;
     }
 };
 
@@ -2157,6 +2227,7 @@ void evaluator::set_expression(std::string e)
     m_intermediate_code.clear();
     m_elist.clear();
     m_linear_terms.clear();
+    m_power_terms.clear();
 
     if (evaluate_fptr) {
         free_executable_buffer(evaluate_fptr, m_buffer_size);
