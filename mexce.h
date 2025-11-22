@@ -229,6 +229,8 @@ private:
     impl::constant_map_t    m_intermediate_constants;  // produced during expression simplification
     impl::variable_map_t    m_variables;
     impl::constant_map_t    m_constants;
+    // Map FunctionID -> { Coefficient, Kernel }
+    std::map<uint64_t, std::pair<double, impl::elist_t>> m_linear_terms;
     uint64_t                m_next_element_id           = 0;
 
     double                (*evaluate_fptr)()            = nullptr;
@@ -1667,9 +1669,9 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     assert(fclass);
 
     double neutral = fclass == 1 ? 0.0 : 1.0;
-
     bool arg2_inv = (fname == "sub" || fname == "div");
 
+    // Phase 1: Absorption (Flatten nested same-type operators)
     if (f->parent != elist->end() && f->parent->type == Element_type::CFUNC) {
         shared_ptr<Function> pf = f->parent->f;
         auto pname = pf->name;
@@ -1677,64 +1679,38 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         bool parg2_inv = (pname == "sub" || pname == "div");
 
         if (pclass && pclass == fclass) {
-
-            // the function will be absorbed by its parent
-
-            bool parent_inv_op = f->parent_arg_index == 0 && parg2_inv; // arg 0 in postfix, is the second infix argument
-
-            // this is the first infix argument (postfix order is inverse)
+            bool parent_inv_op = f->parent_arg_index == 0 && parg2_inv;
             auto arg1_chunk = get_dependent_chunk(f->args[1]);
-            pf->absorbed[parent_inv_op           ].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
+            pf->absorbed[parent_inv_op].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
             elist->erase(arg1_chunk.first, arg1_chunk.second);
-
-            // the second infix argument
             auto arg0_chunk = get_dependent_chunk(f->args[0]);
             pf->absorbed[parent_inv_op ^ arg2_inv].push_back(elist_t(arg0_chunk.first, arg0_chunk.second));
             elist->erase(arg0_chunk.first, arg0_chunk.second);
-
-            pf->absorbed[ parent_inv_op].insert(pf->absorbed[ parent_inv_op].end(),
-                f->absorbed[0].begin(), f->absorbed[0].end());
-            pf->absorbed[!parent_inv_op].insert(pf->absorbed[!parent_inv_op].end(),
-                f->absorbed[1].begin(), f->absorbed[1].end());
-
+            pf->absorbed[parent_inv_op].insert(pf->absorbed[parent_inv_op].end(), f->absorbed[0].begin(), f->absorbed[0].end());
+            pf->absorbed[!parent_inv_op].insert(pf->absorbed[!parent_inv_op].end(), f->absorbed[1].begin(), f->absorbed[1].end());
             pf->force_not_constant = true;
-
             *it = Element(make_intermediate_constant(ev, neutral));
-
             return;
         }
     }
 
-    // end of chain - simplify and generate code
-
-    // accumulate own args
-
-    // first infix argument
+    // Phase 2: Collection & Constant Reduction
     auto arg1_chunk = get_dependent_chunk(f->args[1]);
-    f->absorbed[0       ].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
+    f->absorbed[0].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
     elist->erase(arg1_chunk.first, arg1_chunk.second);
-
-    // second infix argument
     auto arg0_chunk = get_dependent_chunk(f->args[0]);
     f->absorbed[arg2_inv].push_back(elist_t(arg0_chunk.first, arg0_chunk.second));
     elist->erase(arg0_chunk.first, arg0_chunk.second);
-
-    // at this point, this is a function of 0 arguments, all of them were absorbed
     f->args.clear();
 
-    // reduce constants with extended precision
     long double ac[2] = {neutral, neutral};
     for (int i = 0; i < 2; i++) {
         for (auto e = f->absorbed[i].begin(); e != f->absorbed[i].end();) {
             auto next_e = next(e);
             if (e->size() == 1 && e->front().type == Element_type::CCONST) {
                 auto v = e->front().c;
-                if (fclass == 1) {
-                    ac[i] += static_cast<long double>(v->value);
-                }
-                else {
-                    ac[i] *= static_cast<long double>(v->value);
-                }
+                if (fclass == 1) ac[i] += static_cast<long double>(v->value);
+                else             ac[i] *= static_cast<long double>(v->value);
                 f->absorbed[i].erase(e);
             }
             e = next_e;
@@ -1743,23 +1719,37 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     long double ac_final_ld = (fclass == 1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
     double ac_final = static_cast<double>(ac_final_ld);
 
+    // Phase 3: Term Analysis & Linearization
     struct absorbed_term {
         elist_t chunk;
-        int     factor;
+        double  factor;
     };
-
     vector<absorbed_term> terms;
     terms.reserve(f->absorbed[0].size() + f->absorbed[1].size());
 
-    auto drain_terms = [&](int index, int contribution) {
+    auto drain_terms = [&](int index, double contribution) {
         for (auto &chunk : f->absorbed[index]) {
-            terms.push_back({std::move(chunk), contribution});
+            bool expanded = false;
+            // LINEARIZATION: If adding a function known to be "C * Kernel", unpack it.
+            if (fclass == 1 && chunk.size() == 1 && chunk.front().type == Element_type::CFUNC) {
+                uint64_t func_id = chunk.front().f->id;
+                auto it_linear = ev->m_linear_terms.find(func_id);
+                if (it_linear != ev->m_linear_terms.end()) {
+                    double combined_factor = contribution * it_linear->second.first;
+                    // Optimization: MOVE the kernel out of the map to avoid list copy
+                    terms.push_back({ std::move(it_linear->second.second), combined_factor });
+                    expanded = true;
+                }
+            }
+            if (!expanded) {
+                terms.push_back({std::move(chunk), contribution});
+            }
         }
         f->absorbed[index].clear();
     };
 
-    drain_terms(0, 1);
-    drain_terms(1, -1);
+    drain_terms(0, 1.0);
+    drain_terms(1, -1.0);
 
     elist_comparison comp;
     std::sort(terms.begin(), terms.end(), [&](const absorbed_term& lhs, const absorbed_term& rhs) {
@@ -1771,117 +1761,76 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     for (auto &term : terms) {
         if (!merged.empty() && !comp(term.chunk, merged.back().chunk) && !comp(merged.back().chunk, term.chunk)) {
             merged.back().factor += term.factor;
-            if (merged.back().factor == 0) {
-                merged.pop_back();
-            }
+            if (abs(merged.back().factor) < 1e-12) merged.pop_back();
         }
-        else if (term.factor != 0) {
+        else if (abs(term.factor) > 1e-12) {
             merged.push_back({std::move(term.chunk), term.factor});
         }
     }
 
+    // Phase 4: Code Generation
     mexce_charstream s;
-
-    if (fclass == 1) {
+    if (fclass == 1) { // ADD/SUB
         bool have_value = false;
         bool constant_added = (ac_final == neutral);
-
         auto ensure_constant = [&]() {
             if (have_value && !constant_added && ac_final != neutral) {
-                emit_apply_op_with_constant<0x00>(ev, s, ac_final);
+                emit_apply_op_with_constant<0x00>(ev, s, ac_final); // FADD
                 constant_added = true;
             }
         };
-
         for (auto &term : merged) {
-            int factor = term.factor;
-            if (factor == 0) {
-                continue;
-            }
-
-            if (have_value) {
-                ensure_constant();
-            }
-
+            double factor = term.factor;
+            if (have_value) ensure_constant();
             compile_elist(s, term.chunk.begin(), term.chunk.end());
-
-            if (factor == 1) {
-                // no-op
-            }
-            else if (factor == -1) {
-                s < 0xd9 < 0xe0;  // fchs
-            }
-            else if (factor == 2) {
-                s < 0xd8 < 0xc0;  // fadd st(0), st(0)
-            }
-            else if (factor == -2) {
-                s < 0xd8 < 0xc0;
-                s < 0xd9 < 0xe0;  // fchs
-            }
+            if (factor == 1.0)       { /* no-op */ }
+            else if (factor == -1.0) { s < 0xd9 < 0xe0; } // fchs
+            else if (factor == 2.0)  { s < 0xd8 < 0xc0; } // fadd st, st
+            else if (factor == -2.0) { s < 0xd8 < 0xc0 < 0xd9 < 0xe0; }
             else {
-                emit_apply_op_with_constant<0x08>(ev, s, static_cast<double>(factor));
+                emit_apply_op_with_constant<0x08>(ev, s, factor); // FMUL (Scale Kernel)
             }
-
             if (!have_value) {
                 have_value = true;
                 if (ac_final != neutral) {
                     emit_apply_op_with_constant<0x00>(ev, s, ac_final);
                     constant_added = true;
                 }
+            } else {
+                s < 0xde < 0xc1; // faddp
             }
-            else {
-                s < 0xde < 0xc1;  // faddp       st(1), st
-            }
         }
-
-        if (!have_value) {
-            emit_load_constant(ev, s, ac_final);
-        }
-        else {
-            ensure_constant();
-        }
+        if (!have_value) emit_load_constant(ev, s, ac_final);
+        else ensure_constant();
     }
-    else {
+    else { // MUL/DIV
         bool have_value = false;
         bool constant_multiplied = (ac_final == neutral);
-
         auto ensure_constant = [&]() {
             if (have_value && !constant_multiplied && ac_final != neutral) {
-                emit_apply_op_with_constant<0x08>(ev, s, ac_final);
+                emit_apply_op_with_constant<0x08>(ev, s, ac_final); // FMUL
                 constant_multiplied = true;
             }
         };
-
         for (auto &term : merged) {
-            int factor = term.factor;
-            if (factor == 0) {
-                continue;
-            }
-
-            if (have_value) {
-                ensure_constant();
-            }
-
+            double factor = term.factor;
+            if (have_value) ensure_constant();
             compile_elist(s, term.chunk.begin(), term.chunk.end());
+            double r_factor = round(factor);
+            bool is_int = (abs(factor - r_factor) < 1e-9);
+            uint32_t abs_int_factor = static_cast<uint32_t>(abs(r_factor));
 
-            uint32_t abs_factor = static_cast<uint32_t>(abs(factor));
-            if (abs_factor > 1U) {
-                emit_integer_power_sequence(s, abs_factor);
+            if (is_int && abs_int_factor > 1) {
+                emit_integer_power_sequence(s, abs_int_factor);
             }
+            // Note: Non-integer powers in mul chain not generated by current parser logic
 
             if (factor < 0) {
-                if (!have_value) {
-                    s < 0xd9 < 0xe8;    // fld1
-                    s < 0xde < 0xf1;    // fdivrp   st(1), st
-                }
-                else {
-                    s < 0xde < 0xf9;    // fdivp    st(1), st
-                }
+                if (!have_value) { s < 0xd9 < 0xe8 < 0xde < 0xf1; } // 1/x
+                else             { s < 0xde < 0xf9; } // fdivp
+            } else if (have_value) {
+                s < 0xde < 0xc9; // fmulp
             }
-            else if (have_value) {
-                s < 0xde < 0xc9;        // fmulp   st(1), st
-            }
-
             if (!have_value) {
                 have_value = true;
                 if (ac_final != neutral) {
@@ -1890,19 +1839,21 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
             }
         }
-
-        if (!have_value) {
-            emit_load_constant(ev, s, ac_final);
-        }
-        else {
-            ensure_constant();
-        }
+        if (!have_value) emit_load_constant(ev, s, ac_final);
+        else ensure_constant();
     }
 
     string new_name = (fclass == 1) ? "add_sub_opt" : "mul_div_opt";
-
     uint8_t* cc = push_intermediate_code(ev, s.str());
     auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.buf.size(), cc, nullptr);
+
+    // Phase 5: Register Linear Term (Optimization Side-Channel)
+    // If we created a "C * Kernel" node, record it for parent Add/Sub nodes to see.
+    if (fclass == 2) {
+        if (merged.size() == 1 && abs(merged[0].factor - 1.0) < 1e-9) {
+            ev->m_linear_terms[f_opt->id] = std::make_pair(ac_final, merged[0].chunk);
+        }
+    }
 
     *it = Element(f_opt);
 }
@@ -2187,6 +2138,7 @@ void evaluator::set_expression(std::string e)
     m_intermediate_constants.clear();
     m_intermediate_code.clear();
     m_elist.clear();
+    m_linear_terms.clear();
 
     if (evaluate_fptr) {
         free_executable_buffer(evaluate_fptr, m_buffer_size);
