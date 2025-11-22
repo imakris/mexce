@@ -1810,14 +1810,14 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                     if (fclass == 1) {
                         // ADD/SUB: "2*x" becomes "x" with factor 2.0
                         double combined_factor = contribution * coeff;
-                        terms.push_back({ std::move(it_linear->second.second), combined_factor });
+                        terms.push_back({ it_linear->second.second, combined_factor });
                         expanded = true;
                     }
                     else {
                         // MUL/DIV: "2*x" becomes "x" (factor 1), and we absorb "2" into accumulator
                         ac[index] *= static_cast<long double>(coeff);
 
-                        terms.push_back({ std::move(it_linear->second.second), contribution });
+                        terms.push_back({ it_linear->second.second, contribution });
                         expanded = true;
                     }
                 }
