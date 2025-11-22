@@ -189,7 +189,7 @@ namespace impl {
     shared_ptr<Function> make_function(evaluator* ev, const string& name);
     void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
     void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
-    string elist_to_string(const elist_t& elist); // Forward declaration
+    string elist_to_string(const elist_t& elist);
 }
 
 
@@ -455,6 +455,7 @@ struct Function
     optimizer_t         optimizer;
 
     bool                force_not_constant = false;
+    string              debug_desc;
 
     Function(
         uint64_t    i,
@@ -498,7 +499,6 @@ struct Element {
 
 struct mexce_charstream {
     vector<uint8_t> buf;
-    mexce_charstream() { buf.reserve(256); }
     string str() const { return string(buf.begin(), buf.end()); }
     void write(const char* data, size_t n) {
         buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(data), reinterpret_cast<const uint8_t*>(data) + n);
@@ -884,16 +884,19 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
         bool matched = true;
         mexce_charstream s;
+        string optimized_name;
 
         // a special case, that the exponent is 0.5
         if (v_d == 0.5) {
             s < 0xd9 < 0xfa;                // fsqrt
+            optimized_name = "sqrt";
         }
         else
         if (v_d == -0.5) {
             s < 0xd9 < 0xfa                 // fsqrt
               < 0xd9 < 0xe8                 // fld1
               < 0xde < 0xf1;                // fdivrp st(1), st
+            optimized_name = "inv_sqrt";
         }
         else
         if (r_d == v_d && a_d <= 65536.0) {
@@ -939,6 +942,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                       < 0xde < 0xf1;          // fdivrp st(1), st
                 }
             }
+            optimized_name = "pow_int";
         }
         else {
             matched = false;
@@ -970,7 +974,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
 
         uint8_t* cc = push_intermediate_code(ev, s.str());
-        auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2-matched, 0, s.buf.size(), cc, nullptr);
+        auto f_opt = make_shared<Function>(ev->m_next_element_id++, matched ? optimized_name : "pow_opt", 2-matched, 0, s.buf.size(), cc, nullptr);
 
         if (matched) {
             f_opt->args.resize(1);
@@ -1607,7 +1611,14 @@ string elist_to_string(const elist_t& elist)
         switch(it->type) {
             case Element_type::CFUNC: {
                 auto f = it->f;
-                st.push_back(make_tuple(string(), f->args.size() + 1, vector<string>{f->name}));
+                if (!f->debug_desc.empty()) {
+                    // It's an optimized node with no children in this list (absorbed)
+                    // Treat as a value node (like CVAR)
+                    get<2>(st.back()).push_back(f->debug_desc);
+                }
+                else {
+                    st.push_back(make_tuple(string(), f->args.size() + 1, vector<string>{f->name}));
+                }
                 break;
             }
             case Element_type::CCONST: {
@@ -1788,6 +1799,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     }
 
     mexce_charstream s;
+    stringstream debug_ss;
+    bool debug_first = true;
 
     if (fclass == 1) {
         bool have_value = false;
@@ -1800,11 +1813,29 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             }
         };
 
+        if (ac_final != neutral) {
+            debug_ss << double_to_pretty_string(ac_final);
+            debug_first = false;
+        }
+
         for (auto &term : merged) {
             int factor = term.factor;
             if (factor == 0) {
                 continue;
             }
+
+            string term_str = "(" + elist_to_string(term.chunk) + ")";
+            if (factor > 0) {
+                if (!debug_first) debug_ss << "+";
+                if (factor != 1) debug_ss << factor << "*";
+                debug_ss << term_str;
+            }
+            else {
+                debug_ss << "-";
+                if (factor != -1) debug_ss << abs(factor) << "*";
+                debug_ss << term_str;
+            }
+            debug_first = false;
 
             if (have_value) {
                 ensure_constant();
@@ -1859,11 +1890,30 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             }
         };
 
+        if (ac_final != neutral) {
+            debug_ss << double_to_pretty_string(ac_final);
+            debug_first = false;
+        }
+
         for (auto &term : merged) {
             int factor = term.factor;
             if (factor == 0) {
                 continue;
             }
+
+            string term_str = "(" + elist_to_string(term.chunk) + ")";
+            if (factor > 0) {
+                if (!debug_first) debug_ss << "*";
+                debug_ss << term_str;
+                if (factor != 1) debug_ss << "^" << factor;
+            }
+            else {
+                if (debug_first) debug_ss << "1"; // e.g. 1/x
+                debug_ss << "/";
+                debug_ss << term_str;
+                if (factor != -1) debug_ss << "^" << abs(factor);
+            }
+            debug_first = false;
 
             if (have_value) {
                 ensure_constant();
@@ -1906,10 +1956,15 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         }
     }
 
+    if (debug_first) { // Loop didn't run or output anything, just constant
+        if (debug_ss.str().empty()) debug_ss << double_to_pretty_string(ac_final);
+    }
+
     string new_name = (fclass == 1) ? "add_sub_opt" : "mul_div_opt";
 
     uint8_t* cc = push_intermediate_code(ev, s.str());
     auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.buf.size(), cc, nullptr);
+    f_opt->debug_desc = "(" + debug_ss.str() + ")";
 
     *it = Element(f_opt);
 }
