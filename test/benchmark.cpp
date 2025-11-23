@@ -286,6 +286,7 @@ int main(int argc, char* argv[])
     struct record_t {
         std::string expr;
         std::string optimized_expr;
+        std::string bytes_expr;
         bool compiled;
         bool eval_ok;
         bool native_available;
@@ -411,6 +412,7 @@ int main(int argc, char* argv[])
         try {
             eval.set_expression(expr);
             rec.optimized_expr = eval.get_optimized_expression();
+            rec.bytes_expr = eval.get_byte_representation();
             const double compile_end = mexce::get_wtime();
             rec.compile_ns = (uint64_t)((compile_end - compile_start) * 1e9 + 0.5L);
             rec.compiled = true;
@@ -816,7 +818,7 @@ int main(int argc, char* argv[])
             << "  " << std::setw(16) << "Avg/Call (Mx)"
             << "  " << std::setw(16) << "Avg/Call (Cp)"
             << "  " << std::setw(10) << "Speedup"
-            << "  " << "Expression" << " / " << "Optimized Expression" << "\n";
+            << "  " << "Expression" << " : " << "Optimized Expression" << " : " << "Bytes" << "\n";
         out << std::string(10, '-')
             << "  " << std::string((int)max_ulp_len_mexce_comp, '-')
             << "  " << std::string((int)max_ulp_len_mexce_ref, '-')
@@ -825,7 +827,7 @@ int main(int argc, char* argv[])
             << "  " << std::string(16, '-')
             << "  " << std::string(16, '-')
             << "  " << std::string(10, '-')
-            << "  " << std::string(40, '-') << " / " << std::string(40, '-') << "\n";
+            << "  " << std::string(40, '-') << " : " << std::string(40, '-') << " : " << std::string(20, '-') << "\n";
     };
 
     // --- Create bins for sorting ---
@@ -919,7 +921,7 @@ int main(int argc, char* argv[])
                 << "  " << std::setw(16) << "-"
                 << "  " << std::setw(16) << "-"
                 << "  " << std::setw(10) << "-"
-                << "  " << r.expr << " / " << r.optimized_expr << "\n";
+                << "  " << r.expr << " : " << r.optimized_expr << " : " << r.bytes_expr << "\n";
             if (!r.error.empty()) {
                 out << "    note: " << r.error << "\n";
             }
@@ -957,7 +959,7 @@ int main(int argc, char* argv[])
                 << "  " << std::setw(16) << format_ns(r.avg_ns)
                 << "  " << std::setw(16) << (r.native_eval_ok ? format_ns(r.native_avg_ns) : "-")
                 << "  " << std::setw(10) << speedup_str
-                << "  " << r.expr << " / " << r.optimized_expr << "\n";
+                << "  " << r.expr << " : " << r.optimized_expr << " : " << r.bytes_expr << "\n";
 
             if (highlight) {
                 std::ios_base::fmtflags original_flags = out.flags();
