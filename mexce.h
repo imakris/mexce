@@ -123,6 +123,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <set>
 #include <new>
 #include <sstream>
 #include <string>
@@ -466,6 +467,7 @@ struct Function
 
     bool                force_not_constant = false;
     string              debug_desc;
+    string              cse_store_suffix;  // CSE store code to emit after function code
 
     Function(
         uint64_t    i,
@@ -1013,6 +1015,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             uint8_t* cc = push_intermediate_code(ev, final_s.str());
             auto f_opt = make_shared<Function>(ev->m_next_element_id++, optimized_name, 0, 0, final_s.buf.size(), cc, nullptr);
             f_opt->debug_desc = debug_desc;
+            f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
 
             // Remove absorbed elements
             elist->erase(base_chunk_range.first, base_chunk_range.second); // Base
@@ -1045,6 +1048,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2, 0, s.buf.size(), cc, nullptr);
             f_opt->args[0] = f->args[0];
             f_opt->args[1] = f->args[1];
+            f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
             *it = Element(f_opt);
         }
     }
@@ -1552,6 +1556,10 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             case Element_type::CFUNC: {
                 auto tf = it->f;
                 code_buffer.write(tf->code.data(), tf->code.size());
+                // Emit CSE store suffix if present (stores result to temp for reuse)
+                if (!tf->cse_store_suffix.empty()) {
+                    code_buffer.write(tf->cse_store_suffix.data(), tf->cse_store_suffix.size());
+                }
                 current_depth = current_depth - static_cast<int>(tf->num_args) + 1;
                 break;
             }
@@ -1986,6 +1994,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     uint8_t* cc = push_intermediate_code(ev, s.str());
     auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.buf.size(), cc, nullptr);
     f_opt->debug_desc = "(" + debug_ss.str() + ")";
+    f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
 
     *it = Element(f_opt);
 }
@@ -2213,212 +2222,129 @@ void run_cse(evaluator* ev, elist_t& elist)
     // Map Signature -> Vector of (Parent Iterator, Element Pointer) pairs?
     // No, elements are shared pointers inside the list.
     // We need the iterator to the root of the subtree in 'elist'.
-    
+
     // But 'elist' is a list of roots (usually 1). The arguments are children.
     // We need to traverse the tree.
-    
-    // Map Signature -> List of (Element*)
-    // We use raw pointer as key for identity? No, signature string for structural identity.
-    map<string, vector<Element*> > occurrences;
-    
-    // Helper to traverse
-    // Use a lambda to walk. 'elist' contains the top-level nodes.
-    // Since we are scanning before optimizers destroy structure, we can just walk the tree.
-    
-    // Using a non-recursive loop or recursive function.
-    // Note: 'm_elist' nodes are linear in postfix order, but 'args' structure defines the tree.
-    // We only care about 'args' structure for signature.
-    
-    // We iterate the main list.
+
+    // Map Signature -> List of (Element*, ID) pairs
+    // Store ID alongside pointer to avoid dereferencing freed memory
+    using ElemEntry = std::pair<Element*, uint64_t>;
+    map<string, vector<ElemEntry> > occurrences;
+
+    // Track erased element IDs to avoid accessing freed memory
+    std::set<uint64_t> erased_ids;
+
+    // Helper to determine operation class (1 = add/sub, 2 = mul/div, 0 = other)
+    auto get_fclass = [](const string& name) -> int {
+        return (name == "add" || name == "sub") ? 1 : (name == "mul" || name == "div") ? 2 : 0;
+    };
+
+    // Helper to check if a function will be absorbed by its parent (same class)
+    auto will_be_absorbed = [&](const Element& e) -> bool {
+        if (e.type != Element_type::CFUNC) return false;
+        int fclass = get_fclass(e.f->name);
+        if (fclass == 0) return false;  // Not add/sub/mul/div
+        if (e.f->parent == elist.end()) return false;
+        if (e.f->parent->type != Element_type::CFUNC) return false;
+        int pclass = get_fclass(e.f->parent->f->name);
+        return pclass == fclass;  // Will be absorbed if same class
+    };
+
+    // Collect all CFUNC elements with their signatures
+    // Skip functions that will be absorbed (optimizer reorders, breaking CSE)
     for (auto& root : elist) {
-        // But wait, 'elist' contains ALL nodes in postfix order. 
-        // E.g. A B Add.
-        // If we process linearly, we see A, B, then Add(A,B).
-        // We can just compute signature for every node in elist.
-        if (root.type == Element_type::CFUNC) {
+        if (root.type == Element_type::CFUNC && !will_be_absorbed(root)) {
             string sig = get_element_signature(root);
-            occurrences[sig].push_back(&root);
+            occurrences[sig].push_back({&root, root.id});
         }
     }
-    
+
     // 2. Apply CSE
     for (auto& entry : occurrences) {
         if (entry.second.size() > 1) {
-            // We have a common subexpression.
-            
+            // Sort by ID to find the first occurrence (execution order)
+            std::sort(entry.second.begin(), entry.second.end(), [](const ElemEntry& a, const ElemEntry& b){
+                return a.second < b.second;
+            });
+
+            // Find the first non-erased element (use stored ID, not dereferenced pointer)
+            Element* first = nullptr;
+            size_t first_idx = 0;
+            for (size_t i = 0; i < entry.second.size(); ++i) {
+                if (erased_ids.find(entry.second[i].second) == erased_ids.end()) {
+                    first = entry.second[i].first;
+                    first_idx = i;
+                    break;
+                }
+            }
+
+            // Count remaining valid elements (use stored IDs)
+            size_t valid_count = 0;
+            for (size_t i = first_idx; i < entry.second.size(); ++i) {
+                if (erased_ids.find(entry.second[i].second) == erased_ids.end()) {
+                    valid_count++;
+                }
+            }
+
+            // Need at least 2 valid occurrences for CSE to be worthwhile
+            if (valid_count < 2 || first == nullptr) {
+                continue;
+            }
+
             // Allocate a temporary storage slot
             ev->m_cse_temps.push_back(0.0);
             double* temp_addr = &ev->m_cse_temps.back();
-            
-            // Sort by ID to find the first occurrence (execution order)
-            std::sort(entry.second.begin(), entry.second.end(), [](Element* a, Element* b){
-                return a->id < b->id;
-            });
-            
-            Element* first = entry.second[0];
-            
-            // Transform First: Wrap in "Store"
-            // We create a new Function that wraps the original logic + Store.
-            // But we can't easily wrap the logic because the logic is determined by the function name/ptr.
-            // Instead, we create a "Store" function and insert it into the tree?
-            // No, simpler: We introduce a new "store_cse" opcode.
-            
-            // Create a custom Function for storing
-            mexce_charstream s;
-            // Code: FST QWORD PTR [addr]
-            // mov rax, imm64; fst [rax]
-            
-#ifdef MEXCE_64
-            s < 0x48 < 0xb8;
-            s << (void*)temp_addr;
-            s < 0xdd < 0x10; // fst qword ptr [rax]
-#else
-            s < 0xdd < 0x15; // fst qword ptr [addr]
-            s << (void*)temp_addr;
-#endif
-            
-            uint8_t* cc = push_intermediate_code(ev, s.str());
-            
-            // Create the Store Wrapper Function
-            // It effectively acts as a Unary function that returns its arg.
-            // It takes the Original Function as its argument.
-            auto store_func = make_shared<Function>(ev->m_next_element_id++, "store_cse", 1, 0, s.buf.size(), cc, nullptr);
-            store_func->debug_desc = "store(" + first->f->name + ")";
-            
-            // Modify the 'first' Element in-place to be this Store function
-            // Save original function
-            auto original_func = first->f;
-            // Point store_func args to original args?
-            // No, store_func takes the RESULT of original_func.
-            // So store_func must be the parent of original_func?
-            // But we are replacing 'first' in the list.
-            // If we replace 'first' (which is e.g. 'div') with 'store_cse',
-            // then 'store_cse' needs 'div' as an argument.
-            
-            // But 'div' was in the list. If we overwrite 'first', 'div' is gone from the list?
-            // We need 'div' to remain in the execution stream.
-            // Actually, in 'mexce', if we change the Element type/ptr, we change the operation at that point.
-            
-            // Correct approach:
-            // The node 'first' represents the calculation of the value.
-            // We want to keep that calculation, then store it.
-            // In the linear elist, 'first' is the point where the value is computed.
-            // We can append a new node after 'first' that does the store?
-            // But 'first' is used by a parent. The parent has an iterator to 'first'.
-            
-            // If we replace 'first' content with 'store_cse', we lose the computation logic.
-            // Unless 'store_cse' *contains* the computation logic?
-            // No, we want to reuse existing functions.
-            
-            // Solution:
-            // 1. Create a new Element 'E_original' that is a copy of '*first'.
-            // 2. Change '*first' to be 'Load(temp)'. 
-            //    Wait, the FIRST occurrence must compute.
-            // 3. OK, we need to inject code.
-            //    Since we can't easily inject into the linear list without breaking iterators in 'args',
-            //    we can append the 'Store' opcode bytes to the 'first' function's code?
-            //    Yes! This is the cleanest way.
-            
-            // Append FST [addr] to the code of the first occurrence's function.
+
+            // Transform First: Set CSE store suffix
+            // Generate FST instruction to store result after function executes.
+            // We store this as cse_store_suffix which survives optimizer transformations.
             mexce_charstream store_code;
 #ifdef MEXCE_64
             store_code < 0x48 < 0xb8;
             store_code << (void*)temp_addr;
-            store_code < 0xdd < 0x10; 
+            store_code < 0xdd < 0x10; // fst qword ptr [rax]
 #else
-            store_code < 0xdd < 0x15;
+            store_code < 0xdd < 0x15; // fst qword ptr [addr]
             store_code << (void*)temp_addr;
 #endif
-            string new_code = first->f->code + store_code.str();
-            
-            // We must clone the function because it might be a shared instance (e.g. prototype)
-            // actually make_function already clones. But others might share it if not careful.
-            // We are safe to modify 'first->f' if we own it.
-            // 'first->f' is shared_ptr. Check use count?
-            // It's safer to make a copy.
-            auto new_f = make_shared<Function>(*first->f);
-            new_f->code = new_code;
-            new_f->debug_desc = "store(" + (first->f->debug_desc.empty() ? first->f->name : first->f->debug_desc) + ")";
-            // Update the element to point to the new function
-            first->f = new_f;
-            
-            
+
+            // Set the CSE store suffix on the function.
+            // This will be emitted after the function's code during compilation.
+            first->f->cse_store_suffix = store_code.str();
+
+
             // Transform Others: Replace with Load
-            for (size_t i = 1; i < entry.second.size(); ++i) {
-                Element* other = entry.second[i];
-                
+            for (size_t i = first_idx + 1; i < entry.second.size(); ++i) {
+                uint64_t other_id = entry.second[i].second;
+
+                // Skip elements that were erased by a previous CSE pass (check stored ID)
+                if (erased_ids.find(other_id) != erased_ids.end()) {
+                    continue;
+                }
+
+                Element* other = entry.second[i].first;
+
                 // We replace 'other' with a Variable load.
-                // We can create a proxy Variable that points to 'temp_addr'.
                 auto temp_var = make_shared<Variable>(ev->m_next_element_id++, (void*)temp_addr, "cse_temp", M64FP);
-                
-                // But wait, 'other' is a Function (e.g. div). It has arguments in the list (2.2, y).
-                // If we just replace 'div' with 'load', the arguments '2.2' and 'y' are still in the list
-                // and will be evaluated (pushed to stack), but 'load' doesn't pop them!
-                // This will corrupt the stack.
-                
-                // We must remove the arguments of 'other' from the execution stream.
-                // The 'elist' is a linear list. The arguments appear before 'other'.
-                // We need to identify the range of elements that constitute the subtree of 'other'.
-                // We can use a recursive helper or 'args' pointers.
-                // Since 'args' pointers point to iterators in 'elist', we can erase them.
-                
-                // Helper to collect all iterators in subtree
-                // Note: this logic needs to be robust.
-                // We can't easily find the "start" of the subtree in a flat list just from the root
-                // unless we traverse args recursively.
-                
-                // Let's rely on the fact that we are in a valid state before optimizers.
-                // We can recursively collect all argument elements.
-                // But we need to be careful about invalidating iterators if we erase?
-                // No, we are iterating via 'occurrences' which stores pointers to Elements.
-                // Pointers to Elements in a list remain valid even if we erase *other* elements?
-                // No, `list::erase` invalidates iterators to the erased element.
-                // But `occurrences` stores `Element*` (pointers to data), not iterators.
-                // Wait, `list` stores `Element` by value. `Element*` points into list node.
-                // If we erase the node, the pointer is dangling.
-                
-                // CRITICAL: We must NOT erase nodes that are being pointed to by `occurrences` that we haven't processed yet.
-                // But we are processing specific signatures.
-                // If `2.2` is shared, it might be in `occurrences`.
-                // If we erase the `2.2` belonging to the second `div`, we might invalidate a "C:2.2" group entry?
-                // Yes.
-                
-                // Alternative: Don't erase. Turn them into No-Ops?
-                // Replace them with a dummy Element type that emits no code?
-                // Or just change them to a comment?
-                // We don't have a NO-OP type.
-                // We can verify if we can erase.
-                
-                // Actually, since we filter for `CFUNC`, we are replacing the root.
-                // The children (arguments) are what we want to remove.
-                // If `2.2` is a child, and we decide to CSE the parent `div`, the `2.2` is effectively dead.
-                // If `2.2` was also a candidate for CSE, it doesn't matter anymore because its parent is being replaced.
-                
-                // Strategy: Recursively set type to a new `CIGNORE` type?
-                // Or just iterate args and remove them from list?
-                // Removing from list is best for code size.
-                // But we must ensure we don't double-delete if sub-children were shared?
-                // In a tree, sub-children aren't shared between *different* parents in the AST representation (unless explicitly DAG).
-                // Mexce parsers creates fresh nodes. So strict tree.
-                
-                // So it is safe to delete the subtree of the *second* occurrence.
-                
-                std::function<void(Element*)> delete_subtree = [&](Element* e) {
+
+                // Delete the subtree (arguments) of 'other' and track erased IDs
+                std::function<void(Element*, elist_it_t)> delete_subtree = [&](Element* e, elist_it_t it) {
+                    erased_ids.insert(e->id);
                     if (e->type == Element_type::CFUNC) {
                         for (auto arg_it : e->f->args) {
-                            delete_subtree(&(*arg_it));
-                            // We need to erase from elist.
-                            // But we only have pointer to Element.
-                            // We need the iterator.
-                            // `f->args` stores iterators!
-                            elist.erase(arg_it);
+                            delete_subtree(&(*arg_it), arg_it);
                         }
                     }
+                    elist.erase(it);
                 };
-                
-                // Execute deletion of children
-                delete_subtree(other);
-                
+
+                // Execute deletion of children (but not 'other' itself)
+                if (other->type == Element_type::CFUNC) {
+                    for (auto arg_it : other->f->args) {
+                        delete_subtree(&(*arg_it), arg_it);
+                    }
+                }
+
                 // Now replace 'other' (the root) with Load
                 other->type = Element_type::CVAR;
                 other->v = temp_var;
