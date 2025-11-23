@@ -118,6 +118,7 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <iomanip>
 #include <list>
 #include <map>
