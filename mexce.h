@@ -226,6 +226,13 @@ public:
      */
     std::string get_optimized_expression() const;
 
+    /**
+     * @brief Returns a hex byte representation of the compiled machine code.
+     * Format: hex pairs separated by spaces (e.g., "50 48 83 EC 20 ...").
+     * Useful for debugging the generated code.
+     */
+    std::string get_byte_representation() const;
+
 private:
 
     bool                    is_constant_expression      = false;
@@ -2494,6 +2501,30 @@ double evaluator::evaluate() {
 inline
 std::string evaluator::get_optimized_expression() const {
     return impl::elist_to_string(m_elist);
+}
+
+
+inline
+std::string evaluator::get_byte_representation() const {
+    if (is_constant_expression || !evaluate_fptr || m_buffer_size == 0) {
+        return std::string();
+    }
+
+    std::string result;
+    result.reserve(m_buffer_size * 3);  // 2 hex chars + space per byte
+
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(evaluate_fptr);
+    char hex_buf[4];
+
+    for (size_t i = 0; i < m_buffer_size; ++i) {
+        if (i > 0) {
+            result += ' ';
+        }
+        std::snprintf(hex_buf, sizeof(hex_buf), "%02X", bytes[i]);
+        result += hex_buf;
+    }
+
+    return result;
 }
 
 
