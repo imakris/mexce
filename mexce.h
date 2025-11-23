@@ -992,11 +992,11 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             }
             else
             if (optimized_name == "inv_sqrt") {
-                ss << "(1/sqrt(" << base_str << "))";
+                ss << "inv_sqrt(" << base_str << ")";
             }
             else
             if (optimized_name == "pow_int") {
-                ss << "(" << base_str << ")^" << v_d;
+                ss << "pow_int(" << base_str << ", " << static_cast<int64_t>(v_d) << ")";
             }
             debug_desc = ss.str();
 

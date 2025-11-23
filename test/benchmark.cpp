@@ -816,7 +816,7 @@ int main(int argc, char* argv[])
             << "  " << std::setw(16) << "Avg/Call (Mx)"
             << "  " << std::setw(16) << "Avg/Call (Cp)"
             << "  " << std::setw(10) << "Speedup"
-            << "  " << "Expression" << " / " << "Optimized Expression" << "\n";
+            << "  " << "Expression" << " : " << "Optimized Expression" << "\n";
         out << std::string(10, '-')
             << "  " << std::string((int)max_ulp_len_mexce_comp, '-')
             << "  " << std::string((int)max_ulp_len_mexce_ref, '-')
@@ -825,7 +825,7 @@ int main(int argc, char* argv[])
             << "  " << std::string(16, '-')
             << "  " << std::string(16, '-')
             << "  " << std::string(10, '-')
-            << "  " << std::string(40, '-') << " / " << std::string(40, '-') << "\n";
+            << "  " << std::string(40, '-') << " : " << std::string(40, '-') << "\n";
     };
 
     // --- Create bins for sorting ---
