@@ -876,6 +876,52 @@ inline
 void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last);
 
 inline
+void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
+{
+    using namespace impl;
+
+    assert(exponent >= 1);
+
+    if (exponent == 1) {
+        return;
+    }
+
+    // Peel off trailing zeros (squaring the base)
+    // Corresponds to right-associative power towers of 2: ((a^2)^2)...
+    // Or simply: a ^ (m * 2^k) = (a^(2^k))^m
+    while ((exponent & 1) == 0) {
+        s < 0xdc < 0xc8;        // fmul st(0), st(0)
+        exponent >>= 1;
+    }
+
+    if (exponent == 1) {
+        return;
+    }
+
+    // Exponent is odd and > 1.
+    // We need to accumulate, but avoid multiplying by 1.0.
+    // Initialize result with base.
+    s < 0xd9 < 0xc0;            // fld st(0)   -> stack: res, base
+    s < 0xd9 < 0xc9;            // fxch st(1)  -> stack: base, res
+
+    exponent >>= 1;
+
+    while (true) {
+        s < 0xdc < 0xc8;        // fmul st(0), st(0) (base *= base)
+
+        if (exponent & 1) {
+             s < 0xdc < 0xc9;   // fmul st(1), st(0) (res *= base)
+        }
+
+        exponent >>= 1;
+        if (exponent == 0) {
+            s < 0xdd < 0xd8;    // fstp st(0) (pop base) -> stack: res
+            break;
+        }
+    }
+}
+
+inline
 void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
     auto f = it->f;
@@ -919,33 +965,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                   < 0xd9 < 0xe8;            // fld1
             }
             else {
-                if (exponent > 1) {
-                    if (exponent == 2) {
-                        s < 0xdc < 0xc8;        // fmul st(0), st(0)
-                    }
-                    else {
-                        uint32_t remaining = exponent;
-
-                        s < 0xd9 < 0xe8         // fld1
-                          < 0xd9 < 0xc9;        // fxch        (base in st0, result in st1)
-
-                        while (true) {
-                            if (remaining & 1U) {
-                                s < 0xdc < 0xc9;    // fmul st(1), st
-                            }
-
-                            remaining >>= 1;
-                            if (!remaining) {
-                                break;
-                            }
-
-                            s < 0xdc < 0xc8;        // fmul st(0), st(0)
-                        }
-
-                        s < 0xd9 < 0xc9           // fxch        (result to st0)
-                          < 0xdd < 0xd9;          // fstp st(1)
-                    }
-                }
+                emit_integer_power_sequence(s, exponent);
 
                 if (invert) {
                     s < 0xd9 < 0xe8           // fld1
@@ -1431,46 +1451,6 @@ void emit_apply_op_with_constant(evaluator* ev, impl::mexce_charstream& s, doubl
     assert(constant->numeric_data_type == M64FP);
     s < 0xdc < OP;                          // f[OP]  qword ptr [eax/rax]
 }
-
-
-inline
-void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
-{
-    using namespace impl;
-
-    assert(exponent >= 1);
-
-    if (exponent == 1) {
-        return;
-    }
-
-    if (exponent == 2) {
-        s < 0xdc < 0xc8;        // fmul st(0), st(0)
-        return;
-    }
-
-    uint32_t remaining = exponent;
-
-    s < 0xd9 < 0xe8         // fld1
-      < 0xd9 < 0xc9;        // fxch        (base in st0, result in st1)
-
-    while (true) {
-        if (remaining & 1U) {
-            s < 0xdc < 0xc9;    // fmul st(1), st
-        }
-
-        remaining >>= 1U;
-        if (!remaining) {
-            break;
-        }
-
-        s < 0xdc < 0xc8;        // fmul st(0), st(0)
-    }
-
-    s < 0xd9 < 0xc9         // fxch        (result to st0)
-      < 0xdd < 0xd9;        // fstp st(1)
-}
-
 
 
 inline
