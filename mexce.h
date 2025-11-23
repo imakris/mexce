@@ -869,12 +869,18 @@ inline Function Sqrt()
     return Function(0, "sqrt", 1, 0, sizeof(code), code);
 }
 
+inline
+pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it);
+
+inline
+void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last);
 
 inline
 void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
     auto f = it->f;
 
+    // Arg 0 is Exponent (top of stack), Arg 1 is Base (below top) in list
     if (f->args[0]->type == Element_type::CCONST) {
         auto v = f->args[0]->c;
 
@@ -885,6 +891,10 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         bool matched = true;
         mexce_charstream s;
         string optimized_name;
+        string debug_desc;
+
+        // Identify the base arguments
+        auto base_chunk_range = get_dependent_chunk(f->args[1]);
 
         // a special case, that the exponent is 0.5
         if (v_d == 0.5) {
@@ -948,10 +958,40 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             matched = false;
         }
 
-        if (!matched) {
-            // this is almost the generic pow, except that it does not try to figure out
-            // if the exponent is an integer
+        if (matched) {
+            // Pre-compile the base code to maintain execution order
+            mexce_charstream final_s;
+            compile_elist(final_s, base_chunk_range.first, base_chunk_range.second);
+            final_s.write((const char*)s.buf.data(), s.buf.size());
 
+            // Generate correct debug string
+            string base_str = elist_to_string(elist_t(base_chunk_range.first, base_chunk_range.second));
+            stringstream ss;
+            if (optimized_name == "sqrt") {
+                ss << "sqrt(" << base_str << ")";
+            }
+            else
+            if (optimized_name == "inv_sqrt") {
+                ss << "(1/sqrt(" << base_str << "))";
+            }
+            else
+            if (optimized_name == "pow_int") {
+                ss << "(" << base_str << ")^" << v_d;
+            }
+            debug_desc = ss.str();
+
+            uint8_t* cc = push_intermediate_code(ev, final_s.str());
+            auto f_opt = make_shared<Function>(ev->m_next_element_id++, optimized_name, 0, 0, final_s.buf.size(), cc, nullptr);
+            f_opt->debug_desc = debug_desc;
+
+            // Remove absorbed elements
+            elist->erase(base_chunk_range.first, base_chunk_range.second); // Base
+            elist->erase(f->args[0]); // Exponent (constant)
+
+            *it = Element(f_opt);
+        }
+        else {
+            // Generic pow (runtime exponent)
             s < 0xd9 < 0xc9                         // fxch                                 }
               < 0xd9 < 0xe4                         // ftst                                 }
               < 0x9b                                // wait                                 } if base is 0, leave it in st(0)
@@ -970,22 +1010,13 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
               < 0xd9 < 0xe0                         // fchs
 // store_and_exit:
               < 0xdd < 0xd9;                        // fstp        st(1)
-        }
 
-
-        uint8_t* cc = push_intermediate_code(ev, s.str());
-        auto f_opt = make_shared<Function>(ev->m_next_element_id++, matched ? optimized_name : "pow_opt", 2-matched, 0, s.buf.size(), cc, nullptr);
-
-        if (matched) {
-            f_opt->args.resize(1);
-            f_opt->args[0] = f->args[1];
-            elist->erase(f->args[0]);
-        }
-        else {
+            uint8_t* cc = push_intermediate_code(ev, s.str());
+            auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2, 0, s.buf.size(), cc, nullptr);
             f_opt->args[0] = f->args[0];
             f_opt->args[1] = f->args[1];
+            *it = Element(f_opt);
         }
-        *it = Element(f_opt);
     }
 }
 
