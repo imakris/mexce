@@ -2404,6 +2404,7 @@ void run_cse(evaluator* ev, elist_t& elist)
 
                 // Now replace 'other' (the root) with Load
                 other->type = Element_type::CVAR;
+                other->id   = temp_var_id;
                 other->v = temp_var;
                 other->c.reset();
                 other->f.reset();
