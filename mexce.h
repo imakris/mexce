@@ -79,8 +79,8 @@
  *   - `bnd(x, period)` — periodic wrap similar to `fmod`, returning `x`
  *     reduced to the `[0, period)` interval.
  *   - `ceil(x)`, `floor(x)`, `round(x)` and `int(x)` — rounding helpers.
- *   - `cos(x)`, `sin(x)`, `tan(x)` — trigonometric functions (optionally using
- *     polynomial refinements when `MEXCE_ACCURACY` is defined).
+ *   - `cos(x)`, `sin(x)`, `tan(x)` — trigonometric functions. `sin` and `cos`
+ *     use a 14-term Maclaurin polynomial for full 64-bit precision.
  *   - `exp(x)` and `pow(a, b)` — base-e exponent and exponentiation.
  *   - `expn(x)` — exponent part of `x`, and `sfc(x)` — significand/fractional
  *     component of `x` in the range `[0.5, 1)`.
@@ -601,39 +601,20 @@ Token_type get_infix_rank(char infix_op)
 }
 
 
-#if defined(MEXCE_ACCURACY)
 // 80-bit Maclaurin coeffs as 16-byte records (mantissa 8 + exp/sign 2 + pad)
+// Full precision series for cos(x) = sum_{n=0}^{N} (-1)^n * x^{2n} / (2n)!
+// 14 terms (up to x^26) provide full 64-bit precision for |x| <= pi
+// NOTE: Faster implementations could use quarter-wave reduction to [0, pi/4]
+// with fewer terms, but this requires complex quadrant tracking in JIT code.
 static uint64_t mexce_trig_mfactors[] = {
-#if (MEXCE_ACCURACY > 9)
-    0x9c9962823eb07306, 0x000000000000bf93,     // -1/(30!)
-#endif
-#if (MEXCE_ACCURACY > 8)
-    0x850c5131a842e9ba, 0x0000000000003f9d,     // +1/(28!)
-#endif
-#if (MEXCE_ACCURACY > 7)
     0xc4742fe35272cd1c, 0x000000000000bfa6,     // -1/(26!)
-#endif
-#if (MEXCE_ACCURACY > 6)
     0xf96780cb97abbe65, 0x0000000000003faf,     // +1/(24!)
-#endif
-#if (MEXCE_ACCURACY > 5)
     0x8671cb6dbfc294a3, 0x000000000000bfb9,     // -1/(22!)
-#endif
-#if (MEXCE_ACCURACY > 4)
     0xf2a15d201011283d, 0x0000000000003fc1,     // +1/(20!)
-#endif
-#if (MEXCE_ACCURACY > 3)
     0xb413c31dcbecbbde, 0x000000000000bfca,     // -1/(18!)
-#endif
-#if (MEXCE_ACCURACY > 2)
     0xd73f9f399dc0f88f, 0x0000000000003fd2,     // +1/(16!)
-#endif
-#if (MEXCE_ACCURACY > 1)
     0xc9cba54603e4e906, 0x000000000000bfda,     // -1/(14!)
-#endif
-#if (MEXCE_ACCURACY > 0)
     0x8f76c77fc6c4bdaa, 0x0000000000003fe2,     // +1/(12!)
-#endif
     0x93f27dbbc4fae397, 0x000000000000bfe9,     // -1/(10!)
     0xd00d00d00d00d00d, 0x0000000000003fef,     // +1/( 8!)
     0xb60b60b60b60b60b, 0x000000000000bff5,     // -1/( 6!)
@@ -669,59 +650,30 @@ static uint64_t mexce_trig_mfactors[] = {
     0xDD,0xD9, /* fstp  st(1)   (pop -1) */ \
     0xDE,0xE9  /* fsubp st(1), st => x - π/2 */
 
-#endif // MEXCE_ACCURACY
-
 
 inline Function Cos()
 {
-#ifndef MEXCE_ACCURACY
-    uint8_t code[] = { 0xD9, 0xFF }; // fcos
-    return Function(0, "cos", 1, 0, sizeof(code), code);
-#else
     // Range reduce, y=x^2, base -> coeff table, Horner on y
+    // 14-term Maclaurin polynomial for full 64-bit precision
     uint8_t code[] = {
         MEXCE_TRIG_RANGE_REDUCE,
         MEXCE_TRIG_Y_SQUARED,
         MEXCE_MOV_BASE_IMM,
 
-        // Horner (fixed part)
+        // Horner evaluation: 14 terms for full precision (up to x^26)
         MEXCE_FLD_BASE0,           0xD8,0xC9, MEXCE_FLD_BASE(0x10), 0xDE,0xC1,
         0xD8,0xC9, MEXCE_FLD_BASE(0x20), 0xDE,0xC1,
         0xD8,0xC9, MEXCE_FLD_BASE(0x30), 0xDE,0xC1,
         0xD8,0xC9, MEXCE_FLD_BASE(0x40), 0xDE,0xC1,
         0xD8,0xC9, MEXCE_FLD_BASE(0x50), 0xDE,0xC1,
-
-        // Optional deeper terms (compile-time gated) — placed OUTSIDE of macros
-#if (MEXCE_ACCURACY > 0)
         0xD8,0xC9, MEXCE_FLD_BASE(0x60), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 1)
         0xD8,0xC9, MEXCE_FLD_BASE(0x70), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 2)
         0xD8,0xC9, MEXCE_ADD_BASE_80, MEXCE_FLD_BASE0, 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 3)
         0xD8,0xC9, MEXCE_FLD_BASE(0x10), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 4)
         0xD8,0xC9, MEXCE_FLD_BASE(0x20), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 5)
         0xD8,0xC9, MEXCE_FLD_BASE(0x30), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 6)
         0xD8,0xC9, MEXCE_FLD_BASE(0x40), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 7)
         0xD8,0xC9, MEXCE_FLD_BASE(0x50), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 8)
-        0xD8,0xC9, MEXCE_FLD_BASE(0x60), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 9)
-        0xD8,0xC9, MEXCE_FLD_BASE(0x70), 0xDE,0xC1,
-#endif
         0xDD,0xD9 // fstp st(1)
     };
 #   ifdef MEXCE_64
@@ -732,17 +684,14 @@ inline Function Cos()
     *((void**)(code + 13)) = (void*)mexce_trig_mfactors;
 #   endif
     return Function(0, "cos", 1, 0, sizeof(code), code);
-#endif
 }
 
 
 
 inline Function Sin()
 {
-#ifndef MEXCE_ACCURACY
-    uint8_t code[] = { 0xD9, 0xFE }; // fsin
-    return Function(0, "sin", 1, 0, sizeof(code), code);
-#else
+    // sin(x) = cos(x - π/2), so we apply pre-shift then use cosine polynomial
+    // 14-term Maclaurin polynomial for full 64-bit precision
     uint8_t code[] = {
         // t = x − π/2 to reuse cosine polynomial
         MEXCE_SIN_PRESHIFT,
@@ -750,42 +699,20 @@ inline Function Sin()
         MEXCE_TRIG_Y_SQUARED,
         MEXCE_MOV_BASE_IMM,
 
-        // Same Horner ladder as in Cos()
+        // Same Horner ladder as in Cos(): 14 terms for full precision (up to x^26)
         MEXCE_FLD_BASE0,           0xD8,0xC9, MEXCE_FLD_BASE(0x10), 0xDE,0xC1,
         0xD8,0xC9, MEXCE_FLD_BASE(0x20), 0xDE,0xC1,
         0xD8,0xC9, MEXCE_FLD_BASE(0x30), 0xDE,0xC1,
         0xD8,0xC9, MEXCE_FLD_BASE(0x40), 0xDE,0xC1,
         0xD8,0xC9, MEXCE_FLD_BASE(0x50), 0xDE,0xC1,
-#if (MEXCE_ACCURACY > 0)
         0xD8,0xC9, MEXCE_FLD_BASE(0x60), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 1)
         0xD8,0xC9, MEXCE_FLD_BASE(0x70), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 2)
         0xD8,0xC9, MEXCE_ADD_BASE_80, MEXCE_FLD_BASE0, 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 3)
         0xD8,0xC9, MEXCE_FLD_BASE(0x10), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 4)
         0xD8,0xC9, MEXCE_FLD_BASE(0x20), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 5)
         0xD8,0xC9, MEXCE_FLD_BASE(0x30), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 6)
         0xD8,0xC9, MEXCE_FLD_BASE(0x40), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 7)
         0xD8,0xC9, MEXCE_FLD_BASE(0x50), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 8)
-        0xD8,0xC9, MEXCE_FLD_BASE(0x60), 0xDE,0xC1,
-#endif
-#if (MEXCE_ACCURACY > 9)
-        0xD8,0xC9, MEXCE_FLD_BASE(0x70), 0xDE,0xC1,
-#endif
         0xDD,0xD9 // fstp st(1)
     };
 #   ifdef MEXCE_64
@@ -796,7 +723,6 @@ inline Function Sin()
     *((void**)(code + 25)) = (void*)mexce_trig_mfactors;
 #   endif
     return Function(0, "sin", 1, 0, sizeof(code), code);
-#endif
 }
 
 

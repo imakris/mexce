@@ -146,8 +146,8 @@ Compiles and executes an expression for a single use without replacing the defau
 | `expn(x)` | Returns the exponent part of `x`. |
 | `sfc(x)` | Returns the significand (fractional part) of `x`. |
 
-### Configuration
-*   **`MEXCE_ACCURACY`:** Define this macro before including `mexce.h` to enable higher-precision polynomial refinements for `sin()` and `cos()`, trading a small runtime cost for improved accuracy.
+### Trigonometric Implementation
+The `sin()` and `cos()` functions use a 14-term Maclaurin series polynomial that provides full 64-bit (double) precision. This polynomial-based implementation replaces the x87 `fsin`/`fcos` instructions, ensuring consistent results across all platforms regardless of microcode implementation.
 
 ## Performance Analysis
 
