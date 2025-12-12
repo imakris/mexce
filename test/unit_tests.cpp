@@ -349,6 +349,19 @@ void test_pow_optimizer_special_cases(TestSuite& suite) {
     suite.expect_near("pow_optimizer_diff_low_branch", eval.evaluate(), std::pow(x, 7.0));
 }
 
+void test_nested_pow_folding_sympy_semantics(TestSuite& suite) {
+    mexce::evaluator eval;
+
+    suite.expect_near("nested_pow_negative_sqrt_squared_constant",
+        mexce::evaluator().evaluate("((-2)^0.5)^2"),
+        -2.0);
+
+    double x = -2.0;
+    eval.bind(x, "x");
+    eval.set_expression("((x^0.5)^2)");
+    suite.expect_near("nested_pow_negative_sqrt_squared_variable", eval.evaluate(), x);
+}
+
 void test_helper_functions_and_element(TestSuite& suite) {
     using namespace mexce::impl;
     mexce::evaluator eval;
@@ -723,6 +736,7 @@ int main() {
     test_min_max_and_arithmetic(suite);
     test_constants_and_single_shot(suite);
     test_pow_optimizer_special_cases(suite);
+    test_nested_pow_folding_sympy_semantics(suite);
     test_helper_functions_and_element(suite);
     test_binding_and_unbinding(suite);
     test_binding_name_conflicts(suite);
