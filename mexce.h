@@ -118,10 +118,12 @@
 #include <cstring>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <iomanip>
 #include <list>
 #include <map>
 #include <memory>
+#include <set>
 #include <new>
 #include <sstream>
 #include <string>
@@ -190,6 +192,7 @@ namespace impl {
     void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
     void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
     string elist_to_string(const elist_t& elist);
+    void run_cse(evaluator* ev, elist_t& elist);
 }
 
 
@@ -244,6 +247,7 @@ private:
     impl::variable_map_t    m_variables;
     impl::constant_map_t    m_constants;
     uint64_t                m_next_element_id           = 0;
+    std::list<double>       m_cse_temps;               // Storage for common subexpressions
 
     double                (*evaluate_fptr)()            = nullptr;
 
@@ -255,7 +259,7 @@ private:
     friend void impl::asmd_optimizer(impl::elist_it_t it, evaluator* ev, impl::elist_t* elist);
     friend void impl::pow_optimizer(impl::elist_it_t it, evaluator* ev, impl::elist_t* elist);
     friend uint8_t* impl::push_intermediate_code(evaluator* ev, const std::string& s);
-
+    friend void impl::run_cse(evaluator* ev, impl::elist_t& elist);
 
     template <typename = void> void bind() {}
     template <typename = void> void unbind() {}
@@ -463,6 +467,7 @@ struct Function
 
     bool                force_not_constant = false;
     string              debug_desc;
+    string              cse_store_suffix;  // CSE store code to emit after function code
 
     Function(
         uint64_t    i,
@@ -999,17 +1004,18 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             }
             else
             if (optimized_name == "inv_sqrt") {
-                ss << "(1/sqrt(" << base_str << "))";
+                ss << "inv_sqrt(" << base_str << ")";
             }
             else
             if (optimized_name == "pow_int") {
-                ss << "(" << base_str << ")^" << v_d;
+                ss << "pow_int(" << base_str << ", " << static_cast<int64_t>(v_d) << ")";
             }
             debug_desc = ss.str();
 
             uint8_t* cc = push_intermediate_code(ev, final_s.str());
             auto f_opt = make_shared<Function>(ev->m_next_element_id++, optimized_name, 0, 0, final_s.buf.size(), cc, nullptr);
             f_opt->debug_desc = debug_desc;
+            f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
 
             // Remove absorbed elements
             elist->erase(base_chunk_range.first, base_chunk_range.second); // Base
@@ -1042,6 +1048,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2, 0, s.buf.size(), cc, nullptr);
             f_opt->args[0] = f->args[0];
             f_opt->args[1] = f->args[1];
+            f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
             *it = Element(f_opt);
         }
     }
@@ -1586,6 +1593,10 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             case Element_type::CFUNC: {
                 auto tf = it->f;
                 code_buffer.write(tf->code.data(), tf->code.size());
+                // Emit CSE store suffix if present (stores result to temp for reuse)
+                if (!tf->cse_store_suffix.empty()) {
+                    code_buffer.write(tf->cse_store_suffix.data(), tf->cse_store_suffix.size());
+                }
                 current_depth = current_depth - static_cast<int>(tf->num_args) + 1;
                 break;
             }
@@ -2020,6 +2031,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     uint8_t* cc = push_intermediate_code(ev, s.str());
     auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.buf.size(), cc, nullptr);
     f_opt->debug_desc = "(" + debug_ss.str() + ")";
+    f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
 
     *it = Element(f_opt);
 }
@@ -2222,6 +2234,193 @@ inline bool is_alphabetic(char c) { return (c>='A' && c<='Z') || (c>='a' && c<='
 inline bool is_numeric(   char c) { return  c>='0' && c<='9'; }
 
 
+inline
+string get_element_signature(const Element& e)
+{
+    stringstream ss;
+    if (e.type == Element_type::CCONST) {
+        ss << "C:" << double_to_hex(e.c->value); // Exact double bits (no aliasing UB)
+    } else if (e.type == Element_type::CVAR) {
+        ss << "V:" << e.v->name;
+    } else if (e.type == Element_type::CFUNC) {
+        ss << "F:" << e.f->name << "(";
+        for (const auto& arg_it : e.f->args) {
+            ss << get_element_signature(*arg_it) << ",";
+        }
+        ss << ")";
+    }
+    return ss.str();
+}
+
+inline
+void run_cse(evaluator* ev, elist_t& elist)
+{
+    // 1. Identify common subexpressions via signature
+    // Map Signature -> Vector of (Parent Iterator, Element Pointer) pairs?
+    // No, elements are shared pointers inside the list.
+    // We need the iterator to the root of the subtree in 'elist'.
+
+    // But 'elist' is a list of roots (usually 1). The arguments are children.
+    // We need to traverse the tree.
+
+    // Map Signature -> List of occurrences.
+    // Store ID alongside pointer to avoid dereferencing freed memory.
+    // Store scan position to reliably reflect evaluation order (list order),
+    // rather than relying on Element::id allocation order.
+    struct Occurrence {
+        Element*  element;
+        uint64_t  id;
+        size_t    position;
+    };
+    map<string, vector<Occurrence> > occurrences;
+
+    // Track erased element IDs to avoid accessing freed memory
+    std::set<uint64_t> erased_ids;
+
+    // Helper to determine operation class (1 = add/sub, 2 = mul/div, 0 = other)
+    auto get_fclass = [](const string& name) -> int {
+        return (name == "add" || name == "sub") ? 1 : (name == "mul" || name == "div") ? 2 : 0;
+    };
+
+    // Helper to check if a function will be absorbed by its parent (same class)
+    auto will_be_absorbed = [&](const Element& e) -> bool {
+        if (e.type != Element_type::CFUNC) return false;
+        int fclass = get_fclass(e.f->name);
+        if (fclass == 0) return false;  // Not add/sub/mul/div
+        if (e.f->parent == elist.end()) return false;
+        if (e.f->parent->type != Element_type::CFUNC) return false;
+        int pclass = get_fclass(e.f->parent->f->name);
+        return pclass == fclass;  // Will be absorbed if same class
+    };
+
+    // Collect all CFUNC elements with their signatures
+    // Skip functions that will be absorbed (optimizer reorders, breaking CSE)
+    size_t scan_pos = 0;
+    for (auto& root : elist) {
+        if (root.type == Element_type::CFUNC && !will_be_absorbed(root)) {
+            string sig = get_element_signature(root);
+            occurrences[sig].push_back({&root, root.id, scan_pos});
+        }
+        ++scan_pos;
+    }
+
+    // 2. Apply CSE
+    for (auto& entry : occurrences) {
+        if (entry.second.size() > 1) {
+            // Sort by list position to find the first occurrence (evaluation order)
+            std::sort(entry.second.begin(), entry.second.end(), [](const Occurrence& a, const Occurrence& b){
+                return a.position < b.position;
+            });
+
+            // Re-check signatures: earlier CSE mutations can change subtrees, making
+            // precomputed signature groups stale.
+            std::vector<char> sig_match(entry.second.size(), 0);
+            for (size_t i = 0; i < entry.second.size(); ++i) {
+                const uint64_t elem_id = entry.second[i].id;
+                if (erased_ids.find(elem_id) != erased_ids.end()) {
+                    continue;
+                }
+                Element* elem = entry.second[i].element;
+                if (elem && get_element_signature(*elem) == entry.first) {
+                    sig_match[i] = 1;
+                }
+            }
+
+            // Find the first non-erased, still-matching element (use stored ID)
+            Element* first = nullptr;
+            size_t first_idx = 0;
+            for (size_t i = 0; i < entry.second.size(); ++i) {
+                if (sig_match[i]) {
+                    first = entry.second[i].element;
+                    first_idx = i;
+                    break;
+                }
+            }
+
+            // Count remaining valid elements (still matching the signature)
+            size_t valid_count = 0;
+            for (size_t i = first_idx; i < entry.second.size(); ++i) {
+                if (sig_match[i]) {
+                    valid_count++;
+                }
+            }
+
+            // Need at least 2 valid occurrences for CSE to be worthwhile
+            if (valid_count < 2 || first == nullptr) {
+                continue;
+            }
+
+            // Allocate a temporary storage slot
+            ev->m_cse_temps.push_back(0.0);
+            double* temp_addr = &ev->m_cse_temps.back();
+
+            // Transform First: Set CSE store suffix
+            // Generate FST instruction to store result after function executes.
+            // We store this as cse_store_suffix which survives optimizer transformations.
+            mexce_charstream store_code;
+#ifdef MEXCE_64
+            store_code < 0x48 < 0xb8;
+            store_code << (void*)temp_addr;
+            store_code < 0xdd < 0x10; // fst qword ptr [rax]
+#else
+            store_code < 0xdd < 0x15; // fst qword ptr [addr]
+            store_code << (void*)temp_addr;
+#endif
+
+            // Set the CSE store suffix on the function.
+            // This will be emitted after the function's code during compilation.
+            first->f->cse_store_suffix = store_code.str();
+
+            // Shared temp variable for all subsequent replacements in this group.
+            const uint64_t temp_var_id = ev->m_next_element_id++;
+            auto temp_var = make_shared<Variable>(temp_var_id, (volatile void*)temp_addr, "cse_temp_" + std::to_string(temp_var_id), M64FP);
+
+
+            // Transform Others: Replace with Load
+            for (size_t i = first_idx + 1; i < entry.second.size(); ++i) {
+                uint64_t other_id = entry.second[i].id;
+
+                // Skip elements that were erased by a previous CSE pass (check stored ID)
+                if (erased_ids.find(other_id) != erased_ids.end()) {
+                    continue;
+                }
+
+                // Skip if the element no longer matches this signature (tree was mutated)
+                if (!sig_match[i]) {
+                    continue;
+                }
+
+                Element* other = entry.second[i].element;
+
+                // Delete the subtree (arguments) of 'other' and track erased IDs
+                std::function<void(Element*, elist_it_t)> delete_subtree = [&](Element* e, elist_it_t it) {
+                    erased_ids.insert(e->id);
+                    if (e->type == Element_type::CFUNC) {
+                        for (auto arg_it : e->f->args) {
+                            delete_subtree(&(*arg_it), arg_it);
+                        }
+                    }
+                    elist.erase(it);
+                };
+
+                // Execute deletion of children (but not 'other' itself)
+                if (other->type == Element_type::CFUNC) {
+                    for (auto arg_it : other->f->args) {
+                        delete_subtree(&(*arg_it), arg_it);
+                    }
+                }
+
+                // Now replace 'other' (the root) with Load
+                other->type = Element_type::CVAR;
+                other->id   = temp_var_id;
+                other->v = temp_var;
+                other->c.reset();
+                other->f.reset();
+            }
+        }
+    }
+}
+
 } // mexce_impl
 
 
@@ -2333,6 +2532,7 @@ void evaluator::set_expression(std::string e)
     m_intermediate_constants.clear();
     m_intermediate_code.clear();
     m_elist.clear();
+    m_cse_temps.clear(); // Clear previous CSE temps
 
     if (evaluate_fptr) {
         free_executable_buffer(evaluate_fptr, m_buffer_size);
@@ -2715,6 +2915,11 @@ void evaluator::set_expression(std::string e)
 
     // link functions to their arguments (1)
     link_arguments(m_elist);
+
+    // Run Common Subexpression Elimination (CSE)
+    // This must run before destructive optimizers (asmd, pow) to catch 
+    // identical subtrees like div(2.2, y).
+    run_cse(this, m_elist);
 
     // choose more suitable functions, where applicable
     for (auto y = m_elist.begin(); y != m_elist.end(); ) {
