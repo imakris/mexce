@@ -618,11 +618,40 @@ int main(int argc, char* argv[])
     else {
         constexpr size_t kCompileBins = 10;
         std::vector<size_t> compile_hist(kCompileBins, 0);
-        const uint64_t denom = (compile_max_ns - compile_min_ns) + 1;
+
+        // Use logarithmic bins so that both the common fast compilations and
+        // rare slow outliers are visible.
+        uint64_t log_min_ns = compile_min_ns;
+        uint64_t log_max_ns = compile_max_ns;
+
+        // Guard against all-zero or degenerate ranges.
+        if (log_min_ns == 0) {
+            log_min_ns = std::numeric_limits<uint64_t>::max();
+            for (uint64_t ns : compile_times) {
+                if (ns > 0 && ns < log_min_ns) {
+                    log_min_ns = ns;
+                }
+            }
+            if (log_min_ns == std::numeric_limits<uint64_t>::max()) {
+                log_min_ns = 1;
+            }
+        }
+        if (log_max_ns < log_min_ns) {
+            log_max_ns = log_min_ns;
+        }
+
+        const long double log_min = std::log10((long double)log_min_ns);
+        const long double log_max = std::log10((long double)log_max_ns);
+        const long double log_range = (log_max > log_min) ? (log_max - log_min) : 1.0L;
+
         for (uint64_t ns : compile_times) {
             size_t bin_idx = 0;
-            if (compile_max_ns > compile_min_ns) {
-                bin_idx = (size_t)(((ns - compile_min_ns) * kCompileBins) / denom);
+            if (log_max > log_min && ns > 0) {
+                const long double x = std::log10((long double)ns);
+                long double t = (x - log_min) / log_range;
+                if (t < 0.0L) t = 0.0L;
+                if (t > 1.0L) t = 1.0L;
+                bin_idx = (size_t)(t * kCompileBins);
                 if (bin_idx >= kCompileBins) {
                     bin_idx = kCompileBins - 1;
                 }
@@ -640,17 +669,30 @@ int main(int argc, char* argv[])
         counts.reserve(kCompileBins);
 
         for (size_t bin_idx = 0; bin_idx < kCompileBins; ++bin_idx) {
-            const long double start_ratio = (long double)bin_idx / (long double)kCompileBins;
-            const long double end_ratio = (long double)(bin_idx + 1) / (long double)kCompileBins;
-            const uint64_t start_offset = (uint64_t)std::floor(start_ratio * denom);
-            const uint64_t end_offset = (uint64_t)std::floor(end_ratio * denom);
-            uint64_t start_ns = compile_min_ns + start_offset;
-            uint64_t end_ns = compile_min_ns + (end_offset == 0 ? 0 : end_offset - 1);
-            if (bin_idx == kCompileBins - 1) {
+            uint64_t start_ns = 0;
+            uint64_t end_ns = 0;
+
+            if (log_max <= log_min) {
+                // Degenerate case: everything in one bucket.
+                start_ns = compile_min_ns;
                 end_ns = compile_max_ns;
-            }
-            if (end_ns < start_ns) {
-                end_ns = start_ns;
+            } else {
+                const long double start_ratio = (long double)bin_idx / (long double)kCompileBins;
+                const long double end_ratio = (long double)(bin_idx + 1) / (long double)kCompileBins;
+
+                const long double start_log = log_min + start_ratio * log_range;
+                const long double end_log = log_min + end_ratio * log_range;
+
+                start_ns = (uint64_t)std::floor(std::pow((long double)10.0, start_log));
+                end_ns   = (uint64_t)std::floor(std::pow((long double)10.0, end_log));
+
+                if (start_ns < compile_min_ns) start_ns = compile_min_ns;
+                if (end_ns > compile_max_ns)   end_ns = compile_max_ns;
+                if (end_ns < start_ns)         end_ns = start_ns;
+
+                if (bin_idx == kCompileBins - 1) {
+                    end_ns = compile_max_ns;
+                }
             }
 
             std::string label;

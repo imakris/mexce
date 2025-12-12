@@ -1505,6 +1505,21 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
     int current_depth = 0;
 
     for (auto it = first; it != last; ++it) {
+        // Peephole: if the same leaf is loaded twice in a row, duplicate ST(0)
+        // instead of reloading from memory.
+        if (it != first && (it->type == Element_type::CVAR || it->type == Element_type::CCONST)) {
+            auto prev = it;
+            --prev;
+            if (prev->type == it->type && prev->id == it->id) {
+                code_buffer < 0xd9 < 0xc0; // fld st(0)
+                ++current_depth;
+                if (current_depth > 8) {
+                    throw std::overflow_error("Expression too complex for x87 FPU (stack overflow)");
+                }
+                continue;
+            }
+        }
+
         switch (it->type) {
             case Element_type::CVAR: {
                 auto tn = it->v;
@@ -1535,14 +1550,36 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             }
             case Element_type::CCONST: {
                 auto tn = it->c;
+
+                // Fast path for common x87 constants, avoids memory load.
+                // Important: do not convert negative zero to positive zero.
+                double v  = tn->value;
+                double av = std::abs(v);
+                bool hit  = false;
+
+                if (av == 0.0 && !std::signbit(v))     { code_buffer < 0xd9 < 0xee; hit = true; } else  // fldz
+                if (av == 1.0)                         { code_buffer < 0xd9 < 0xe8; hit = true; } else  // fld1
+                if (av == 3.1415926535897932384626433) { code_buffer < 0xd9 < 0xeb; hit = true; } else  // fldpi
+                if (av == 3.32192809488736234787)      { code_buffer < 0xd9 < 0xe9; hit = true; } else  // fldl2t
+                if (av == 1.44269504088896340736)      { code_buffer < 0xd9 < 0xea; hit = true; } else  // fldl2e
+                if (av == 0.3010299956639811952137)    { code_buffer < 0xd9 < 0xec; hit = true; } else  // fldlg2
+                if (av == 0.6931471805599453094172)    { code_buffer < 0xd9 < 0xed; hit = true; }       // fldln2
+
+                if (hit) {
+                    if (v < 0.0) {
+                        code_buffer < 0xd9 < 0xe0;  // fchs
+                    }
+                } else {
 #ifdef MEXCE_64
-                code_buffer << (uint16_t)0xb848;
-                code_buffer << (void*)tn->address;
-                code_buffer < 0xdd < 0x00;
+                    code_buffer << (uint16_t)0xb848;
+                    code_buffer << (void*)tn->address;
+                    code_buffer < 0xdd < 0x00;
 #else
-                code_buffer < 0xdd < 0x05;
-                code_buffer << (void*)(tn->address);
+                    code_buffer < 0xdd < 0x05;
+                    code_buffer << (void*)(tn->address);
 #endif
+                }
+
                 ++current_depth;
                 break;
             }
@@ -2737,21 +2774,26 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
         // In x64 however, the result is expected to be in xmm0, thus we should
         // move it there and pop the FPU stack. We use the stack as a temporary
         // to avoid depending on any member variable address (move-safe).
-
-        0x48, 0x83, 0xec, 0x08,                                     // sub  rsp, 8
         0xdd, 0x1c, 0x24,                                           // fstp qword ptr [rsp]
         0xf2, 0x0f, 0x10, 0x04, 0x24,                               // movsd xmm0, qword ptr [rsp]
-        0x48, 0x83, 0xc4, 0x08,                                     // add  rsp, 8
-        0x58,                                                       // pop  rax
+        0x48, 0x83, 0xc4, 0x20,                                     // add  rsp, 32
 #endif
         0xc3                                                        // ret
     };
 
     mexce_charstream code_buffer;
+    // Reduce vector growth reallocations during compilation (helps when compiling many
+    // expressions and also when compiling small chunks during constant folding).
+    {
+        size_t n = 0;
+        for (auto it = first; it != last; ++it) {
+            ++n;
+        }
+        // Heuristic: a small fixed prologue plus ~2 dozen bytes per element.
+        code_buffer.buf.reserve(96 + n * 24);
+    }
 
 #ifdef MEXCE_64
-    // On x64 we are using rax to fetch/store addresses
-    code_buffer < 0x50; // push rax
     // Reserve 32 bytes of stack space for ABI compliance (Win64) and scratch.
     code_buffer < 0x48 < 0x83 < 0xec < 0x20;   // sub  rsp, 32
 #endif
@@ -2759,8 +2801,7 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     compile_elist(code_buffer, first, last);
 
 #ifdef MEXCE_64
-    // Deallocate stack space before return sequence.
-    code_buffer < 0x48 < 0x83 < 0xc4 < 0x20;   // add  rsp, 32
+    // Stack space is released as part of the return sequence on x64.
 #endif
 
     // copy the return sequence
