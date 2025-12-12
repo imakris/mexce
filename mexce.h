@@ -2967,7 +2967,22 @@ void evaluator::set_expression(std::string e)
             auto f = y->f;
 
             // eliminate constants
-            if (!f->force_not_constant) {
+            bool allow_constant_elimination = !f->force_not_constant;
+
+            // Avoid prematurely folding nested powers: keep an inner pow(..) node intact so that
+            // the pow optimizer can fold (a^b)^n -> a^(b*n) when applicable.
+            if (allow_constant_elimination &&
+                f->name == "pow" &&
+                f->parent != m_elist.end() &&
+                f->parent->type == Element_type::CFUNC)
+            {
+                auto pf = f->parent->f;
+                if (pf->name == "pow" && f->parent_arg_index == 1) {
+                    allow_constant_elimination = false;
+                }
+            }
+
+            if (allow_constant_elimination) {
                 bool all_args_are_const = true;
                 for (size_t j = 0; j < f->num_args; j++) {
                     if (f->args[j]->type != Element_type::CCONST) {
