@@ -5,6 +5,10 @@ on:
     branches: [ master, main ]
   pull_request:
 
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   coverage:
     runs-on: ubuntu-latest
@@ -91,15 +95,15 @@ jobs:
           disable_search: true
           flags: ${{ matrix.compiler }}
           fail_ci_if_error: false
-        # Public repos can upload tokenless; uncomment if you prefer using a secret:
-        # env:
-        #   CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: true
 
       - name: Upload test results to Codecov
         if: always()
         uses: codecov/test-results-action@v1
         with:
           files: build/test-results.xml
+          fail_ci_if_error: false
+          use_oidc: true
 
       - name: Upload artifacts
         if: always()
