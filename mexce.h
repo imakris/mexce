@@ -2239,7 +2239,7 @@ string get_element_signature(const Element& e)
 {
     stringstream ss;
     if (e.type == Element_type::CCONST) {
-        ss << "C:" << std::hex << *(uint64_t*)&e.c->value; // Exact double rep
+        ss << "C:" << double_to_hex(e.c->value); // Exact double bits (no aliasing UB)
     } else if (e.type == Element_type::CVAR) {
         ss << "V:" << e.v->name;
     } else if (e.type == Element_type::CFUNC) {
@@ -2304,21 +2304,35 @@ void run_cse(evaluator* ev, elist_t& elist)
                 return a.second < b.second;
             });
 
-            // Find the first non-erased element (use stored ID, not dereferenced pointer)
+            // Re-check signatures: earlier CSE mutations can change subtrees, making
+            // precomputed signature groups stale.
+            std::vector<char> sig_match(entry.second.size(), 0);
+            for (size_t i = 0; i < entry.second.size(); ++i) {
+                const uint64_t elem_id = entry.second[i].second;
+                if (erased_ids.find(elem_id) != erased_ids.end()) {
+                    continue;
+                }
+                Element* elem = entry.second[i].first;
+                if (elem && get_element_signature(*elem) == entry.first) {
+                    sig_match[i] = 1;
+                }
+            }
+
+            // Find the first non-erased, still-matching element (use stored ID)
             Element* first = nullptr;
             size_t first_idx = 0;
             for (size_t i = 0; i < entry.second.size(); ++i) {
-                if (erased_ids.find(entry.second[i].second) == erased_ids.end()) {
+                if (sig_match[i]) {
                     first = entry.second[i].first;
                     first_idx = i;
                     break;
                 }
             }
 
-            // Count remaining valid elements (use stored IDs)
+            // Count remaining valid elements (still matching the signature)
             size_t valid_count = 0;
             for (size_t i = first_idx; i < entry.second.size(); ++i) {
-                if (erased_ids.find(entry.second[i].second) == erased_ids.end()) {
+                if (sig_match[i]) {
                     valid_count++;
                 }
             }
@@ -2349,6 +2363,10 @@ void run_cse(evaluator* ev, elist_t& elist)
             // This will be emitted after the function's code during compilation.
             first->f->cse_store_suffix = store_code.str();
 
+            // Shared temp variable for all subsequent replacements in this group.
+            const uint64_t temp_var_id = ev->m_next_element_id++;
+            auto temp_var = make_shared<Variable>(temp_var_id, (volatile void*)temp_addr, "cse_temp_" + std::to_string(temp_var_id), M64FP);
+
 
             // Transform Others: Replace with Load
             for (size_t i = first_idx + 1; i < entry.second.size(); ++i) {
@@ -2359,10 +2377,12 @@ void run_cse(evaluator* ev, elist_t& elist)
                     continue;
                 }
 
-                Element* other = entry.second[i].first;
+                // Skip if the element no longer matches this signature (tree was mutated)
+                if (!sig_match[i]) {
+                    continue;
+                }
 
-                // We replace 'other' with a Variable load.
-                auto temp_var = make_shared<Variable>(ev->m_next_element_id++, (void*)temp_addr, "cse_temp", M64FP);
+                Element* other = entry.second[i].first;
 
                 // Delete the subtree (arguments) of 'other' and track erased IDs
                 std::function<void(Element*, elist_it_t)> delete_subtree = [&](Element* e, elist_it_t it) {
