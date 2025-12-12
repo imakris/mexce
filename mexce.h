@@ -248,6 +248,7 @@ private:
     impl::constant_map_t    m_constants;
     uint64_t                m_next_element_id           = 0;
     std::list<double>       m_cse_temps;               // Storage for common subexpressions
+    std::map<uint64_t, std::pair<impl::elist_t, double>> m_power_terms; // pow-optimized kernel/exponent for nested folding
 
     double                (*evaluate_fptr)()            = nullptr;
 
@@ -938,6 +939,38 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
     auto f = it->f;
 
+    // Nested power folding: (a^b)^n -> a^(b*n) when the outer exponent is an integer.
+    // This matches the benchmark reference semantics (SymPy rational evaluation) and
+    // avoids spurious NaNs from intermediate real-domain pow/sqrt on negative bases.
+    if (f->args[0]->type == Element_type::CCONST && f->args[1]->type == Element_type::CFUNC) {
+        const uint64_t base_id = f->args[1]->id;
+        auto pit = ev->m_power_terms.find(base_id);
+        if (pit != ev->m_power_terms.end()) {
+            const double outer_exp_d = f->args[0]->c->value;
+            const double outer_round = round(outer_exp_d);
+            if (std::isfinite(outer_exp_d) && outer_round == outer_exp_d) {
+                const double inner_exp = pit->second.second;
+                const double combined_exp = inner_exp * outer_exp_d;
+                if (std::isfinite(combined_exp)) {
+                    *f->args[0] = Element(make_intermediate_constant(ev, combined_exp));
+
+                    auto base_it = f->args[1];
+                    elist->splice(base_it, pit->second.first);
+
+                    f->args[1] = std::prev(base_it);
+                    if (f->args[1]->type == Element_type::CFUNC) {
+                        auto cf = f->args[1]->f;
+                        cf->parent = it;
+                        cf->parent_arg_index = 1;
+                    }
+
+                    elist->erase(base_it);
+                    ev->m_power_terms.erase(pit);
+                }
+            }
+        }
+    }
+
     // Arg 0 is Exponent (top of stack), Arg 1 is Base (below top) in list
     if (f->args[0]->type == Element_type::CCONST) {
         auto v = f->args[0]->c;
@@ -992,12 +1025,15 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
         if (matched) {
             // Pre-compile the base code to maintain execution order
+            elist_t base_chunk;
+            base_chunk.splice(base_chunk.end(), *elist, base_chunk_range.first, base_chunk_range.second);
+
             mexce_charstream final_s;
-            compile_elist(final_s, base_chunk_range.first, base_chunk_range.second);
+            compile_elist(final_s, base_chunk.begin(), base_chunk.end());
             final_s.write((const char*)s.buf.data(), s.buf.size());
 
             // Generate correct debug string
-            string base_str = elist_to_string(elist_t(base_chunk_range.first, base_chunk_range.second));
+            string base_str = elist_to_string(base_chunk);
             stringstream ss;
             if (optimized_name == "sqrt") {
                 ss << "sqrt(" << base_str << ")";
@@ -1017,8 +1053,10 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             f_opt->debug_desc = debug_desc;
             f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
 
-            // Remove absorbed elements
-            elist->erase(base_chunk_range.first, base_chunk_range.second); // Base
+            if (optimized_name == "sqrt" || optimized_name == "inv_sqrt" || optimized_name == "pow_int") {
+                ev->m_power_terms[f_opt->id] = std::make_pair(std::move(base_chunk), v_d);
+            }
+
             elist->erase(f->args[0]); // Exponent (constant)
 
             *it = Element(f_opt);
@@ -2533,6 +2571,7 @@ void evaluator::set_expression(std::string e)
     m_intermediate_code.clear();
     m_elist.clear();
     m_cse_temps.clear(); // Clear previous CSE temps
+    m_power_terms.clear();
 
     if (evaluate_fptr) {
         free_executable_buffer(evaluate_fptr, m_buffer_size);
@@ -2928,7 +2967,22 @@ void evaluator::set_expression(std::string e)
             auto f = y->f;
 
             // eliminate constants
-            if (!f->force_not_constant) {
+            bool allow_constant_elimination = !f->force_not_constant;
+
+            // Avoid prematurely folding nested powers: keep an inner pow(..) node intact so that
+            // the pow optimizer can fold (a^b)^n -> a^(b*n) when applicable.
+            if (allow_constant_elimination &&
+                f->name == "pow" &&
+                f->parent != m_elist.end() &&
+                f->parent->type == Element_type::CFUNC)
+            {
+                auto pf = f->parent->f;
+                if (pf->name == "pow" && f->parent_arg_index == 1) {
+                    allow_constant_elimination = false;
+                }
+            }
+
+            if (allow_constant_elimination) {
                 bool all_args_are_const = true;
                 for (size_t j = 0; j < f->num_args; j++) {
                     if (f->args[j]->type != Element_type::CCONST) {
