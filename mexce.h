@@ -947,16 +947,17 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     auto f = it->f;
 
     // Arg 0 is Exponent (top of stack), Arg 1 is Base (below top) in list.
-    // Nested power folding: (a^b)^c -> a^(b*c) for integer exponents.
+    // Nested power folding: (a^b)^c -> a^(b*c) when the outer exponent is integer.
+    // This mirrors CAS-style simplification rules and is safe under principal complex exponentiation,
+    // but can change real-domain NaN behavior for negative bases.
     if (f->args[0]->type == Element_type::CCONST && f->args[1]->type == Element_type::CFUNC) {
         double current_exp = f->args[0]->c->value;
-        uint64_t base_id = f->args[1]->f->id;
-        auto map_it = ev->m_power_terms.find(base_id);
-        if (map_it != ev->m_power_terms.end() && !map_it->second.first.empty()) {
-            double prev_exp = map_it->second.second;
-            double r_current = round(current_exp);
-            double r_prev = round(prev_exp);
-            if (abs(current_exp - r_current) < 1e-9 && abs(prev_exp - r_prev) < 1e-9) {
+        double r_current = round(current_exp);
+        if (std::isfinite(current_exp) && abs(current_exp - r_current) < 1e-9) {
+            uint64_t base_id = f->args[1]->f->id;
+            auto map_it = ev->m_power_terms.find(base_id);
+            if (map_it != ev->m_power_terms.end() && !map_it->second.first.empty()) {
+                double prev_exp = map_it->second.second;
                 double new_exp = prev_exp * current_exp;
                 *f->args[0] = Element(make_intermediate_constant(ev, new_exp));
 
