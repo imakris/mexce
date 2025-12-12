@@ -2263,10 +2263,16 @@ void run_cse(evaluator* ev, elist_t& elist)
     // But 'elist' is a list of roots (usually 1). The arguments are children.
     // We need to traverse the tree.
 
-    // Map Signature -> List of (Element*, ID) pairs
-    // Store ID alongside pointer to avoid dereferencing freed memory
-    using ElemEntry = std::pair<Element*, uint64_t>;
-    map<string, vector<ElemEntry> > occurrences;
+    // Map Signature -> List of occurrences.
+    // Store ID alongside pointer to avoid dereferencing freed memory.
+    // Store scan position to reliably reflect evaluation order (list order),
+    // rather than relying on Element::id allocation order.
+    struct Occurrence {
+        Element*  element;
+        uint64_t  id;
+        size_t    position;
+    };
+    map<string, vector<Occurrence> > occurrences;
 
     // Track erased element IDs to avoid accessing freed memory
     std::set<uint64_t> erased_ids;
@@ -2289,30 +2295,32 @@ void run_cse(evaluator* ev, elist_t& elist)
 
     // Collect all CFUNC elements with their signatures
     // Skip functions that will be absorbed (optimizer reorders, breaking CSE)
+    size_t scan_pos = 0;
     for (auto& root : elist) {
         if (root.type == Element_type::CFUNC && !will_be_absorbed(root)) {
             string sig = get_element_signature(root);
-            occurrences[sig].push_back({&root, root.id});
+            occurrences[sig].push_back({&root, root.id, scan_pos});
         }
+        ++scan_pos;
     }
 
     // 2. Apply CSE
     for (auto& entry : occurrences) {
         if (entry.second.size() > 1) {
-            // Sort by ID to find the first occurrence (execution order)
-            std::sort(entry.second.begin(), entry.second.end(), [](const ElemEntry& a, const ElemEntry& b){
-                return a.second < b.second;
+            // Sort by list position to find the first occurrence (evaluation order)
+            std::sort(entry.second.begin(), entry.second.end(), [](const Occurrence& a, const Occurrence& b){
+                return a.position < b.position;
             });
 
             // Re-check signatures: earlier CSE mutations can change subtrees, making
             // precomputed signature groups stale.
             std::vector<char> sig_match(entry.second.size(), 0);
             for (size_t i = 0; i < entry.second.size(); ++i) {
-                const uint64_t elem_id = entry.second[i].second;
+                const uint64_t elem_id = entry.second[i].id;
                 if (erased_ids.find(elem_id) != erased_ids.end()) {
                     continue;
                 }
-                Element* elem = entry.second[i].first;
+                Element* elem = entry.second[i].element;
                 if (elem && get_element_signature(*elem) == entry.first) {
                     sig_match[i] = 1;
                 }
@@ -2323,7 +2331,7 @@ void run_cse(evaluator* ev, elist_t& elist)
             size_t first_idx = 0;
             for (size_t i = 0; i < entry.second.size(); ++i) {
                 if (sig_match[i]) {
-                    first = entry.second[i].first;
+                    first = entry.second[i].element;
                     first_idx = i;
                     break;
                 }
@@ -2370,7 +2378,7 @@ void run_cse(evaluator* ev, elist_t& elist)
 
             // Transform Others: Replace with Load
             for (size_t i = first_idx + 1; i < entry.second.size(); ++i) {
-                uint64_t other_id = entry.second[i].second;
+                uint64_t other_id = entry.second[i].id;
 
                 // Skip elements that were erased by a previous CSE pass (check stored ID)
                 if (erased_ids.find(other_id) != erased_ids.end()) {
@@ -2382,7 +2390,7 @@ void run_cse(evaluator* ev, elist_t& elist)
                     continue;
                 }
 
-                Element* other = entry.second[i].first;
+                Element* other = entry.second[i].element;
 
                 // Delete the subtree (arguments) of 'other' and track erased IDs
                 std::function<void(Element*, elist_it_t)> delete_subtree = [&](Element* e, elist_it_t it) {
