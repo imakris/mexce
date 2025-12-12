@@ -362,6 +362,52 @@ void test_nested_pow_folding_sympy_semantics(TestSuite& suite) {
     suite.expect_near("nested_pow_negative_sqrt_squared_variable", eval.evaluate(), x);
 }
 
+void test_linear_term_canonicalization(TestSuite& suite) {
+    mexce::evaluator eval;
+    double x = 3.0, y = 5.0;
+    eval.bind(x, "x", y, "y");
+
+    // Test 1: Basic correctness - 2*x + 3*x
+    eval.set_expression("2*x + 3*x");
+    suite.expect_near("linear_combine_same_var", eval.evaluate(), 5.0 * x);
+
+    // Test 2: Subtraction - 2*x - 3*x
+    eval.set_expression("2*x - 3*x");
+    suite.expect_near("linear_combine_subtract", eval.evaluate(), -x);
+
+    // Test 3: Simple doubling - x + x should combine to 2*x
+    eval.set_expression("x + x");
+    suite.expect_near("linear_combine_simple_double", eval.evaluate(), 2.0 * x);
+
+    // Test 4: Cancellation - x - x should cancel to 0
+    eval.set_expression("x - x");
+    suite.expect_near("linear_cancel_to_zero", eval.evaluate(), 0.0);
+
+    // Test 5: Different variables shouldn't merge
+    eval.set_expression("2*x + 3*y");
+    suite.expect_near("linear_no_combine_diff_vars", eval.evaluate(), 2.0 * x + 3.0 * y);
+
+    // Test 6: Structural equality - (x+y) + (x+y) uses CSE, result is correct
+    eval.set_expression("(x+y) + (x+y)");
+    suite.expect_near("linear_structural_equality", eval.evaluate(), 2.0 * (x + y));
+
+    // Test 7: MUL chain coefficient absorption: (2*x) * (3*y) -> 6*x*y
+    eval.set_expression("(2*x) * (3*y)");
+    suite.expect_near("linear_mul_coeff_absorption", eval.evaluate(), 6.0 * x * y);
+
+    // Test 8: CSE interaction - 2*x - 2*x should correctly use CSE and give 0
+    eval.set_expression("2*x - 2*x");
+    suite.expect_near("linear_cse_interaction", eval.evaluate(), 0.0);
+
+    // Test 9: Complex expression with mixed terms
+    eval.set_expression("2*x + x + 3*x - 2*x");
+    suite.expect_near("linear_complex_combine", eval.evaluate(), 4.0 * x);
+
+    // Test 10: Division coefficient absorption
+    eval.set_expression("(x/2) * (y/3)");
+    suite.expect_near("linear_div_coeff_absorption", eval.evaluate(), x * y / 6.0);
+}
+
 void test_helper_functions_and_element(TestSuite& suite) {
     using namespace mexce::impl;
     mexce::evaluator eval;
@@ -737,6 +783,7 @@ int main() {
     test_constants_and_single_shot(suite);
     test_pow_optimizer_special_cases(suite);
     test_nested_pow_folding_sympy_semantics(suite);
+    test_linear_term_canonicalization(suite);
     test_helper_functions_and_element(suite);
     test_binding_and_unbinding(suite);
     test_binding_name_conflicts(suite);

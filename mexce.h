@@ -249,6 +249,7 @@ private:
     uint64_t                m_next_element_id           = 0;
     std::list<double>       m_cse_temps;               // Storage for common subexpressions
     std::map<uint64_t, std::pair<impl::elist_t, double>> m_power_terms; // pow-optimized kernel/exponent for nested folding
+    std::map<uint64_t, std::pair<double, impl::elist_t>> m_linear_terms; // linear term: FunctionID -> {Coefficient, Kernel}
 
     double                (*evaluate_fptr)()            = nullptr;
 
@@ -1867,21 +1868,72 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     struct absorbed_term {
         elist_t chunk;
-        int     factor;
+        double  factor;
     };
 
     vector<absorbed_term> terms;
     terms.reserve(f->absorbed[0].size() + f->absorbed[1].size());
 
-    auto drain_terms = [&](int index, int contribution) {
+    auto drain_terms = [&](int index, double contribution) {
         for (auto &chunk : f->absorbed[index]) {
-            terms.push_back({std::move(chunk), contribution});
+            bool expanded = false;
+            // Check if this chunk is a known linear term (C * Kernel)
+            if (chunk.size() == 1 && chunk.front().type == Element_type::CFUNC) {
+                uint64_t func_id = chunk.front().f->id;
+                auto it_linear = ev->m_linear_terms.find(func_id);
+
+                if (it_linear != ev->m_linear_terms.end()) {
+                    double coeff = it_linear->second.first;
+                    const elist_t& kernel = it_linear->second.second;
+
+                    // Don't expand if this function has CSE store code - expanding would
+                    // bypass the store, leaving CSE temps uninitialized.
+                    bool has_cse = !chunk.front().f->cse_store_suffix.empty();
+
+                    // Expansion strategy:
+                    // - MUL/DIV: always expand (chain multiplication), unless CSE involved
+                    // - ADD/SUB: only expand if kernel is simple or factor cancels, and no CSE
+                    bool should_expand = false;
+                    if (!has_cse) {
+                        if (fclass == 2) {
+                            should_expand = true;
+                        } else { // fclass == 1 (Add/Sub)
+                            double combined = contribution * coeff;
+                            // Expand if simple kernel or factor is ±1
+                            if (kernel.size() <= 1 || abs(abs(combined) - 1.0) < 1e-9) {
+                                should_expand = true;
+                            }
+                        }
+                    }
+
+                    if (should_expand) {
+                        if (fclass == 1) {
+                            // ADD/SUB: "2*x" becomes "x" with factor 2.0
+                            double combined_factor = contribution * coeff;
+                            terms.push_back({ kernel, combined_factor }); // Copy, not move!
+                            expanded = true;
+                        } else {
+                            // MUL/DIV: absorb coefficient into accumulator
+                            ac[index] *= static_cast<long double>(coeff);
+                            terms.push_back({ kernel, contribution }); // Copy kernel
+                            expanded = true;
+                        }
+                    }
+                }
+            }
+            if (!expanded) {
+                terms.push_back({std::move(chunk), contribution});
+            }
         }
         f->absorbed[index].clear();
     };
 
-    drain_terms(0, 1);
-    drain_terms(1, -1);
+    drain_terms(0, 1.0);
+    drain_terms(1, -1.0);
+
+    // Recompute ac_final after linear term absorption may have modified ac[]
+    ac_final_ld = (fclass == 1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
+    ac_final = static_cast<double>(ac_final_ld);
 
     elist_comparison comp;
     std::sort(terms.begin(), terms.end(), [&](const absorbed_term& lhs, const absorbed_term& rhs) {
@@ -1893,11 +1945,11 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     for (auto &term : terms) {
         if (!merged.empty() && !comp(term.chunk, merged.back().chunk) && !comp(merged.back().chunk, term.chunk)) {
             merged.back().factor += term.factor;
-            if (merged.back().factor == 0) {
+            if (abs(merged.back().factor) < 1e-12) {
                 merged.pop_back();
             }
         }
-        else if (term.factor != 0) {
+        else if (abs(term.factor) > 1e-12) {
             merged.push_back({std::move(term.chunk), term.factor});
         }
     }
@@ -1923,20 +1975,21 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         }
 
         for (auto &term : merged) {
-            int factor = term.factor;
-            if (factor == 0) {
+            double factor = term.factor;
+            if (abs(factor) < 1e-12) {
                 continue;
             }
 
             string term_str = "(" + elist_to_string(term.chunk) + ")";
             if (factor > 0) {
                 if (!debug_first) debug_ss << "+";
-                if (factor != 1) debug_ss << factor << "*";
+                if (abs(factor - 1.0) > 1e-12) debug_ss << double_to_pretty_string(factor) << "*";
                 debug_ss << term_str;
             }
             else {
                 debug_ss << "-";
-                if (factor != -1) debug_ss << abs(factor) << "*";
+                double af = abs(factor);
+                if (abs(af - 1.0) > 1e-12) debug_ss << double_to_pretty_string(af) << "*";
                 debug_ss << term_str;
             }
             debug_first = false;
@@ -1947,21 +2000,21 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             compile_elist(s, term.chunk.begin(), term.chunk.end());
 
-            if (factor == 1) {
+            if (abs(factor - 1.0) < 1e-12) {
                 // no-op
             }
-            else if (factor == -1) {
+            else if (abs(factor + 1.0) < 1e-12) {
                 s < 0xd9 < 0xe0;  // fchs
             }
-            else if (factor == 2) {
+            else if (abs(factor - 2.0) < 1e-12) {
                 s < 0xd8 < 0xc0;  // fadd st(0), st(0)
             }
-            else if (factor == -2) {
+            else if (abs(factor + 2.0) < 1e-12) {
                 s < 0xd8 < 0xc0;
                 s < 0xd9 < 0xe0;  // fchs
             }
             else {
-                emit_apply_op_with_constant<0x08>(ev, s, static_cast<double>(factor));
+                emit_apply_op_with_constant<0x08>(ev, s, factor);  // FMUL
             }
 
             if (!have_value) {
@@ -1972,7 +2025,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
             }
             else {
-                s < 0xde < 0xc1;  // faddp       st(1), st
+                s < 0xde < 0xc1;  // faddp st(1), st
             }
         }
 
@@ -2000,22 +2053,34 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         }
 
         for (auto &term : merged) {
-            int factor = term.factor;
-            if (factor == 0) {
+            double factor = term.factor;
+            if (abs(factor) < 1e-12) {
                 continue;
             }
+
+            double r_factor = round(factor);
+            bool is_int = (abs(factor - r_factor) < 1e-9);
+            uint32_t abs_int_factor = is_int ? static_cast<uint32_t>(abs(r_factor)) : 0;
 
             string term_str = "(" + elist_to_string(term.chunk) + ")";
             if (factor > 0) {
                 if (!debug_first) debug_ss << "*";
                 debug_ss << term_str;
-                if (factor != 1) debug_ss << "^" << factor;
+                if (is_int) {
+                    if (abs_int_factor != 1) debug_ss << "^" << abs_int_factor;
+                } else {
+                    debug_ss << "^" << double_to_pretty_string(factor);
+                }
             }
             else {
                 if (debug_first) debug_ss << "1"; // e.g. 1/x
                 debug_ss << "/";
                 debug_ss << term_str;
-                if (factor != -1) debug_ss << "^" << abs(factor);
+                if (is_int) {
+                    if (abs_int_factor != 1) debug_ss << "^" << abs_int_factor;
+                } else {
+                    debug_ss << "^" << double_to_pretty_string(abs(factor));
+                }
             }
             debug_first = false;
 
@@ -2025,22 +2090,22 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             compile_elist(s, term.chunk.begin(), term.chunk.end());
 
-            uint32_t abs_factor = static_cast<uint32_t>(abs(factor));
-            if (abs_factor > 1U) {
-                emit_integer_power_sequence(s, abs_factor);
+            if (is_int && abs_int_factor > 1) {
+                emit_integer_power_sequence(s, abs_int_factor);
             }
+            // Non-integer exponents in mul chain not generated by current parser
 
             if (factor < 0) {
                 if (!have_value) {
                     s < 0xd9 < 0xe8;    // fld1
-                    s < 0xde < 0xf1;    // fdivrp   st(1), st
+                    s < 0xde < 0xf1;    // fdivrp st(1), st
                 }
                 else {
-                    s < 0xde < 0xf9;    // fdivp    st(1), st
+                    s < 0xde < 0xf9;    // fdivp st(1), st
                 }
             }
             else if (have_value) {
-                s < 0xde < 0xc9;        // fmulp   st(1), st
+                s < 0xde < 0xc9;        // fmulp st(1), st
             }
 
             if (!have_value) {
@@ -2070,6 +2135,12 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.buf.size(), cc, nullptr);
     f_opt->debug_desc = "(" + debug_ss.str() + ")";
     f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
+
+    // Register linear term for MUL/DIV: if result is "coefficient * kernel", record it
+    // so parent expressions can extract and combine coefficients.
+    if (fclass == 2 && merged.size() == 1 && abs(merged[0].factor - 1.0) < 1e-9) {
+        ev->m_linear_terms[f_opt->id] = std::make_pair(ac_final, merged[0].chunk);
+    }
 
     *it = Element(f_opt);
 }
@@ -2572,6 +2643,7 @@ void evaluator::set_expression(std::string e)
     m_elist.clear();
     m_cse_temps.clear(); // Clear previous CSE temps
     m_power_terms.clear();
+    m_linear_terms.clear();
 
     if (evaluate_fptr) {
         free_executable_buffer(evaluate_fptr, m_buffer_size);
