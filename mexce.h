@@ -250,9 +250,6 @@ private:
     uint64_t                m_next_element_id           = 0;
     std::list<double>       m_cse_temps;               // Storage for common subexpressions
 
-    // Map FunctionID -> { Coefficient, Kernel }
-    std::map<uint64_t, std::pair<double, impl::elist_t>> m_linear_terms;
-
     // Map FunctionID -> { Kernel, Exponent }
     // Used to optimize (a^b)^c -> a^(b*c)
     std::map<uint64_t, std::pair<impl::elist_t, double>> m_power_terms;
@@ -1453,44 +1450,31 @@ pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it)
 
 struct elist_comparison {
     bool operator()(const elist_t& a, const elist_t& b) const {
-        // Evaluate LARGER chunks first to minimize FPU stack register pressure
+
+        // empty element lists cannot exist
+        assert(a.size() && b.size());
+
+        // if their size differs, we use that for comparison
         if (a.size() != b.size()) {
             return a.size() > b.size();
         }
+
+        // they are the same size, thus we need to traverse both
         auto ita = a.begin();
         auto itb = b.begin();
-        while (ita != a.end()) {
-            // Evaluate COMPLEX types (CFUNC=2) before SIMPLE types (CVAR=1, CCONST=0)
+        for (; ita != a.end(); ita++, itb++) {
+            // start by comparing element types
             if (ita->type != itb->type) {
                 return ita->type > itb->type;
             }
-            switch (ita->type) {
-                case Element_type::CCONST:
-                    // Compare value exactly (no epsilon)
-                    if (ita->c->value != itb->c->value) {
-                        return ita->c->value < itb->c->value;
-                    }
-                    break;
-                case Element_type::CVAR:
-                    // Compare name for stable ordering
-                    if (ita->v->name != itb->v->name) {
-                        return ita->v->name < itb->v->name;
-                    }
-                    break;
-                case Element_type::CFUNC:
-                    // Compare Name AND Bytecode
-                    if (ita->f->name != itb->f->name) {
-                        return ita->f->name < itb->f->name;
-                    }
-                    if (ita->f->code != itb->f->code) {
-                        return ita->f->code < itb->f->code;
-                    }
-                    break;
+
+            // Compare deterministic IDs.
+            if (ita->id != itb->id) {
+                return ita->id < itb->id;
             }
-            ++ita;
-            ++itb;
         }
-        return false;
+
+        return false; // they are equal
     }
 };
 
@@ -1856,52 +1840,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     terms.reserve(f->absorbed[0].size() + f->absorbed[1].size());
 
     auto drain_terms = [&](int index, double contribution) {
-        for (auto &chunk : f->absorbed[index]) {
-            bool expanded = false;
-            // Check if this chunk is a known Linear Term ("C * Kernel")
-            if (chunk.size() == 1 && chunk.front().type == Element_type::CFUNC) {
-                uint64_t func_id = chunk.front().f->id;
-                auto it_linear = ev->m_linear_terms.find(func_id);
-
-                if (it_linear != ev->m_linear_terms.end()) {
-                    double coeff = it_linear->second.first;
-                    bool should_expand = false;
-
-                    // Optimization Strategy:
-                    // 1. Always expand for MUL/DIV parent (chain multiplication)
-                    // 2. For ADD/SUB parent, only expand (distribute) if:
-                    //    a) The kernel is a single element (simple term)
-                    //    b) OR the combined factor simplifies to +/- 1.0
-                    //    Otherwise, keeping it factored is faster: (a+b+c)/k vs a/k+b/k+c/k
-                    if (fclass == 2) {
-                        should_expand = true;
-                    } else { // fclass == 1 (Add/Sub)
-                        double combined = contribution * coeff;
-                        if (it_linear->second.second.size() <= 1 || abs(abs(combined) - 1.0) < 1e-9) {
-                            should_expand = true;
-                        }
-                    }
-
-                    if (should_expand) {
-                        if (fclass == 1) {
-                            // ADD/SUB: "2*x" becomes "x" with factor 2.0
-                            double combined_factor = contribution * coeff;
-                            terms.push_back({ it_linear->second.second, combined_factor });
-                            expanded = true;
-                        }
-                        else {
-                            // MUL/DIV: "2*x" becomes "x" (factor 1), and we absorb "2" into accumulator
-                            ac[index] *= static_cast<long double>(coeff);
-
-                            terms.push_back({ it_linear->second.second, contribution });
-                            expanded = true;
-                        }
-                    }
-                }
-            }
-            if (!expanded) {
-                terms.push_back({std::move(chunk), contribution});
-            }
+        for (auto& chunk : f->absorbed[index]) {
+            terms.push_back({std::move(chunk), contribution});
         }
         f->absorbed[index].clear();
     };
@@ -2078,13 +2018,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.buf.size(), cc, nullptr);
     f_opt->debug_desc = "(" + debug_ss.str() + ")";
     f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
-
-    // Phase 5: Register Linear Term (Optimization Side-Channel)
-    if (fclass == 2) {
-        if (merged.size() == 1 && abs(merged[0].factor - 1.0) < 1e-9) {
-            ev->m_linear_terms[f_opt->id] = std::make_pair(ac_final, merged[0].chunk);
-        }
-    }
 
     *it = Element(f_opt);
 }
@@ -2586,7 +2519,6 @@ void evaluator::set_expression(std::string e)
     m_intermediate_code.clear();
     m_elist.clear();
     m_cse_temps.clear(); // Clear previous CSE temps
-    m_linear_terms.clear();
     m_power_terms.clear();
 
     if (evaluate_fptr) {
