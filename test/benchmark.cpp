@@ -186,6 +186,54 @@ static uint64_t ulp_distance(double a, double b)
     return (ua > ub) ? (ua - ub) : (ub - ua);
 }
 
+struct ulp_sum_t {
+    uint64_t hi;
+    uint64_t lo;
+
+    ulp_sum_t() : hi(0), lo(0) {}
+
+    void add(uint64_t value)
+    {
+        if (value == UINT64_MAX) {
+            return;
+        }
+        uint64_t old = lo;
+        lo += value;
+        if (lo < old) {
+            ++hi;
+        }
+    }
+};
+
+static std::string to_decimal_u128(uint64_t hi, uint64_t lo)
+{
+    if (hi == 0) {
+        return std::to_string(lo);
+    }
+
+    uint32_t words[4];
+    words[0] = (uint32_t)(hi >> 32);
+    words[1] = (uint32_t)hi;
+    words[2] = (uint32_t)(lo >> 32);
+    words[3] = (uint32_t)lo;
+
+    std::string digits;
+    digits.reserve(39);
+
+    while (words[0] || words[1] || words[2] || words[3]) {
+        uint64_t rem = 0;
+        for (int i = 0; i < 4; ++i) {
+            uint64_t cur = (rem << 32) | words[i];
+            words[i] = (uint32_t)(cur / 10);
+            rem = cur % 10;
+        }
+        digits.push_back((char)('0' + rem));
+    }
+
+    std::reverse(digits.begin(), digits.end());
+    return digits;
+}
+
 // ------------------------------ Main ---------------------------------
 
 int main(int argc, char* argv[])
@@ -323,6 +371,9 @@ int main(int argc, char* argv[])
     size_t comparisons_mexce_ref = 0;
     size_t comparisons_mexce_comp = 0;
     size_t comparisons_comp_ref = 0;
+    ulp_sum_t ulp_sum_mexce_ref;
+    ulp_sum_t ulp_sum_mexce_comp;
+    ulp_sum_t ulp_sum_comp_ref;
     constexpr long double k_zero_abs_tol = 1e-12L;
 
     auto update_bin_counts = [&](uint64_t ulp, size_t& exact_zero_count, std::vector<size_t>& bins, size_t& comparisons) {
@@ -405,6 +456,7 @@ int main(int argc, char* argv[])
             else {
                 rec.ulp_compiler_vs_reference = ulp_distance(rec.native_result, golden_d);
             }
+            ulp_sum_comp_ref.add(rec.ulp_compiler_vs_reference);
             update_bin_counts(rec.ulp_compiler_vs_reference, exact_zero_count_comp_ref, bin_counts_comp_ref, comparisons_comp_ref);
         }
 
@@ -451,6 +503,7 @@ int main(int argc, char* argv[])
         else {
             rec.ulp_mexce_vs_reference = ulp_distance(rec.mexce_result, golden_d);
         }
+        ulp_sum_mexce_ref.add(rec.ulp_mexce_vs_reference);
         update_bin_counts(rec.ulp_mexce_vs_reference, exact_zero_count_mexce_ref, bin_counts_mexce_ref, comparisons_mexce_ref);
 
         if (rec.native_eval_ok) {
@@ -461,6 +514,7 @@ int main(int argc, char* argv[])
             else {
                 rec.ulp_mexce_vs_compiler = ulp_distance(rec.mexce_result, rec.native_result);
             }
+            ulp_sum_mexce_comp.add(rec.ulp_mexce_vs_compiler);
             update_bin_counts(rec.ulp_mexce_vs_compiler, exact_zero_count_mexce_comp, bin_counts_mexce_comp, comparisons_mexce_comp);
         }
 
@@ -608,6 +662,13 @@ int main(int argc, char* argv[])
     for (size_t row_idx = 0; row_idx < row_labels.size(); ++row_idx) {
         print_table_row(row_labels[row_idx], row_idx);
     }
+
+    out << "\n";
+
+    out << "Accumulated ULP distance (sum):\n";
+    print_kv("Mexce vs Reference", comparisons_mexce_ref == 0 ? "-" : to_decimal_u128(ulp_sum_mexce_ref.hi, ulp_sum_mexce_ref.lo));
+    print_kv("Compiler vs Reference", comparisons_comp_ref == 0 ? "-" : to_decimal_u128(ulp_sum_comp_ref.hi, ulp_sum_comp_ref.lo));
+    print_kv("Mexce vs Compiler", comparisons_mexce_comp == 0 ? "-" : to_decimal_u128(ulp_sum_mexce_comp.hi, ulp_sum_mexce_comp.lo));
 
     out << "\n";
 
