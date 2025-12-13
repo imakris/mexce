@@ -676,6 +676,12 @@ static const double mexce_trig_sin_y_thresholds[] = {
     7.085900329143115     // stop after 25! (degree 12 in y)
 };
 
+// Range thresholds for tan argument folding (pi/4 splits tan/cot domain).
+static const double mexce_trig_tan_x_thresholds[] = {
+    0.7853981633974483,  // +pi/4
+    -0.7853981633974483  // -pi/4
+};
+
 // Arch-specific tiny opcode helpers (NO #if inside their bodies)
 #ifdef MEXCE_64
 #   define MEXCE_MOV_RAX_IMM    0x48,0xB8, 0,0,0,0,0,0,0,0     /* mov rax, imm64 */
@@ -1087,11 +1093,398 @@ inline Function Sin()
 
 inline Function Tan()
 {
+#if MEXCE_TRIG_USE_X87
     uint8_t code[] = {
         0xd9, 0xf2,                                 // fptan
         0xdd, 0xd8                                  // fstp        st(0)
     };
     return Function(0, "tan", 1, 1, sizeof(code), code);
+#else
+    auto emit_add_rax = [](mexce_charstream& buf, uint32_t imm32) {
+#ifdef MEXCE_64
+        buf < 0x48 < 0x05; // add rax, imm32
+#else
+        buf < 0x05;        // add eax, imm32
+#endif
+        buf << imm32;
+    };
+
+    auto emit_horner = [&](mexce_charstream& buf, int coeff_count) {
+        // y in st(0); Horner on y with coeffs at [rax + i*16].
+        buf < 0xDB < 0x28; // fld tword ptr [rax]
+
+        const int first_block = (coeff_count < 8) ? coeff_count : 8;
+        for (int i = 1; i < first_block; ++i) {
+            buf < 0xD8 < 0xC9; // fmul st, st(1)
+            buf < 0xDB < 0x68 < (i * 0x10); // fld tword ptr [rax + i*16]
+            buf < 0xDE < 0xC1; // faddp st(1), st
+        }
+
+        if (coeff_count > 8) {
+            const int remaining = coeff_count - 8;
+            for (int j = 0; j < remaining; ++j) {
+                buf < 0xD8 < 0xC9; // fmul st, st(1)
+                if (j == 0) {
+                    emit_add_rax(buf, 0x80);
+                    buf < 0xDB < 0x28; // fld tword ptr [rax]
+                } else {
+                    buf < 0xDB < 0x68 < (j * 0x10); // fld tword ptr [rax + j*16]
+                }
+                buf < 0xDE < 0xC1; // faddp st(1), st
+            }
+        }
+
+        buf < 0xDD < 0xD9; // fstp st(1)  (pop y)
+    };
+
+    mexce_charstream buf;
+
+    auto emit_jb = [&](size_t& rel32_pos) {
+        buf < 0x0F < 0x82; // jb rel32
+        rel32_pos = buf.buf.size();
+        buf << (uint32_t)0;
+    };
+
+    auto emit_ja = [&](size_t& rel32_pos) {
+        buf < 0x0F < 0x87; // ja rel32
+        rel32_pos = buf.buf.size();
+        buf << (uint32_t)0;
+    };
+
+    auto emit_jz = [&](size_t& rel32_pos) {
+        buf < 0x0F < 0x84; // jz rel32
+        rel32_pos = buf.buf.size();
+        buf << (uint32_t)0;
+    };
+
+    auto emit_jne = [&](size_t& rel32_pos) {
+        buf < 0x0F < 0x85; // jne rel32
+        rel32_pos = buf.buf.size();
+        buf << (uint32_t)0;
+    };
+
+    auto emit_jmp = [&](size_t& rel32_pos) {
+        buf < 0xE9; // jmp rel32
+        rel32_pos = buf.buf.size();
+        buf << (uint32_t)0;
+    };
+
+    auto patch_rel32 = [&](size_t rel32_pos, size_t target_pos) {
+        const int32_t rel = static_cast<int32_t>(target_pos - (rel32_pos + 4));
+        std::memcpy(buf.buf.data() + rel32_pos, &rel, sizeof(rel));
+    };
+
+    // ecx = case selector: 0=direct, 1=pos fold, 2=neg fold.
+    buf < 0xB9;
+    buf << (uint32_t)0;
+
+    // Fast path: if |x| <= pi/2, skip range reduction; else reduce by pi.
+    size_t jb_to_reduce = 0;
+    size_t jmp_to_have_r = 0;
+
+    buf < 0xD9 < 0xC0; // fld st(0)  (dup x)
+    buf < 0xD9 < 0xE1; // fabs       (|x|, x)
+    buf < 0xD9 < 0xEB; // fldpi
+    buf < 0xD9 < 0xE8; // fld1
+    buf < 0xD9 < 0xE0; // fchs       => -1
+    buf < 0xD9 < 0xC9; // fxch st(1)  (pi, -1, |x|, x)
+    buf < 0xD9 < 0xFD; // fscale      => pi/2
+    buf < 0xDD < 0xD9; // fstp st(1)   (pop -1)
+    buf < 0xDB < 0xF1; // fcomi st,st(1) (compare pi/2 vs |x|)
+    buf < 0xDD < 0xD8; // fstp st(0)     (pop pi/2)
+    emit_jb(jb_to_reduce); // jump if pi/2 < |x|
+
+    buf < 0xDD < 0xD8; // fstp st(0)     (pop |x|) => x
+    emit_jmp(jmp_to_have_r);
+
+    const size_t label_reduce = buf.buf.size();
+    buf < 0xD9 < 0xC9; // fxch st(1)     (x, |x|)
+    buf < 0xDD < 0xD9; // fstp st(1)     (pop |x|) => x
+    buf < 0xD9 < 0xEB; // fldpi          (pi, x)
+    buf < 0xD9 < 0xC9; // fxch st(1)     (x, pi)
+    buf < 0xD9 < 0xF5; // fprem1         (remainder, pi)
+    buf < 0xDD < 0xD9; // fstp st(1)     (pop pi)
+
+    const size_t label_have_r = buf.buf.size();
+
+    // mov rdx, tan_threshold_base (pi/4 and -pi/4)
+#ifdef MEXCE_64
+    buf < 0x48 < 0xBA;
+    const size_t tan_thr_imm_pos = buf.buf.size();
+    buf << (uint64_t)0;
+#else
+    buf < 0xBA;
+    const size_t tan_thr_imm_pos = buf.buf.size();
+    buf << (uint32_t)0;
+#endif
+
+    // If r > pi/4: u = pi/2 - r, and take reciprocal at the end.
+    size_t jb_to_pos_large = 0;
+    buf < 0xDD < 0x42 < 0x00; // fld qword ptr [rdx+0]  (pi/4, r)
+    buf < 0xDB < 0xF1;        // fcomi st,st(1)
+    buf < 0xDD < 0xD8;        // fstp st(0)  (pop pi/4)
+    emit_jb(jb_to_pos_large);
+
+    // If r < -pi/4: u = pi/2 + r, take reciprocal and negate.
+    size_t ja_to_neg_large = 0;
+    buf < 0xDD < 0x42 < 0x08; // fld qword ptr [rdx+8]  (-pi/4, r)
+    buf < 0xDB < 0xF1;        // fcomi st,st(1)
+    buf < 0xDD < 0xD8;        // fstp st(0)  (pop -pi/4)
+    emit_ja(ja_to_neg_large); // jump if (-pi/4) > r
+
+    // Direct: u = r
+    size_t jmp_to_have_u = 0;
+    emit_jmp(jmp_to_have_u);
+
+    const size_t label_pos_large = buf.buf.size();
+    buf < 0xB9;
+    buf << (uint32_t)1;
+    // u = pi/2 - r
+    buf < 0xD9 < 0xE8; // fld1
+    buf < 0xD9 < 0xE0; // fchs   => -1
+    buf < 0xD9 < 0xEB; // fldpi
+    buf < 0xD9 < 0xFD; // fscale => pi/2
+    buf < 0xDD < 0xD9; // fstp st(1)  (pop -1)
+    buf < 0xD9 < 0xC9; // fxch st(1)  (r, pi/2)
+    buf < 0xDE < 0xE9; // fsubp st(1), st  => pi/2 - r
+    size_t jmp_pos_to_have_u = 0;
+    emit_jmp(jmp_pos_to_have_u);
+
+    const size_t label_neg_large = buf.buf.size();
+    buf < 0xB9;
+    buf << (uint32_t)2;
+    // u = pi/2 + r  (r is negative here, so u is in [0, pi/4])
+    buf < 0xD9 < 0xE8; // fld1
+    buf < 0xD9 < 0xE0; // fchs   => -1
+    buf < 0xD9 < 0xEB; // fldpi
+    buf < 0xD9 < 0xFD; // fscale => pi/2
+    buf < 0xDD < 0xD9; // fstp st(1)  (pop -1)
+    buf < 0xD9 < 0xC9; // fxch st(1)  (r, pi/2)
+    buf < 0xDE < 0xC1; // faddp st(1), st  => pi/2 + r
+
+    const size_t label_have_u = buf.buf.size();
+
+    // y = u^2; keep u for the final multiplication.
+    buf < 0xD9 < 0xC0; // fld st(0)  (u, u)
+    buf < 0xDC < 0xC8; // fmul st(0), st(0) (y, u)
+    buf < 0xD9 < 0xC0; // fld st(0)  (y, y, u)
+
+    // ---- cos(u) polynomial on y ----
+    size_t cos_jb_to_cmp1 = 0;
+    size_t cos_jb_to_cmp2 = 0;
+    size_t cos_jb_to_cmp3 = 0;
+    size_t cos_jb_to_cmp4 = 0;
+    size_t cos_jb_to_deg15 = 0;
+
+    size_t cos_jmp_to_end_deg5 = 0;
+    size_t cos_jmp_to_end_deg7 = 0;
+    size_t cos_jmp_to_end_deg9 = 0;
+    size_t cos_jmp_to_end_deg11 = 0;
+    size_t cos_jmp_to_end_deg13 = 0;
+
+    // mov rax, cos_coeff_base  / mov rdx, cos_threshold_base
+#ifdef MEXCE_64
+    buf < 0x48 < 0xB8;
+    const size_t cos_coeff_imm_pos = buf.buf.size();
+    buf << (uint64_t)0;
+    buf < 0x48 < 0xBA;
+    const size_t cos_thr_imm_pos = buf.buf.size();
+    buf << (uint64_t)0;
+#else
+    buf < 0xB8;
+    const size_t cos_coeff_imm_pos = buf.buf.size();
+    buf << (uint32_t)0;
+    buf < 0xBA;
+    const size_t cos_thr_imm_pos = buf.buf.size();
+    buf << (uint32_t)0;
+#endif
+
+    auto emit_thr_cmp = [&](uint8_t thr_disp, size_t& jb_rel32_pos) {
+        buf < 0xDD < 0x42 < thr_disp; // fld qword ptr [rdx+thr_disp]
+        buf < 0xDB < 0xF1;            // fcomi st,st(1)
+        buf < 0xDD < 0xD8;            // fstp st(0)  (pop threshold)
+        emit_jb(jb_rel32_pos);
+    };
+
+    // thr0 -> degree5 (10!)
+    emit_thr_cmp(0, cos_jb_to_cmp1);
+    emit_add_rax(buf, 0xA0);
+    emit_horner(buf, 6);
+    emit_jmp(cos_jmp_to_end_deg5);
+
+    const size_t cos_label_cmp1 = buf.buf.size();
+    // thr1 -> degree7 (14!)
+    emit_thr_cmp(8, cos_jb_to_cmp2);
+    emit_add_rax(buf, 0x80);
+    emit_horner(buf, 8);
+    emit_jmp(cos_jmp_to_end_deg7);
+
+    const size_t cos_label_cmp2 = buf.buf.size();
+    // thr2 -> degree9 (18!)
+    emit_thr_cmp(16, cos_jb_to_cmp3);
+    emit_add_rax(buf, 0x60);
+    emit_horner(buf, 10);
+    emit_jmp(cos_jmp_to_end_deg9);
+
+    const size_t cos_label_cmp3 = buf.buf.size();
+    // thr3 -> degree11 (22!)
+    emit_thr_cmp(24, cos_jb_to_cmp4);
+    emit_add_rax(buf, 0x40);
+    emit_horner(buf, 12);
+    emit_jmp(cos_jmp_to_end_deg11);
+
+    const size_t cos_label_cmp4 = buf.buf.size();
+    // thr4 -> degree13 (26!), else degree15 (30!)
+    emit_thr_cmp(32, cos_jb_to_deg15);
+    emit_add_rax(buf, 0x20);
+    emit_horner(buf, 14);
+    emit_jmp(cos_jmp_to_end_deg13);
+
+    const size_t cos_label_deg15 = buf.buf.size();
+    emit_horner(buf, 16);
+
+    const size_t cos_label_end = buf.buf.size();
+
+    // ---- sin(u) polynomial on y ----
+    buf < 0xD9 < 0xC9; // fxch st(1)  (y, cos, u)
+
+    size_t sin_jb_to_cmp1 = 0;
+    size_t sin_jb_to_cmp2 = 0;
+    size_t sin_jb_to_cmp3 = 0;
+    size_t sin_jb_to_cmp4 = 0;
+    size_t sin_jb_to_deg14 = 0;
+
+    size_t sin_jmp_to_mul_deg4 = 0;
+    size_t sin_jmp_to_mul_deg6 = 0;
+    size_t sin_jmp_to_mul_deg8 = 0;
+    size_t sin_jmp_to_mul_deg10 = 0;
+    size_t sin_jmp_to_mul_deg12 = 0;
+
+    // mov rax, sin_coeff_base  / mov rdx, sin_threshold_base
+#ifdef MEXCE_64
+    buf < 0x48 < 0xB8;
+    const size_t sin_coeff_imm_pos = buf.buf.size();
+    buf << (uint64_t)0;
+    buf < 0x48 < 0xBA;
+    const size_t sin_thr_imm_pos = buf.buf.size();
+    buf << (uint64_t)0;
+#else
+    buf < 0xB8;
+    const size_t sin_coeff_imm_pos = buf.buf.size();
+    buf << (uint32_t)0;
+    buf < 0xBA;
+    const size_t sin_thr_imm_pos = buf.buf.size();
+    buf << (uint32_t)0;
+#endif
+
+    // thr0 -> degree4 (9!)
+    emit_thr_cmp(0, sin_jb_to_cmp1);
+    emit_add_rax(buf, 0xA0);
+    emit_horner(buf, 5);
+    emit_jmp(sin_jmp_to_mul_deg4);
+
+    const size_t sin_label_cmp1 = buf.buf.size();
+    // thr1 -> degree6 (13!)
+    emit_thr_cmp(8, sin_jb_to_cmp2);
+    emit_add_rax(buf, 0x80);
+    emit_horner(buf, 7);
+    emit_jmp(sin_jmp_to_mul_deg6);
+
+    const size_t sin_label_cmp2 = buf.buf.size();
+    // thr2 -> degree8 (17!)
+    emit_thr_cmp(16, sin_jb_to_cmp3);
+    emit_add_rax(buf, 0x60);
+    emit_horner(buf, 9);
+    emit_jmp(sin_jmp_to_mul_deg8);
+
+    const size_t sin_label_cmp3 = buf.buf.size();
+    // thr3 -> degree10 (21!)
+    emit_thr_cmp(24, sin_jb_to_cmp4);
+    emit_add_rax(buf, 0x40);
+    emit_horner(buf, 11);
+    emit_jmp(sin_jmp_to_mul_deg10);
+
+    const size_t sin_label_cmp4 = buf.buf.size();
+    // thr4 -> degree12 (25!), else degree14 (29!)
+    emit_thr_cmp(32, sin_jb_to_deg14);
+    emit_add_rax(buf, 0x20);
+    emit_horner(buf, 13);
+    emit_jmp(sin_jmp_to_mul_deg12);
+
+    const size_t sin_label_deg14 = buf.buf.size();
+    emit_horner(buf, 15);
+
+    const size_t sin_label_mul = buf.buf.size();
+    buf < 0xDE < 0xCA; // fmulp st(2), st  => cos, sin
+
+    buf < 0xD9 < 0xC9; // fxch st(1)      => sin, cos
+    buf < 0xDE < 0xF1; // fdivrp st(1),st => tan(u)
+
+    // If folded (ecx!=0), tan(x) = +/- 1/tan(u).
+    size_t jz_to_end = 0;
+    size_t jne_to_end = 0;
+
+    buf < 0x85 < 0xC9; // test ecx,ecx
+    emit_jz(jz_to_end);
+    buf < 0xD9 < 0xE8; // fld1
+    buf < 0xDE < 0xF1; // fdivrp st(1),st  => 1/tan(u)
+    buf < 0x83 < 0xF9 < 0x02; // cmp ecx,2
+    emit_jne(jne_to_end);
+    buf < 0xD9 < 0xE0; // fchs
+
+    const size_t label_end = buf.buf.size();
+
+    // Patch control-flow rel32s.
+    patch_rel32(jb_to_reduce, label_reduce);
+    patch_rel32(jmp_to_have_r, label_have_r);
+    patch_rel32(jb_to_pos_large, label_pos_large);
+    patch_rel32(ja_to_neg_large, label_neg_large);
+    patch_rel32(jmp_to_have_u, label_have_u);
+    patch_rel32(jmp_pos_to_have_u, label_have_u);
+
+    patch_rel32(cos_jb_to_cmp1, cos_label_cmp1);
+    patch_rel32(cos_jb_to_cmp2, cos_label_cmp2);
+    patch_rel32(cos_jb_to_cmp3, cos_label_cmp3);
+    patch_rel32(cos_jb_to_cmp4, cos_label_cmp4);
+    patch_rel32(cos_jb_to_deg15, cos_label_deg15);
+
+    patch_rel32(cos_jmp_to_end_deg5, cos_label_end);
+    patch_rel32(cos_jmp_to_end_deg7, cos_label_end);
+    patch_rel32(cos_jmp_to_end_deg9, cos_label_end);
+    patch_rel32(cos_jmp_to_end_deg11, cos_label_end);
+    patch_rel32(cos_jmp_to_end_deg13, cos_label_end);
+
+    patch_rel32(sin_jb_to_cmp1, sin_label_cmp1);
+    patch_rel32(sin_jb_to_cmp2, sin_label_cmp2);
+    patch_rel32(sin_jb_to_cmp3, sin_label_cmp3);
+    patch_rel32(sin_jb_to_cmp4, sin_label_cmp4);
+    patch_rel32(sin_jb_to_deg14, sin_label_deg14);
+
+    patch_rel32(sin_jmp_to_mul_deg4, sin_label_mul);
+    patch_rel32(sin_jmp_to_mul_deg6, sin_label_mul);
+    patch_rel32(sin_jmp_to_mul_deg8, sin_label_mul);
+    patch_rel32(sin_jmp_to_mul_deg10, sin_label_mul);
+    patch_rel32(sin_jmp_to_mul_deg12, sin_label_mul);
+
+    patch_rel32(jz_to_end, label_end);
+    patch_rel32(jne_to_end, label_end);
+
+    // Patch embedded pointers.
+    void* tan_thr_ptr = (void*)mexce_trig_tan_x_thresholds;
+    std::memcpy(buf.buf.data() + tan_thr_imm_pos, &tan_thr_ptr, sizeof(tan_thr_ptr));
+
+    void* cos_coeff_ptr = (void*)mexce_trig_mfactors;
+    void* cos_thr_ptr   = (void*)mexce_trig_y_thresholds;
+    std::memcpy(buf.buf.data() + cos_coeff_imm_pos, &cos_coeff_ptr, sizeof(cos_coeff_ptr));
+    std::memcpy(buf.buf.data() + cos_thr_imm_pos, &cos_thr_ptr, sizeof(cos_thr_ptr));
+
+    void* sin_coeff_ptr = (void*)mexce_trig_sinfactors;
+    void* sin_thr_ptr   = (void*)mexce_trig_sin_y_thresholds;
+    std::memcpy(buf.buf.data() + sin_coeff_imm_pos, &sin_coeff_ptr, sizeof(sin_coeff_ptr));
+    std::memcpy(buf.buf.data() + sin_thr_imm_pos, &sin_thr_ptr, sizeof(sin_thr_ptr));
+
+    return Function(0, "tan", 1, 0, buf.buf.size(), buf.buf.data());
+#endif
 }
 
 
