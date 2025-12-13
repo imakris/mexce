@@ -2806,9 +2806,10 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         int pclass = (pname == "add" || pname == "sub") ? 1 : (pname == "mul" || pname == "div") ? 2 : 0;
         bool parg2_inv = (pname == "sub" || pname == "div");
 
-        if (pclass && pclass == fclass) {
+        if (pclass && pclass == fclass && f->cse_store_suffix.empty()) {
 
             // the function will be absorbed by its parent
+            // (unless it has cse_store_suffix - then it must remain standalone to emit store code)
 
             bool parent_inv_op = f->parent_arg_index == 0 && parg2_inv; // arg 0 in postfix, is the second infix argument
 
@@ -3370,23 +3371,21 @@ void run_cse(evaluator* ev, elist_t& elist)
                 }
             }
 
-            // Find the EARLIEST non-absorbed, non-erased, still-matching element.
-            // The source must be:
-            // 1. Non-absorbed: so its cse_store_suffix survives the ASMD optimizer
-            // 2. Earliest among non-absorbed: to ensure all loads come after the store
-            // Absorbed occurrences that come BEFORE the source cannot be replaced
-            // (they would load before the store). Only replace those AFTER the source.
+            // Find the EARLIEST non-erased, still-matching element as the source.
+            // The source will have cse_store_suffix set, which prevents it from
+            // being absorbed by ASMD (see asmd_optimizer check for cse_store_suffix).
+            // This allows CSE to work even when all occurrences would be absorbed.
             Element* source = nullptr;
             size_t source_idx = SIZE_MAX;
             for (size_t i = 0; i < entry.second.size(); ++i) {
-                if (sig_match[i] && !entry.second[i].absorbed) {
+                if (sig_match[i]) {
                     source = entry.second[i].element;
                     source_idx = i;
                     break;
                 }
             }
 
-            // If no non-absorbed occurrence exists, we cannot apply CSE.
+            // No valid source found (all erased or mutated).
             if (source == nullptr) {
                 continue;
             }
