@@ -2864,7 +2864,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     assert(fclass);
 
     double neutral = fclass == 1 ? 0.0 : 1.0;
-
     bool arg2_inv = (fname == "sub" || fname == "div");
 
     if (f->parent != elist->end() && f->parent->type == Element_type::CFUNC) {
@@ -2881,23 +2880,17 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             // this is the first infix argument (postfix order is inverse)
             auto arg1_chunk = get_dependent_chunk(f->args[1]);
-            pf->absorbed[parent_inv_op           ].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
+            pf->absorbed[parent_inv_op].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
             elist->erase(arg1_chunk.first, arg1_chunk.second);
 
             // the second infix argument
             auto arg0_chunk = get_dependent_chunk(f->args[0]);
             pf->absorbed[parent_inv_op ^ arg2_inv].push_back(elist_t(arg0_chunk.first, arg0_chunk.second));
             elist->erase(arg0_chunk.first, arg0_chunk.second);
-
-            pf->absorbed[ parent_inv_op].insert(pf->absorbed[ parent_inv_op].end(),
-                f->absorbed[0].begin(), f->absorbed[0].end());
-            pf->absorbed[!parent_inv_op].insert(pf->absorbed[!parent_inv_op].end(),
-                f->absorbed[1].begin(), f->absorbed[1].end());
-
+            pf->absorbed[ parent_inv_op].insert(pf->absorbed[ parent_inv_op].end(), f->absorbed[0].begin(), f->absorbed[0].end());
+            pf->absorbed[!parent_inv_op].insert(pf->absorbed[!parent_inv_op].end(), f->absorbed[1].begin(), f->absorbed[1].end());
             pf->force_not_constant = true;
-
             *it = Element(make_intermediate_constant(ev, neutral));
-
             return;
         }
     }
@@ -2908,7 +2901,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     // first infix argument
     auto arg1_chunk = get_dependent_chunk(f->args[1]);
-    f->absorbed[0       ].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
+    f->absorbed[0].push_back(elist_t(arg1_chunk.first, arg1_chunk.second));
     elist->erase(arg1_chunk.first, arg1_chunk.second);
 
     // second infix argument
@@ -2926,12 +2919,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             auto next_e = next(e);
             if (e->size() == 1 && e->front().type == Element_type::CCONST) {
                 auto v = e->front().c;
-                if (fclass == 1) {
-                    ac[i] += static_cast<long double>(v->value);
-                }
-                else {
-                    ac[i] *= static_cast<long double>(v->value);
-                }
+                if (fclass == 1) { ac[i] += static_cast<long double>(v->value); }
+                else {             ac[i] *= static_cast<long double>(v->value); }
                 f->absorbed[i].erase(e);
             }
             e = next_e;
@@ -2944,7 +2933,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         elist_t chunk;
         int     factor;
     };
-
     vector<absorbed_term> terms;
     terms.reserve(f->absorbed[0].size() + f->absorbed[1].size());
 
@@ -2972,7 +2960,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 merged.pop_back();
             }
         }
-        else if (term.factor != 0) {
+        else 
+        if (term.factor != 0) {
             merged.push_back({std::move(term.chunk), term.factor});
         }
     }
@@ -2984,7 +2973,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     if (fclass == 1) {
         bool have_value = false;
         bool constant_added = (ac_final == neutral);
-
         auto ensure_constant = [&]() {
             if (have_value && !constant_added && ac_final != neutral) {
                 emit_apply_op_with_constant<0x00>(ev, s, ac_final);
@@ -3022,21 +3010,12 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             compile_elist(s, term.chunk.begin(), term.chunk.end());
 
-            if (factor == 1) {
-                // no-op
-            }
-            else if (factor == -1) {
-                s < 0xd9 < 0xe0;  // fchs
-            }
-            else if (factor == 2) {
-                s < 0xd8 < 0xc0;  // fadd st(0), st(0)
-            }
-            else if (factor == -2) {
-                s < 0xd8 < 0xc0;
-                s < 0xd9 < 0xe0;  // fchs
-            }
-            else {
-                emit_apply_op_with_constant<0x08>(ev, s, static_cast<double>(factor));
+            switch (factor) {
+                case  1:  break;
+                case  2:  s < 0xd8 < 0xc0; break;              // fadd st(0), st(0)
+                case -2:  s < 0xd8 < 0xc0; [[fallthrough]];    // fadd st(0), st(0)
+                case -1:  s < 0xd9 < 0xe0; break;              // fchs
+                default:  emit_apply_op_with_constant<0x08>(ev, s, static_cast<double>(factor)); break;
             }
 
             if (!have_value) {
@@ -3061,7 +3040,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     else {
         bool have_value = false;
         bool constant_multiplied = (ac_final == neutral);
-
         auto ensure_constant = [&]() {
             if (have_value && !constant_multiplied && ac_final != neutral) {
                 emit_apply_op_with_constant<0x08>(ev, s, ac_final);
@@ -3140,7 +3118,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     }
 
     string new_name = (fclass == 1) ? "add_sub_opt" : "mul_div_opt";
-
     uint8_t* cc = push_intermediate_code(ev, s.str());
     auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.buf.size(), cc, nullptr);
     f_opt->debug_desc = "(" + debug_ss.str() + ")";
