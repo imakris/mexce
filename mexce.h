@@ -60,8 +60,13 @@
  * * Numeric literals may be written with decimal points or scientific
  *   notation.
  * * Unary `+` and `-` as well as the infix operators `+`, `-`, `*`, `/`, `^`
- *   (power) and the comparison operators `<` and `>` are supported.  Both yield
- *   `1` when the comparison is true and `0` otherwise.
+ *   (power) and the comparison operators `<` and `>` are supported.  The `**`
+ *   operator is also available as an alias for `^` (power). Both comparison
+ *   operators yield `1` when the comparison is true and `0` otherwise.
+ * * Precedence: The power operators (`^` and `**`) have the highest precedence
+ *   and bind tighter than unary minus. For example, `-a^2` and `-a**2` are
+ *   evaluated as `-(a^2)`, matching Python semantics. Use parentheses to change
+ *   the grouping: `(-a)^2`.
  * * Parentheses and comma-separated argument lists follow familiar C-like
  *   rules.
  *

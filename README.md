@@ -109,11 +109,11 @@ Compiles and executes an expression for a single use without replacing the defau
 *   **Operators:** Infix operators with the following precedence:
     | Precedence | Operator | Function | Description |
     | :--- | :--- | :--- | :--- |
-    | 1 (highest) | `^` | `pow` | Power / Exponentiation |
+    | 1 (highest) | `^`, `**` | `pow` | Power / Exponentiation |
     | 2 | `*`, `/` | `mul`, `div` | Multiplication, Division |
     | 3 | `+`, `-` | `add`, `sub` | Addition, Subtraction |
     | 4 (lowest) | `<`, `>` | — | Less-than and greater-than comparison |
-*   **Unary Operators:** Unary `+` and `-` are supported.
+*   **Unary Operators:** Unary `+` and `-` are supported. Note that power operators (`^` and `**`) bind tighter than unary minus, so `-a**2` is evaluated as `-(a**2)`, matching Python semantics. Use parentheses to change the grouping: `(-a)**2`.
 *   **Comparison:** The `<` and `>` operators return a `double` (`1.0` if true, `0.0` if false).
 
 ## Built-in Identifiers
