@@ -3607,7 +3607,23 @@ void evaluator::set_expression(std::string e)
         state = 0;
     };
 
+    auto parse_infix_op = [&](size_t position, char& out_op, size_t& out_len) {
+        if (e[position] == '*' && position + 1 < e.length() && e[position + 1] == '*') {
+            out_op = '^';
+            out_len = 2;
+            return true;
+        }
+        if (is_operator(e[position])) {
+            out_op = e[position];
+            out_len = 1;
+            return true;
+        }
+        return false;
+    };
+
     for (; i < e.length(); i++) {
+        char infix_op;
+        size_t infix_op_len;
         switch(state) {
             case 0: //start of expression
                 if (e[i] == '-' || e[i] == '+') {
@@ -3679,10 +3695,11 @@ void evaluator::set_expression(std::string e)
                     state = 5;
                     break;
                 }
-                if (is_operator(e[i])) {
+                if (parse_infix_op(i, infix_op, infix_op_len)) {
                     tokens.push_back(temp);
-                    tokens.push_back(Token( get_infix_rank(e[i]) , i, e[i]));
+                    tokens.push_back(Token(get_infix_rank(infix_op), i, infix_op));
                     state = 4;
+                    i += infix_op_len - 1;
                     break;
                 }
                 if (e[i] == ',') {
@@ -3762,14 +3779,15 @@ void evaluator::set_expression(std::string e)
                     state = 0;
                     break;
                 }
-                if (is_operator(e[i])) {
+                if (parse_infix_op(i, infix_op, infix_op_len)) {
                     temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME :
                                 m_constants.find(temp.content) != m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content) +
                             " is not a known constant or variable name", i));
                     tokens.push_back(temp);
-                    tokens.push_back(Token(get_infix_rank(e[i]), i, e[i]));
+                    tokens.push_back(Token(get_infix_rank(infix_op), i, infix_op));
                     state = 4;
+                    i += infix_op_len - 1;
                     break;
                 }
                 if (e[i] == ',') {
@@ -3785,9 +3803,10 @@ void evaluator::set_expression(std::string e)
             case 5: //just read an expression (constant/variable/right parenthesis)
                 if (e[i] == ' ')
                     break;
-                if (is_operator(e[i])) {
-                    tokens.push_back(Token(get_infix_rank(e[i]), i, e[i]));
+                if (parse_infix_op(i, infix_op, infix_op_len)) {
+                    tokens.push_back(Token(get_infix_rank(infix_op), i, infix_op));
                     state = 4;
+                    i += infix_op_len - 1;
                     break;
                 }
                 if (e[i] == ')') {

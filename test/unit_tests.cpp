@@ -262,6 +262,18 @@ void test_logs_and_powers(TestSuite& suite) {
 
     eval.set_expression("b^2");
     suite.expect_near("pow_operator", eval.evaluate(), std::pow(base, 2.0));
+
+    eval.set_expression("b**2");
+    suite.expect_near("pow_operator_double_star", eval.evaluate(), std::pow(base, 2.0));
+
+    eval.set_expression("-b**2");
+    suite.expect_near("pow_operator_double_star_unary_base", eval.evaluate(), -std::pow(base, 2.0));
+
+    eval.set_expression("b**-2");
+    suite.expect_near("pow_operator_double_star_unary_exp", eval.evaluate(), std::pow(base, -2.0));
+
+    eval.set_expression("(-b)**2");
+    suite.expect_near("pow_operator_double_star_paren_neg_base", eval.evaluate(), std::pow(-base, 2.0));
 }
 
 void test_rounding_functions(TestSuite& suite) {
