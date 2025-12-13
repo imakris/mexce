@@ -849,7 +849,7 @@ inline Function Cos()
         < 0xdd < 0xd8                               // fstp st(0)         (pop pi/4)
         < 0xd9 < 0xc9                               // fxch st(1)         (x, |x|)
         < 0xdd < 0xd9;                              // fstp st(1)         (pop |x|) => x
-    emit_jb(jb_to_reduce);    // jump if pi/4 < |x|
+    emit_jb(jb_to_reduce);                          // jump if pi/4 < |x|
 
     // Fast path: cos(x) kernel on |x| <= pi/4.
     buf
@@ -1003,7 +1003,7 @@ inline Function Cos()
         < 0xd9 < 0xeb                               // fldpi
         < 0xdb < 0xf1                               // fcomi st,st(1)  (compare pi vs |x|)
         < 0xdd < 0xd8;                              // fstp st(0)      (pop pi)
-    emit_jb(jb_to_reduce); // jump if pi < |x|
+    emit_jb(jb_to_reduce);                          // jump if pi < |x|
 
     buf < 0xdc < 0xc8;                              // y = x^2
     emit_jmp(jmp_to_have_y);
@@ -1189,7 +1189,7 @@ inline Function Sin()
         < 0xdd < 0xd8                               // fstp st(0)         (pop pi/4)
         < 0xd9 < 0xc9                               // fxch st(1)         (x, |x|)
         < 0xdd < 0xd9;                              // fstp st(1)         (pop |x|) => x
-    emit_jb(jb_to_reduce);       // jump if pi/4 < |x|
+    emit_jb(jb_to_reduce);                          // jump if pi/4 < |x|
 
     // Fast path: sin(x) kernel on |x| <= pi/4.
     buf
@@ -1345,7 +1345,7 @@ inline Function Sin()
         < 0xd9 < 0xeb                               // fldpi
         < 0xdb < 0xf1                               // fcomi st,st(1)  (compare pi vs |x|)
         < 0xdd < 0xd8;                              // fstp st(0)      (pop pi)
-    emit_jb(jb_to_reduce); // jump if pi < |x|
+    emit_jb(jb_to_reduce);                          // jump if pi < |x|
 
     buf < 0xdd < 0xd8;                              // fstp st(0)      (pop |x|, keep x)
     emit_jmp(jmp_to_have_r);
@@ -1542,7 +1542,7 @@ inline Function Tan()
         < 0xdd < 0xd9                               // fstp st(1)   (pop -1)
         < 0xdb < 0xf1                               // fcomi st,st(1) (compare pi/2 vs |x|)
         < 0xdd < 0xd8;                              // fstp st(0)     (pop pi/2)
-    emit_jb(jb_to_reduce); // jump if pi/2 < |x|
+    emit_jb(jb_to_reduce);                          // jump if pi/2 < |x|
 
     buf < 0xdd < 0xd8;                              // fstp st(0)     (pop |x|) => x
     emit_jmp(jmp_to_have_r);
@@ -1583,7 +1583,7 @@ inline Function Tan()
         < 0xdd < 0x42 < 0x08                        // fld qword ptr [rdx+8]  (-pi/4, r)
         < 0xdb < 0xf1                               // fcomi st,st(1)
         < 0xdd < 0xd8;                              // fstp st(0)  (pop -pi/4)
-    emit_ja(ja_to_neg_large); // jump if (-pi/4) > r
+    emit_ja(ja_to_neg_large);                       // jump if (-pi/4) > r
 
     // Direct: u = r
     size_t jmp_to_have_u = 0;
