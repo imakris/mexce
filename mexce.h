@@ -1554,12 +1554,6 @@ inline Function Tan()
         buf << (uint32_t)0;
     };
 
-    auto emit_jne = [&](size_t& rel32_pos) {
-        buf < 0x0f < 0x85; // jne rel32
-        rel32_pos = buf.buf.size();
-        buf << (uint32_t)0;
-    };
-
     auto emit_jmp = [&](size_t& rel32_pos) {
         buf < 0xe9; // jmp rel32
         rel32_pos = buf.buf.size();
@@ -1819,15 +1813,17 @@ inline Function Tan()
 
     // If folded (ecx!=0), tan(x) = +/- 1/tan(u).
     size_t jz_to_end = 0;
-    size_t jne_to_end = 0;
 
     buf < 0x85 < 0xc9; // test ecx,ecx
     emit_jz(jz_to_end);
     buf < 0xd9 < 0xe8; // fld1
     buf < 0xde < 0xf1; // fdivrp st(1),st  => 1/tan(u)
-    buf < 0x83 < 0xf9 < 0x02; // cmp ecx,2
-    emit_jne(jne_to_end);
-    buf < 0xd9 < 0xe0; // fchs
+    // Negate for ecx==2 (neg fold): (-v, v), test cl,2 and fcmove to pick +v.
+    buf < 0xd9 < 0xc0;        // fld st(0)
+    buf < 0xd9 < 0xe0;        // fchs            (-v, v)
+    buf < 0xf6 < 0xc1 < 0x02; // test cl, 2
+    buf < 0xda < 0xc9;        // fcmove st,st(1) (choose +v when sign not set)
+    buf < 0xdd < 0xd9;        // fstp st(1)
 
     const size_t label_end = buf.buf.size();
 
@@ -1864,7 +1860,6 @@ inline Function Tan()
     patch_rel32(sin_jmp_to_mul_deg12, sin_label_mul);
 
     patch_rel32(jz_to_end, label_end);
-    patch_rel32(jne_to_end, label_end);
 
     // Patch embedded pointers.
     void* tan_thr_ptr = (void*)mexce_trig_tan_x_thresholds;
@@ -3376,9 +3371,8 @@ void run_cse(evaluator* ev, elist_t& elist)
     auto will_be_absorbed = [&](const Element& e) -> bool {
         if (e.type != Element_type::CFUNC) return false;
         int fclass = get_fclass(e.f->name);
-        if (fclass == 0) return false;  // Not add/sub/mul/div
-        if (e.f->parent == elist.end()) return false;
-        if (e.f->parent->type != Element_type::CFUNC) return false;
+        // Not add/sub/mul/div, or no function parent.
+        if (fclass == 0 || e.f->parent == elist.end() || e.f->parent->type != Element_type::CFUNC) return false;
         int pclass = get_fclass(e.f->parent->f->name);
         return pclass == fclass;  // Will be absorbed if same class
     };
