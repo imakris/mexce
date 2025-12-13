@@ -1037,69 +1037,53 @@ inline Function Cos()
         emit_jb(jb_rel32_pos);
     };
 
-    size_t jb_to_cmp1 = 0;
-    size_t jb_to_cmp2 = 0;
-    size_t jb_to_cmp3 = 0;
-    size_t jb_to_cmp4 = 0;
-    size_t jb_to_deg15 = 0;
-
-    size_t jmp_to_end_deg5 = 0;
-    size_t jmp_to_end_deg7 = 0;
-    size_t jmp_to_end_deg9 = 0;
-    size_t jmp_to_end_deg11 = 0;
-    size_t jmp_to_end_deg13 = 0;
+    enum { cmp_count = 5, end_jmp_count = 5 };
+    size_t jb_to_cmp[cmp_count];
+    size_t label_cmp[cmp_count];
+    size_t jmp_to_end[end_jmp_count];
 
     // thr0 -> degree5 (10!)
-    emit_thr_cmp(0, jb_to_cmp1);
+    emit_thr_cmp(0, jb_to_cmp[0]);
     emit_add_rax(buf, 0xa0);
     emit_horner(buf, 6);
-    emit_jmp(jmp_to_end_deg5);
+    emit_jmp(jmp_to_end[0]);
 
-    const size_t label_cmp1 = buf.buf.size();
+    label_cmp[0] = buf.buf.size();
     // thr1 -> degree7 (14!)
-    emit_thr_cmp(8, jb_to_cmp2);
+    emit_thr_cmp(8, jb_to_cmp[1]);
     emit_add_rax(buf, 0x80);
     emit_horner(buf, 8);
-    emit_jmp(jmp_to_end_deg7);
+    emit_jmp(jmp_to_end[1]);
 
-    const size_t label_cmp2 = buf.buf.size();
+    label_cmp[1] = buf.buf.size();
     // thr2 -> degree9 (18!)
-    emit_thr_cmp(16, jb_to_cmp3);
+    emit_thr_cmp(16, jb_to_cmp[2]);
     emit_add_rax(buf, 0x60);
     emit_horner(buf, 10);
-    emit_jmp(jmp_to_end_deg9);
+    emit_jmp(jmp_to_end[2]);
 
-    const size_t label_cmp3 = buf.buf.size();
+    label_cmp[2] = buf.buf.size();
     // thr3 -> degree11 (22!)
-    emit_thr_cmp(24, jb_to_cmp4);
+    emit_thr_cmp(24, jb_to_cmp[3]);
     emit_add_rax(buf, 0x40);
     emit_horner(buf, 12);
-    emit_jmp(jmp_to_end_deg11);
+    emit_jmp(jmp_to_end[3]);
 
-    const size_t label_cmp4 = buf.buf.size();
+    label_cmp[3] = buf.buf.size();
     // thr4 -> degree13 (26!), else degree15 (30!)
-    emit_thr_cmp(32, jb_to_deg15);
+    emit_thr_cmp(32, jb_to_cmp[4]);
     emit_add_rax(buf, 0x20);
     emit_horner(buf, 14);
-    emit_jmp(jmp_to_end_deg13);
+    emit_jmp(jmp_to_end[4]);
 
-    const size_t label_deg15 = buf.buf.size();
+    label_cmp[4] = buf.buf.size();
     emit_horner(buf, 16);
     const size_t label_end = buf.buf.size();
 
     patch_rel32(buf, jb_to_reduce, label_reduce);
     patch_rel32(buf, jmp_to_have_y, label_have_y);
-    patch_rel32(buf, jb_to_cmp1, label_cmp1);
-    patch_rel32(buf, jb_to_cmp2, label_cmp2);
-    patch_rel32(buf, jb_to_cmp3, label_cmp3);
-    patch_rel32(buf, jb_to_cmp4, label_cmp4);
-    patch_rel32(buf, jb_to_deg15, label_deg15);
-
-    patch_rel32(buf, jmp_to_end_deg5, label_end);
-    patch_rel32(buf, jmp_to_end_deg7, label_end);
-    patch_rel32(buf, jmp_to_end_deg9, label_end);
-    patch_rel32(buf, jmp_to_end_deg11, label_end);
-    patch_rel32(buf, jmp_to_end_deg13, label_end);
+    for (int i = 0; i < cmp_count; ++i) patch_rel32(buf, jb_to_cmp[i], label_cmp[i]);
+    for (int i = 0; i < end_jmp_count; ++i) patch_rel32(buf, jmp_to_end[i], label_end);
 
     void* coeff_ptr = (void*)mexce_trig_mfactors;
     void* thr_ptr   = (void*)mexce_trig_y_thresholds;
@@ -1398,53 +1382,46 @@ inline Function Sin()
         emit_jb(jb_rel32_pos);
     };
 
-    size_t jb_to_cmp1 = 0;
-    size_t jb_to_cmp2 = 0;
-    size_t jb_to_cmp3 = 0;
-    size_t jb_to_cmp4 = 0;
-    size_t jb_to_deg14 = 0;
-
-    size_t jmp_to_mul_deg4 = 0;
-    size_t jmp_to_mul_deg6 = 0;
-    size_t jmp_to_mul_deg8 = 0;
-    size_t jmp_to_mul_deg10 = 0;
-    size_t jmp_to_mul_deg12 = 0;
+    enum { cmp_count = 5, mul_jmp_count = 5 };
+    size_t jb_to_cmp[cmp_count];
+    size_t label_cmp[cmp_count];
+    size_t jmp_to_mul[mul_jmp_count];
 
     // thr0 -> degree4 (9!)
-    emit_thr_cmp(0, jb_to_cmp1);
+    emit_thr_cmp(0, jb_to_cmp[0]);
     emit_add_rax(buf, 0xa0);
     emit_horner(buf, 5);
-    emit_jmp(jmp_to_mul_deg4);
+    emit_jmp(jmp_to_mul[0]);
 
-    const size_t label_cmp1 = buf.buf.size();
+    label_cmp[0] = buf.buf.size();
     // thr1 -> degree6 (13!)
-    emit_thr_cmp(8, jb_to_cmp2);
+    emit_thr_cmp(8, jb_to_cmp[1]);
     emit_add_rax(buf, 0x80);
     emit_horner(buf, 7);
-    emit_jmp(jmp_to_mul_deg6);
+    emit_jmp(jmp_to_mul[1]);
 
-    const size_t label_cmp2 = buf.buf.size();
+    label_cmp[1] = buf.buf.size();
     // thr2 -> degree8 (17!)
-    emit_thr_cmp(16, jb_to_cmp3);
+    emit_thr_cmp(16, jb_to_cmp[2]);
     emit_add_rax(buf, 0x60);
     emit_horner(buf, 9);
-    emit_jmp(jmp_to_mul_deg8);
+    emit_jmp(jmp_to_mul[2]);
 
-    const size_t label_cmp3 = buf.buf.size();
+    label_cmp[2] = buf.buf.size();
     // thr3 -> degree10 (21!)
-    emit_thr_cmp(24, jb_to_cmp4);
+    emit_thr_cmp(24, jb_to_cmp[3]);
     emit_add_rax(buf, 0x40);
     emit_horner(buf, 11);
-    emit_jmp(jmp_to_mul_deg10);
+    emit_jmp(jmp_to_mul[3]);
 
-    const size_t label_cmp4 = buf.buf.size();
+    label_cmp[3] = buf.buf.size();
     // thr4 -> degree12 (25!), else degree14 (29!)
-    emit_thr_cmp(32, jb_to_deg14);
+    emit_thr_cmp(32, jb_to_cmp[4]);
     emit_add_rax(buf, 0x20);
     emit_horner(buf, 13);
-    emit_jmp(jmp_to_mul_deg12);
+    emit_jmp(jmp_to_mul[4]);
 
-    const size_t label_deg14 = buf.buf.size();
+    label_cmp[4] = buf.buf.size();
     emit_horner(buf, 15);
 
     const size_t label_mul = buf.buf.size();
@@ -1452,17 +1429,8 @@ inline Function Sin()
 
     patch_rel32(buf, jb_to_reduce, label_reduce);
     patch_rel32(buf, jmp_to_have_r, label_have_r);
-    patch_rel32(buf, jb_to_cmp1, label_cmp1);
-    patch_rel32(buf, jb_to_cmp2, label_cmp2);
-    patch_rel32(buf, jb_to_cmp3, label_cmp3);
-    patch_rel32(buf, jb_to_cmp4, label_cmp4);
-    patch_rel32(buf, jb_to_deg14, label_deg14);
-
-    patch_rel32(buf, jmp_to_mul_deg4, label_mul);
-    patch_rel32(buf, jmp_to_mul_deg6, label_mul);
-    patch_rel32(buf, jmp_to_mul_deg8, label_mul);
-    patch_rel32(buf, jmp_to_mul_deg10, label_mul);
-    patch_rel32(buf, jmp_to_mul_deg12, label_mul);
+    for (int i = 0; i < cmp_count; ++i) patch_rel32(buf, jb_to_cmp[i], label_cmp[i]);
+    for (int i = 0; i < mul_jmp_count; ++i) patch_rel32(buf, jmp_to_mul[i], label_mul);
 
     void* coeff_ptr = (void*)mexce_trig_sinfactors;
     void* thr_ptr   = (void*)mexce_trig_sin_y_thresholds;
@@ -1643,17 +1611,10 @@ inline Function Tan()
     buf < 0xd9 < 0xc0; // fld st(0)  (y, y, u)
 
     // ---- cos(u) polynomial on y ----
-    size_t cos_jb_to_cmp1 = 0;
-    size_t cos_jb_to_cmp2 = 0;
-    size_t cos_jb_to_cmp3 = 0;
-    size_t cos_jb_to_cmp4 = 0;
-    size_t cos_jb_to_deg15 = 0;
-
-    size_t cos_jmp_to_end_deg5 = 0;
-    size_t cos_jmp_to_end_deg7 = 0;
-    size_t cos_jmp_to_end_deg9 = 0;
-    size_t cos_jmp_to_end_deg11 = 0;
-    size_t cos_jmp_to_end_deg13 = 0;
+    enum { cos_cmp_count = 5, cos_end_jmp_count = 5 };
+    size_t cos_jb_to_cmp[cos_cmp_count];
+    size_t cos_label_cmp[cos_cmp_count];
+    size_t cos_jmp_to_end[cos_end_jmp_count];
 
     // mov rax, cos_coeff_base  / mov rdx, cos_threshold_base
 #ifdef MEXCE_64
@@ -1680,40 +1641,40 @@ inline Function Tan()
     };
 
     // thr0 -> degree5 (10!)
-    emit_thr_cmp(0, cos_jb_to_cmp1);
+    emit_thr_cmp(0, cos_jb_to_cmp[0]);
     emit_add_rax(buf, 0xa0);
     emit_horner(buf, 6);
-    emit_jmp(cos_jmp_to_end_deg5);
+    emit_jmp(cos_jmp_to_end[0]);
 
-    const size_t cos_label_cmp1 = buf.buf.size();
+    cos_label_cmp[0] = buf.buf.size();
     // thr1 -> degree7 (14!)
-    emit_thr_cmp(8, cos_jb_to_cmp2);
+    emit_thr_cmp(8, cos_jb_to_cmp[1]);
     emit_add_rax(buf, 0x80);
     emit_horner(buf, 8);
-    emit_jmp(cos_jmp_to_end_deg7);
+    emit_jmp(cos_jmp_to_end[1]);
 
-    const size_t cos_label_cmp2 = buf.buf.size();
+    cos_label_cmp[1] = buf.buf.size();
     // thr2 -> degree9 (18!)
-    emit_thr_cmp(16, cos_jb_to_cmp3);
+    emit_thr_cmp(16, cos_jb_to_cmp[2]);
     emit_add_rax(buf, 0x60);
     emit_horner(buf, 10);
-    emit_jmp(cos_jmp_to_end_deg9);
+    emit_jmp(cos_jmp_to_end[2]);
 
-    const size_t cos_label_cmp3 = buf.buf.size();
+    cos_label_cmp[2] = buf.buf.size();
     // thr3 -> degree11 (22!)
-    emit_thr_cmp(24, cos_jb_to_cmp4);
+    emit_thr_cmp(24, cos_jb_to_cmp[3]);
     emit_add_rax(buf, 0x40);
     emit_horner(buf, 12);
-    emit_jmp(cos_jmp_to_end_deg11);
+    emit_jmp(cos_jmp_to_end[3]);
 
-    const size_t cos_label_cmp4 = buf.buf.size();
+    cos_label_cmp[3] = buf.buf.size();
     // thr4 -> degree13 (26!), else degree15 (30!)
-    emit_thr_cmp(32, cos_jb_to_deg15);
+    emit_thr_cmp(32, cos_jb_to_cmp[4]);
     emit_add_rax(buf, 0x20);
     emit_horner(buf, 14);
-    emit_jmp(cos_jmp_to_end_deg13);
+    emit_jmp(cos_jmp_to_end[4]);
 
-    const size_t cos_label_deg15 = buf.buf.size();
+    cos_label_cmp[4] = buf.buf.size();
     emit_horner(buf, 16);
 
     const size_t cos_label_end = buf.buf.size();
@@ -1721,17 +1682,10 @@ inline Function Tan()
     // ---- sin(u) polynomial on y ----
     buf < 0xd9 < 0xc9; // fxch st(1)  (y, cos, u)
 
-    size_t sin_jb_to_cmp1 = 0;
-    size_t sin_jb_to_cmp2 = 0;
-    size_t sin_jb_to_cmp3 = 0;
-    size_t sin_jb_to_cmp4 = 0;
-    size_t sin_jb_to_deg14 = 0;
-
-    size_t sin_jmp_to_mul_deg4 = 0;
-    size_t sin_jmp_to_mul_deg6 = 0;
-    size_t sin_jmp_to_mul_deg8 = 0;
-    size_t sin_jmp_to_mul_deg10 = 0;
-    size_t sin_jmp_to_mul_deg12 = 0;
+    enum { sin_cmp_count = 5, sin_mul_jmp_count = 5 };
+    size_t sin_jb_to_cmp[sin_cmp_count];
+    size_t sin_label_cmp[sin_cmp_count];
+    size_t sin_jmp_to_mul[sin_mul_jmp_count];
 
     // mov rax, sin_coeff_base  / mov rdx, sin_threshold_base
 #ifdef MEXCE_64
@@ -1751,40 +1705,40 @@ inline Function Tan()
 #endif
 
     // thr0 -> degree4 (9!)
-    emit_thr_cmp(0, sin_jb_to_cmp1);
+    emit_thr_cmp(0, sin_jb_to_cmp[0]);
     emit_add_rax(buf, 0xa0);
     emit_horner(buf, 5);
-    emit_jmp(sin_jmp_to_mul_deg4);
+    emit_jmp(sin_jmp_to_mul[0]);
 
-    const size_t sin_label_cmp1 = buf.buf.size();
+    sin_label_cmp[0] = buf.buf.size();
     // thr1 -> degree6 (13!)
-    emit_thr_cmp(8, sin_jb_to_cmp2);
+    emit_thr_cmp(8, sin_jb_to_cmp[1]);
     emit_add_rax(buf, 0x80);
     emit_horner(buf, 7);
-    emit_jmp(sin_jmp_to_mul_deg6);
+    emit_jmp(sin_jmp_to_mul[1]);
 
-    const size_t sin_label_cmp2 = buf.buf.size();
+    sin_label_cmp[1] = buf.buf.size();
     // thr2 -> degree8 (17!)
-    emit_thr_cmp(16, sin_jb_to_cmp3);
+    emit_thr_cmp(16, sin_jb_to_cmp[2]);
     emit_add_rax(buf, 0x60);
     emit_horner(buf, 9);
-    emit_jmp(sin_jmp_to_mul_deg8);
+    emit_jmp(sin_jmp_to_mul[2]);
 
-    const size_t sin_label_cmp3 = buf.buf.size();
+    sin_label_cmp[2] = buf.buf.size();
     // thr3 -> degree10 (21!)
-    emit_thr_cmp(24, sin_jb_to_cmp4);
+    emit_thr_cmp(24, sin_jb_to_cmp[3]);
     emit_add_rax(buf, 0x40);
     emit_horner(buf, 11);
-    emit_jmp(sin_jmp_to_mul_deg10);
+    emit_jmp(sin_jmp_to_mul[3]);
 
-    const size_t sin_label_cmp4 = buf.buf.size();
+    sin_label_cmp[3] = buf.buf.size();
     // thr4 -> degree12 (25!), else degree14 (29!)
-    emit_thr_cmp(32, sin_jb_to_deg14);
+    emit_thr_cmp(32, sin_jb_to_cmp[4]);
     emit_add_rax(buf, 0x20);
     emit_horner(buf, 13);
-    emit_jmp(sin_jmp_to_mul_deg12);
+    emit_jmp(sin_jmp_to_mul[4]);
 
-    const size_t sin_label_deg14 = buf.buf.size();
+    sin_label_cmp[4] = buf.buf.size();
     emit_horner(buf, 15);
 
     const size_t sin_label_mul = buf.buf.size();
@@ -1817,29 +1771,11 @@ inline Function Tan()
     patch_rel32(buf, jmp_to_have_u, label_have_u);
     patch_rel32(buf, jmp_pos_to_have_u, label_have_u);
 
-    patch_rel32(buf, cos_jb_to_cmp1, cos_label_cmp1);
-    patch_rel32(buf, cos_jb_to_cmp2, cos_label_cmp2);
-    patch_rel32(buf, cos_jb_to_cmp3, cos_label_cmp3);
-    patch_rel32(buf, cos_jb_to_cmp4, cos_label_cmp4);
-    patch_rel32(buf, cos_jb_to_deg15, cos_label_deg15);
+    for (int i = 0; i < cos_cmp_count; ++i) patch_rel32(buf, cos_jb_to_cmp[i], cos_label_cmp[i]);
+    for (int i = 0; i < cos_end_jmp_count; ++i) patch_rel32(buf, cos_jmp_to_end[i], cos_label_end);
 
-    patch_rel32(buf, cos_jmp_to_end_deg5, cos_label_end);
-    patch_rel32(buf, cos_jmp_to_end_deg7, cos_label_end);
-    patch_rel32(buf, cos_jmp_to_end_deg9, cos_label_end);
-    patch_rel32(buf, cos_jmp_to_end_deg11, cos_label_end);
-    patch_rel32(buf, cos_jmp_to_end_deg13, cos_label_end);
-
-    patch_rel32(buf, sin_jb_to_cmp1, sin_label_cmp1);
-    patch_rel32(buf, sin_jb_to_cmp2, sin_label_cmp2);
-    patch_rel32(buf, sin_jb_to_cmp3, sin_label_cmp3);
-    patch_rel32(buf, sin_jb_to_cmp4, sin_label_cmp4);
-    patch_rel32(buf, sin_jb_to_deg14, sin_label_deg14);
-
-    patch_rel32(buf, sin_jmp_to_mul_deg4, sin_label_mul);
-    patch_rel32(buf, sin_jmp_to_mul_deg6, sin_label_mul);
-    patch_rel32(buf, sin_jmp_to_mul_deg8, sin_label_mul);
-    patch_rel32(buf, sin_jmp_to_mul_deg10, sin_label_mul);
-    patch_rel32(buf, sin_jmp_to_mul_deg12, sin_label_mul);
+    for (int i = 0; i < sin_cmp_count; ++i) patch_rel32(buf, sin_jb_to_cmp[i], sin_label_cmp[i]);
+    for (int i = 0; i < sin_mul_jmp_count; ++i) patch_rel32(buf, sin_jmp_to_mul[i], sin_label_mul);
 
     patch_rel32(buf, jz_to_end, label_end);
 
