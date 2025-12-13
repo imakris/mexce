@@ -567,6 +567,11 @@ int main(int argc, char* argv[])
     print_kv("Native expressions covered", std::to_string(native_covered));
 
     out << "\nAccuracy distribution (ULP):\n";
+    out << "Accumulated ULP distance (sum):\n";
+    print_kv("Mexce vs Reference", comparisons_mexce_ref == 0 ? "-" : to_decimal_u128(ulp_sum_mexce_ref.hi, ulp_sum_mexce_ref.lo));
+    print_kv("Compiler vs Reference", comparisons_comp_ref == 0 ? "-" : to_decimal_u128(ulp_sum_comp_ref.hi, ulp_sum_comp_ref.lo));
+    print_kv("Mexce vs Compiler", comparisons_mexce_comp == 0 ? "-" : to_decimal_u128(ulp_sum_mexce_comp.hi, ulp_sum_mexce_comp.lo));
+    out << "\n";
 
     struct Distribution_column {
         std::string title;
@@ -662,13 +667,6 @@ int main(int argc, char* argv[])
     for (size_t row_idx = 0; row_idx < row_labels.size(); ++row_idx) {
         print_table_row(row_labels[row_idx], row_idx);
     }
-
-    out << "\n";
-
-    out << "Accumulated ULP distance (sum):\n";
-    print_kv("Mexce vs Reference", comparisons_mexce_ref == 0 ? "-" : to_decimal_u128(ulp_sum_mexce_ref.hi, ulp_sum_mexce_ref.lo));
-    print_kv("Compiler vs Reference", comparisons_comp_ref == 0 ? "-" : to_decimal_u128(ulp_sum_comp_ref.hi, ulp_sum_comp_ref.lo));
-    print_kv("Mexce vs Compiler", comparisons_mexce_comp == 0 ? "-" : to_decimal_u128(ulp_sum_mexce_comp.hi, ulp_sum_mexce_comp.lo));
 
     out << "\n";
 
