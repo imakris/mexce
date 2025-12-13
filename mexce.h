@@ -841,18 +841,20 @@ inline Function Cos()
 
     // Fast-path check: if |x| > pi/4, do reduction; otherwise directly evaluate the cos kernel on x.
     size_t jb_to_reduce = 0;
-    buf < 0xd9 < 0xc0;        // fld st(0)          (x, x)
-    buf < 0xd9 < 0xe1;        // fabs              (|x|, x)
-    buf < 0xdd < 0x42 < 0x00; // fld qword [rdx+0]  (pi/4, |x|, x)
-    buf < 0xdb < 0xf1;        // fcomi st,st(1)     (pi/4 vs |x|)
-    buf < 0xdd < 0xd8;        // fstp st(0)         (pop pi/4)
-    buf < 0xd9 < 0xc9;        // fxch st(1)         (x, |x|)
-    buf < 0xdd < 0xd9;        // fstp st(1)         (pop |x|) => x
+    buf
+        < 0xd9 < 0xc0            // fld st(0)          (x, x)
+        < 0xd9 < 0xe1            // fabs              (|x|, x)
+        < 0xdd < 0x42 < 0x00     // fld qword [rdx+0]  (pi/4, |x|, x)
+        < 0xdb < 0xf1            // fcomi st,st(1)     (pi/4 vs |x|)
+        < 0xdd < 0xd8            // fstp st(0)         (pop pi/4)
+        < 0xd9 < 0xc9            // fxch st(1)         (x, |x|)
+        < 0xdd < 0xd9;           // fstp st(1)         (pop |x|) => x
     emit_jb(jb_to_reduce);    // jump if pi/4 < |x|
 
     // Fast path: cos(x) kernel on |x| <= pi/4.
-    buf < 0xd9 < 0xc0; // fld st(0)          (x, x)
-    buf < 0xdc < 0xc8; // fmul st(0), st(0)  (y, x)
+    buf
+        < 0xd9 < 0xc0            // fld st(0)          (x, x)
+        < 0xdc < 0xc8;           // fmul st(0), st(0)  (y, x)
 
 #ifdef MEXCE_64
     buf < 0x48 < 0xb8;
@@ -948,12 +950,13 @@ inline Function Cos()
     const size_t label_have_kernel = buf.buf.size();
 
     // Sign is negative for q in {1,2} => ((q+1) & 2) != 0.
-    buf < 0xd9 < 0xc0;        // fld st(0)
-    buf < 0xd9 < 0xe0;        // fchs            (-v, v)
-    buf < 0x8d < 0x41 < 0x01; // lea eax, [ecx+1]
-    buf < 0xf6 < 0xc0 < 0x02; // test al, 2
-    buf < 0xda < 0xc9;        // fcmove st,st(1) (choose +v when sign not set)
-    buf < 0xdd < 0xd9;        // fstp st(1)
+    buf
+        < 0xd9 < 0xc0            // fld st(0)
+        < 0xd9 < 0xe0            // fchs            (-v, v)
+        < 0x8d < 0x41 < 0x01     // lea eax, [ecx+1]
+        < 0xf6 < 0xc0 < 0x02     // test al, 2
+        < 0xda < 0xc9            // fcmove st,st(1) (choose +v when sign not set)
+        < 0xdd < 0xd9;           // fstp st(1)
 
     const size_t label_end = buf.buf.size();
 
@@ -995,10 +998,11 @@ inline Function Cos()
     size_t jb_to_reduce = 0;
     size_t jmp_to_have_y = 0;
 
-    buf < 0xd9 < 0xe1; // fabs
-    buf < 0xd9 < 0xeb; // fldpi
-    buf < 0xdb < 0xf1; // fcomi st,st(1)  (compare pi vs |x|)
-    buf < 0xdd < 0xd8; // fstp st(0)      (pop pi)
+    buf
+        < 0xd9 < 0xe1     // fabs
+        < 0xd9 < 0xeb     // fldpi
+        < 0xdb < 0xf1     // fcomi st,st(1)  (compare pi vs |x|)
+        < 0xdd < 0xd8;    // fstp st(0)      (pop pi)
     emit_jb(jb_to_reduce); // jump if pi < |x|
 
     buf < 0xdc < 0xc8; // y = x^2
@@ -1177,18 +1181,20 @@ inline Function Sin()
 
     // Fast-path check: if |x| > pi/4, do reduction; otherwise directly evaluate the sin kernel on x.
     size_t jb_to_reduce = 0;
-    buf < 0xd9 < 0xc0;        // fld st(0)          (x, x)
-    buf < 0xd9 < 0xe1;        // fabs              (|x|, x)
-    buf < 0xdd < 0x42 < 0x00; // fld qword [rdx+0]  (pi/4, |x|, x)
-    buf < 0xdb < 0xf1;        // fcomi st,st(1)     (pi/4 vs |x|)
-    buf < 0xdd < 0xd8;        // fstp st(0)         (pop pi/4)
-    buf < 0xd9 < 0xc9;        // fxch st(1)         (x, |x|)
-    buf < 0xdd < 0xd9;        // fstp st(1)         (pop |x|) => x
+    buf
+        < 0xd9 < 0xc0            // fld st(0)          (x, x)
+        < 0xd9 < 0xe1            // fabs              (|x|, x)
+        < 0xdd < 0x42 < 0x00     // fld qword [rdx+0]  (pi/4, |x|, x)
+        < 0xdb < 0xf1            // fcomi st,st(1)     (pi/4 vs |x|)
+        < 0xdd < 0xd8            // fstp st(0)         (pop pi/4)
+        < 0xd9 < 0xc9            // fxch st(1)         (x, |x|)
+        < 0xdd < 0xd9;           // fstp st(1)         (pop |x|) => x
     emit_jb(jb_to_reduce);    // jump if pi/4 < |x|
 
     // Fast path: sin(x) kernel on |x| <= pi/4.
-    buf < 0xd9 < 0xc0; // fld st(0)          (x, x)
-    buf < 0xdc < 0xc8; // fmul st(0), st(0)  (y, x)
+    buf
+        < 0xd9 < 0xc0            // fld st(0)          (x, x)
+        < 0xdc < 0xc8;           // fmul st(0), st(0)  (y, x)
 
 #ifdef MEXCE_64
     buf < 0x48 < 0xb8;
@@ -1286,11 +1292,12 @@ inline Function Sin()
     const size_t label_have_kernel = buf.buf.size();
 
     // Sign is negative for q in {2,3} => (q & 2) != 0.
-    buf < 0xd9 < 0xc0;        // fld st(0)
-    buf < 0xd9 < 0xe0;        // fchs            (-v, v)
-    buf < 0xf6 < 0xc1 < 0x02; // test cl, 2
-    buf < 0xda < 0xc9;        // fcmove st,st(1) (choose +v when sign not set)
-    buf < 0xdd < 0xd9;        // fstp st(1)
+    buf
+        < 0xd9 < 0xc0            // fld st(0)
+        < 0xd9 < 0xe0            // fchs            (-v, v)
+        < 0xf6 < 0xc1 < 0x02     // test cl, 2
+        < 0xda < 0xc9            // fcmove st,st(1) (choose +v when sign not set)
+        < 0xdd < 0xd9;           // fstp st(1)
 
     const size_t label_end = buf.buf.size();
 
@@ -1332,11 +1339,12 @@ inline Function Sin()
     size_t jb_to_reduce = 0;
     size_t jmp_to_have_r = 0;
 
-    buf < 0xd9 < 0xc0; // fld st(0)        (dup x)
-    buf < 0xd9 < 0xe1; // fabs            (|x|, x)
-    buf < 0xd9 < 0xeb; // fldpi
-    buf < 0xdb < 0xf1; // fcomi st,st(1)  (compare pi vs |x|)
-    buf < 0xdd < 0xd8; // fstp st(0)      (pop pi)
+    buf
+        < 0xd9 < 0xc0     // fld st(0)        (dup x)
+        < 0xd9 < 0xe1     // fabs            (|x|, x)
+        < 0xd9 < 0xeb     // fldpi
+        < 0xdb < 0xf1     // fcomi st,st(1)  (compare pi vs |x|)
+        < 0xdd < 0xd8;    // fstp st(0)      (pop pi)
     emit_jb(jb_to_reduce); // jump if pi < |x|
 
     buf < 0xdd < 0xd8; // fstp st(0)      (pop |x|, keep x)
@@ -1523,28 +1531,30 @@ inline Function Tan()
     size_t jb_to_reduce = 0;
     size_t jmp_to_have_r = 0;
 
-    buf < 0xd9 < 0xc0; // fld st(0)  (dup x)
-    buf < 0xd9 < 0xe1; // fabs       (|x|, x)
-    buf < 0xd9 < 0xeb; // fldpi
-    buf < 0xd9 < 0xe8; // fld1
-    buf < 0xd9 < 0xe0; // fchs       => -1
-    buf < 0xd9 < 0xc9; // fxch st(1)  (pi, -1, |x|, x)
-    buf < 0xd9 < 0xfd; // fscale      => pi/2
-    buf < 0xdd < 0xd9; // fstp st(1)   (pop -1)
-    buf < 0xdb < 0xf1; // fcomi st,st(1) (compare pi/2 vs |x|)
-    buf < 0xdd < 0xd8; // fstp st(0)     (pop pi/2)
+    buf
+        < 0xd9 < 0xc0     // fld st(0)  (dup x)
+        < 0xd9 < 0xe1     // fabs       (|x|, x)
+        < 0xd9 < 0xeb     // fldpi
+        < 0xd9 < 0xe8     // fld1
+        < 0xd9 < 0xe0     // fchs       => -1
+        < 0xd9 < 0xc9     // fxch st(1)  (pi, -1, |x|, x)
+        < 0xd9 < 0xfd     // fscale      => pi/2
+        < 0xdd < 0xd9     // fstp st(1)   (pop -1)
+        < 0xdb < 0xf1     // fcomi st,st(1) (compare pi/2 vs |x|)
+        < 0xdd < 0xd8;    // fstp st(0)     (pop pi/2)
     emit_jb(jb_to_reduce); // jump if pi/2 < |x|
 
     buf < 0xdd < 0xd8; // fstp st(0)     (pop |x|) => x
     emit_jmp(jmp_to_have_r);
 
     const size_t label_reduce = buf.buf.size();
-    buf < 0xd9 < 0xc9; // fxch st(1)     (x, |x|)
-    buf < 0xdd < 0xd9; // fstp st(1)     (pop |x|) => x
-    buf < 0xd9 < 0xeb; // fldpi          (pi, x)
-    buf < 0xd9 < 0xc9; // fxch st(1)     (x, pi)
-    buf < 0xd9 < 0xf5; // fprem1         (remainder, pi)
-    buf < 0xdd < 0xd9; // fstp st(1)     (pop pi)
+    buf
+        < 0xd9 < 0xc9     // fxch st(1)     (x, |x|)
+        < 0xdd < 0xd9     // fstp st(1)     (pop |x|) => x
+        < 0xd9 < 0xeb     // fldpi          (pi, x)
+        < 0xd9 < 0xc9     // fxch st(1)     (x, pi)
+        < 0xd9 < 0xf5     // fprem1         (remainder, pi)
+        < 0xdd < 0xd9;    // fstp st(1)     (pop pi)
 
     const size_t label_have_r = buf.buf.size();
 
@@ -1561,16 +1571,18 @@ inline Function Tan()
 
     // If r > pi/4: u = pi/2 - r, and take reciprocal at the end.
     size_t jb_to_pos_large = 0;
-    buf < 0xdd < 0x42 < 0x00; // fld qword ptr [rdx+0]  (pi/4, r)
-    buf < 0xdb < 0xf1;        // fcomi st,st(1)
-    buf < 0xdd < 0xd8;        // fstp st(0)  (pop pi/4)
+    buf
+        < 0xdd < 0x42 < 0x00     // fld qword ptr [rdx+0]  (pi/4, r)
+        < 0xdb < 0xf1            // fcomi st,st(1)
+        < 0xdd < 0xd8;           // fstp st(0)  (pop pi/4)
     emit_jb(jb_to_pos_large);
 
     // If r < -pi/4: u = pi/2 + r, take reciprocal and negate.
     size_t ja_to_neg_large = 0;
-    buf < 0xdd < 0x42 < 0x08; // fld qword ptr [rdx+8]  (-pi/4, r)
-    buf < 0xdb < 0xf1;        // fcomi st,st(1)
-    buf < 0xdd < 0xd8;        // fstp st(0)  (pop -pi/4)
+    buf
+        < 0xdd < 0x42 < 0x08     // fld qword ptr [rdx+8]  (-pi/4, r)
+        < 0xdb < 0xf1            // fcomi st,st(1)
+        < 0xdd < 0xd8;           // fstp st(0)  (pop -pi/4)
     emit_ja(ja_to_neg_large); // jump if (-pi/4) > r
 
     // Direct: u = r
@@ -1581,13 +1593,14 @@ inline Function Tan()
     buf < 0xb9;
     buf << (uint32_t)1;
     // u = pi/2 - r
-    buf < 0xd9 < 0xe8; // fld1
-    buf < 0xd9 < 0xe0; // fchs   => -1
-    buf < 0xd9 < 0xeb; // fldpi
-    buf < 0xd9 < 0xfd; // fscale => pi/2
-    buf < 0xdd < 0xd9; // fstp st(1)  (pop -1)
-    buf < 0xd9 < 0xc9; // fxch st(1)  (r, pi/2)
-    buf < 0xde < 0xe9; // fsubp st(1), st  => pi/2 - r
+    buf
+        < 0xd9 < 0xe8     // fld1
+        < 0xd9 < 0xe0     // fchs   => -1
+        < 0xd9 < 0xeb     // fldpi
+        < 0xd9 < 0xfd     // fscale => pi/2
+        < 0xdd < 0xd9     // fstp st(1)  (pop -1)
+        < 0xd9 < 0xc9     // fxch st(1)  (r, pi/2)
+        < 0xde < 0xe9;    // fsubp st(1), st  => pi/2 - r
     size_t jmp_pos_to_have_u = 0;
     emit_jmp(jmp_pos_to_have_u);
 
@@ -1595,20 +1608,22 @@ inline Function Tan()
     buf < 0xb9;
     buf << (uint32_t)2;
     // u = pi/2 + r  (r is negative here, so u is in [0, pi/4])
-    buf < 0xd9 < 0xe8; // fld1
-    buf < 0xd9 < 0xe0; // fchs   => -1
-    buf < 0xd9 < 0xeb; // fldpi
-    buf < 0xd9 < 0xfd; // fscale => pi/2
-    buf < 0xdd < 0xd9; // fstp st(1)  (pop -1)
-    buf < 0xd9 < 0xc9; // fxch st(1)  (r, pi/2)
-    buf < 0xde < 0xc1; // faddp st(1), st  => pi/2 + r
+    buf
+        < 0xd9 < 0xe8     // fld1
+        < 0xd9 < 0xe0     // fchs   => -1
+        < 0xd9 < 0xeb     // fldpi
+        < 0xd9 < 0xfd     // fscale => pi/2
+        < 0xdd < 0xd9     // fstp st(1)  (pop -1)
+        < 0xd9 < 0xc9     // fxch st(1)  (r, pi/2)
+        < 0xde < 0xc1;    // faddp st(1), st  => pi/2 + r
 
     const size_t label_have_u = buf.buf.size();
 
     // y = u^2; keep u for the final multiplication.
-    buf < 0xd9 < 0xc0; // fld st(0)  (u, u)
-    buf < 0xdc < 0xc8; // fmul st(0), st(0) (y, u)
-    buf < 0xd9 < 0xc0; // fld st(0)  (y, y, u)
+    buf
+        < 0xd9 < 0xc0     // fld st(0)  (u, u)
+        < 0xdc < 0xc8     // fmul st(0), st(0) (y, u)
+        < 0xd9 < 0xc0;    // fld st(0)  (y, y, u)
 
     // ---- cos(u) polynomial on y ----
     enum { cos_cmp_count = 5, cos_end_jmp_count = 5 };
@@ -1755,11 +1770,12 @@ inline Function Tan()
     buf < 0xd9 < 0xe8; // fld1
     buf < 0xde < 0xf1; // fdivrp st(1),st  => 1/tan(u)
     // Negate for ecx==2 (neg fold): (-v, v), test cl,2 and fcmove to pick +v.
-    buf < 0xd9 < 0xc0;        // fld st(0)
-    buf < 0xd9 < 0xe0;        // fchs            (-v, v)
-    buf < 0xf6 < 0xc1 < 0x02; // test cl, 2
-    buf < 0xda < 0xc9;        // fcmove st,st(1) (choose +v when sign not set)
-    buf < 0xdd < 0xd9;        // fstp st(1)
+    buf
+        < 0xd9 < 0xc0            // fld st(0)
+        < 0xd9 < 0xe0            // fchs            (-v, v)
+        < 0xf6 < 0xc1 < 0x02     // test cl, 2
+        < 0xda < 0xc9            // fcmove st,st(1) (choose +v when sign not set)
+        < 0xdd < 0xd9;           // fstp st(1)
 
     const size_t label_end = buf.buf.size();
 
