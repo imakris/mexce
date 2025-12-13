@@ -779,7 +779,7 @@ int main(int argc, char* argv[])
 
     out << "\n";
 
-    out << "\n" << line << "\n" << "BENCHMARK SUMMARY" << "\n" << line << "\n";
+    out << line << "\n" << "BENCHMARK SUMMARY" << "\n" << line << "\n";
 
     struct Summary_column {
         std::string title;

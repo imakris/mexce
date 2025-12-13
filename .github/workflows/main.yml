@@ -38,13 +38,13 @@ jobs:
         run: cmake --build build --config Release --target run_benchmarks
       
       # 6. Display Benchmark Summary in Log
-      #    FIX: Use the 'head' command to show only the first 58 lines of the
+      #    FIX: Use the 'head' command to show only the first 57 lines of the
       #    results file, which contains the summary tables.
       - name: Display Benchmark Summary
         shell: bash
         run: |
-          echo "--- Benchmark Summary (first 58 lines) ---"
-          head -n 58 build/benchmark_results.txt
+          echo "--- Benchmark Summary (first 57 lines) ---"
+          head -n 57 build/benchmark_results.txt
           echo "------------------------------------------"
 
       # 7. Upload Full Benchmark Results as an Artifact
