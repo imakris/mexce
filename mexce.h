@@ -769,64 +769,64 @@ inline Function Cos()
 #else
     auto emit_add_rax = [](mexce_charstream& buf, uint32_t imm32) {
 #ifdef MEXCE_64
-        buf < 0x48 < 0x05; // add rax, imm32
+        buf < 0x48 < 0x05;                          // add rax, imm32
 #else
-        buf < 0x05;        // add eax, imm32
+        buf < 0x05;                                 // add eax, imm32
 #endif
         buf << imm32;
     };
 
     auto emit_horner = [&](mexce_charstream& buf, int coeff_count) {
         // y in st(0); Horner on y with coeffs at [rax + i*16].
-        buf < 0xdb < 0x28; // fld tword ptr [rax]
+        buf < 0xdb < 0x28;                          // fld tword ptr [rax]
 
         const int first_block = (coeff_count < 8) ? coeff_count : 8;
         for (int i = 1; i < first_block; ++i) {
-            buf < 0xd8 < 0xc9; // fmul st, st(1)
-            buf < 0xdb < 0x68 < (i * 0x10); // fld tword ptr [rax + i*16]
-            buf < 0xde < 0xc1; // faddp st(1), st
+            buf < 0xd8 < 0xc9;                      // fmul st, st(1)
+            buf < 0xdb < 0x68 < (i * 0x10);         // fld tword ptr [rax + i*16]
+            buf < 0xde < 0xc1;                      // faddp st(1), st
         }
 
         if (coeff_count > 8) {
             const int remaining = coeff_count - 8;
             for (int j = 0; j < remaining; ++j) {
-                buf < 0xd8 < 0xc9; // fmul st, st(1)
+                buf < 0xd8 < 0xc9;                  // fmul st, st(1)
                 if (j == 0) {
                     emit_add_rax(buf, 0x80);
-                    buf < 0xdb < 0x28; // fld tword ptr [rax]
+                    buf < 0xdb < 0x28;              // fld tword ptr [rax]
                 } else {
                     buf < 0xdb < 0x68 < (j * 0x10); // fld tword ptr [rax + j*16]
                 }
-                buf < 0xde < 0xc1; // faddp st(1), st
+                buf < 0xde < 0xc1;                  // faddp st(1), st
             }
         }
 
-        buf < 0xdd < 0xd9; // fstp st(1)  (pop y)
+        buf < 0xdd < 0xd9;                          // fstp st(1)  (pop y)
     };
 
     mexce_charstream buf;
 
 #if MEXCE_TRIG_USE_PIO2_KERNEL
     auto emit_jb = [&](size_t& rel32_pos) {
-        buf < 0x0f < 0x82; // jb rel32
+        buf < 0x0f < 0x82;                          // jb rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
 
     auto emit_jz = [&](size_t& rel32_pos) {
-        buf < 0x0f < 0x84; // jz rel32
+        buf < 0x0f < 0x84;                          // jz rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
 
     auto emit_jmp = [&](size_t& rel32_pos) {
-        buf < 0xe9; // jmp rel32
+        buf < 0xe9;                                 // jmp rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
 
     // Default quadrant: q=0 (no reduction needed).
-    buf < 0x31 < 0xc9; // xor ecx, ecx
+    buf < 0x31 < 0xc9;                              // xor ecx, ecx
 
     // mov rdx, tan_threshold_base (pi/4 at +0)
 #ifdef MEXCE_64
@@ -842,19 +842,19 @@ inline Function Cos()
     // Fast-path check: if |x| > pi/4, do reduction; otherwise directly evaluate the cos kernel on x.
     size_t jb_to_reduce = 0;
     buf
-        < 0xd9 < 0xc0            // fld st(0)          (x, x)
-        < 0xd9 < 0xe1            // fabs              (|x|, x)
-        < 0xdd < 0x42 < 0x00     // fld qword [rdx+0]  (pi/4, |x|, x)
-        < 0xdb < 0xf1            // fcomi st,st(1)     (pi/4 vs |x|)
-        < 0xdd < 0xd8            // fstp st(0)         (pop pi/4)
-        < 0xd9 < 0xc9            // fxch st(1)         (x, |x|)
-        < 0xdd < 0xd9;           // fstp st(1)         (pop |x|) => x
+        < 0xd9 < 0xc0                               // fld st(0)          (x, x)
+        < 0xd9 < 0xe1                               // fabs              (|x|, x)
+        < 0xdd < 0x42 < 0x00                        // fld qword [rdx+0]  (pi/4, |x|, x)
+        < 0xdb < 0xf1                               // fcomi st,st(1)     (pi/4 vs |x|)
+        < 0xdd < 0xd8                               // fstp st(0)         (pop pi/4)
+        < 0xd9 < 0xc9                               // fxch st(1)         (x, |x|)
+        < 0xdd < 0xd9;                              // fstp st(1)         (pop |x|) => x
     emit_jb(jb_to_reduce);    // jump if pi/4 < |x|
 
     // Fast path: cos(x) kernel on |x| <= pi/4.
     buf
-        < 0xd9 < 0xc0            // fld st(0)          (x, x)
-        < 0xdc < 0xc8;           // fmul st(0), st(0)  (y, x)
+        < 0xd9 < 0xc0                               // fld st(0)          (x, x)
+        < 0xdc < 0xc8;                              // fmul st(0), st(0)  (y, x)
 
 #ifdef MEXCE_64
     buf < 0x48 < 0xb8;
@@ -866,7 +866,7 @@ inline Function Cos()
     buf << (uint32_t)0;
 #endif
     emit_horner(buf, 8);
-    buf < 0xdd < 0xd9; // fstp st(1)         (pop x)
+    buf < 0xdd < 0xd9;                              // fstp st(1)         (pop x)
 
     size_t jmp_to_end = 0;
     emit_jmp(jmp_to_end);
@@ -885,36 +885,36 @@ inline Function Cos()
 #endif
 
     // Reduce x = k*(pi/2) + r, with r in [-pi/4, pi/4], using k = rint(x * 2/pi).
-    buf < 0xd9 < 0xc0;        // fld st(0)            (x, x)
-    buf < 0xdd < 0x42 < 0x00; // fld qword [rdx+0]    (2/pi, x, x)
-    buf < 0xde < 0xc9;        // fmulp st(1), st      (x*2/pi, x)
-    buf < 0xd9 < 0xfc;        // frndint              (k, x)
+    buf < 0xd9 < 0xc0;                              // fld st(0)            (x, x)
+    buf < 0xdd < 0x42 < 0x00;                       // fld qword [rdx+0]    (2/pi, x, x)
+    buf < 0xde < 0xc9;                              // fmulp st(1), st      (x*2/pi, x)
+    buf < 0xd9 < 0xfc;                              // frndint              (k, x)
 #ifndef MEXCE_64
-    buf < 0x83 < 0xec < 0x08; // sub esp, 8  (scratch)
+    buf < 0x83 < 0xec < 0x08;                       // sub esp, 8  (scratch)
 #endif
-    buf < 0xdf < 0x3c < 0x24; // fistp qword [rsp]    (x)
+    buf < 0xdf < 0x3c < 0x24;                       // fistp qword [rsp]    (x)
 
-    buf < 0x8b < 0x0c < 0x24; // mov ecx, dword [rsp]
-    buf < 0x83 < 0xe1 < 0x03; // and ecx, 3
+    buf < 0x8b < 0x0c < 0x24;                       // mov ecx, dword [rsp]
+    buf < 0x83 < 0xe1 < 0x03;                       // and ecx, 3
 
-    buf < 0xdf < 0x2c < 0x24; // fild qword [rsp]     (k, x)
+    buf < 0xdf < 0x2c < 0x24;                       // fild qword [rsp]     (k, x)
 #ifndef MEXCE_64
-    buf < 0x83 < 0xc4 < 0x08; // add esp, 8  (release scratch)
+    buf < 0x83 < 0xc4 < 0x08;                       // add esp, 8  (release scratch)
 #endif
-    buf < 0xd9 < 0xc0;              // fld st(0)             (k, k, x)
-    buf < 0xdd < 0x42 < 0x08;       // fld qword [rdx+8]     (pio2_1, k, k, x)
-    buf < 0xde < 0xc9;              // fmulp st(1), st       (k*pio2_1, k, x)
-    buf < 0xde < 0xea;              // fsubp st(2), st       (k, x-k*pio2_1)
-    buf < 0xdd < 0x42 < 0x10;       // fld qword [rdx+16]    (pio2_1t, k, r1)
-    buf < 0xde < 0xc9;              // fmulp st(1), st       (k*pio2_1t, r1)
-    buf < 0xde < 0xe9;              // fsubp st(1), st       (r)
+    buf < 0xd9 < 0xc0;                              // fld st(0)             (k, k, x)
+    buf < 0xdd < 0x42 < 0x08;                       // fld qword [rdx+8]     (pio2_1, k, k, x)
+    buf < 0xde < 0xc9;                              // fmulp st(1), st       (k*pio2_1, k, x)
+    buf < 0xde < 0xea;                              // fsubp st(2), st       (k, x-k*pio2_1)
+    buf < 0xdd < 0x42 < 0x10;                       // fld qword [rdx+16]    (pio2_1t, k, r1)
+    buf < 0xde < 0xc9;                              // fmulp st(1), st       (k*pio2_1t, r1)
+    buf < 0xde < 0xe9;                              // fsubp st(1), st       (r)
 
     // y = r^2, keep r: (y, r)
-    buf < 0xd9 < 0xc0; // fld st(0)
-    buf < 0xdc < 0xc8; // fmul st(0), st(0)
+    buf < 0xd9 < 0xc0;                              // fld st(0)
+    buf < 0xdc < 0xc8;                              // fmul st(0), st(0)
 
     // If (q&1)==0 => cos kernel, else sin kernel.
-    buf < 0xf6 < 0xc1 < 0x01; // test cl, 1
+    buf < 0xf6 < 0xc1 < 0x01;                       // test cl, 1
     size_t jz_to_cos = 0;
     emit_jz(jz_to_cos);
 
@@ -929,7 +929,7 @@ inline Function Cos()
     buf << (uint32_t)0;
 #endif
     emit_horner(buf, 7);
-    buf < 0xde < 0xc9; // fmulp st(1), st
+    buf < 0xde < 0xc9;                              // fmulp st(1), st
 
     size_t jmp_to_have_kernel = 0;
     emit_jmp(jmp_to_have_kernel);
@@ -945,18 +945,18 @@ inline Function Cos()
     buf << (uint32_t)0;
 #endif
     emit_horner(buf, 8);
-    buf < 0xdd < 0xd9; // fstp st(1) (pop r)
+    buf < 0xdd < 0xd9;                              // fstp st(1) (pop r)
 
     const size_t label_have_kernel = buf.buf.size();
 
     // Sign is negative for q in {1,2} => ((q+1) & 2) != 0.
     buf
-        < 0xd9 < 0xc0            // fld st(0)
-        < 0xd9 < 0xe0            // fchs            (-v, v)
-        < 0x8d < 0x41 < 0x01     // lea eax, [ecx+1]
-        < 0xf6 < 0xc0 < 0x02     // test al, 2
-        < 0xda < 0xc9            // fcmove st,st(1) (choose +v when sign not set)
-        < 0xdd < 0xd9;           // fstp st(1)
+        < 0xd9 < 0xc0                               // fld st(0)
+        < 0xd9 < 0xe0                               // fchs            (-v, v)
+        < 0x8d < 0x41 < 0x01                        // lea eax, [ecx+1]
+        < 0xf6 < 0xc0 < 0x02                        // test al, 2
+        < 0xda < 0xc9                               // fcmove st,st(1) (choose +v when sign not set)
+        < 0xdd < 0xd9;                              // fstp st(1)
 
     const size_t label_end = buf.buf.size();
 
@@ -983,13 +983,13 @@ inline Function Cos()
     return Function(0, "cos", 1, 0, buf.buf.size(), buf.buf.data());
 #else
     auto emit_jb = [&](size_t& rel32_pos) {
-        buf < 0x0f < 0x82; // jb rel32
+        buf < 0x0f < 0x82;                          // jb rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
 
     auto emit_jmp = [&](size_t& rel32_pos) {
-        buf < 0xe9; // jmp rel32
+        buf < 0xe9;                                 // jmp rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
@@ -999,13 +999,13 @@ inline Function Cos()
     size_t jmp_to_have_y = 0;
 
     buf
-        < 0xd9 < 0xe1     // fabs
-        < 0xd9 < 0xeb     // fldpi
-        < 0xdb < 0xf1     // fcomi st,st(1)  (compare pi vs |x|)
-        < 0xdd < 0xd8;    // fstp st(0)      (pop pi)
+        < 0xd9 < 0xe1                               // fabs
+        < 0xd9 < 0xeb                               // fldpi
+        < 0xdb < 0xf1                               // fcomi st,st(1)  (compare pi vs |x|)
+        < 0xdd < 0xd8;                              // fstp st(0)      (pop pi)
     emit_jb(jb_to_reduce); // jump if pi < |x|
 
-    buf < 0xdc < 0xc8; // y = x^2
+    buf < 0xdc < 0xc8;                              // y = x^2
     emit_jmp(jmp_to_have_y);
 
     const size_t label_reduce = buf.buf.size();
@@ -1035,9 +1035,9 @@ inline Function Cos()
 
     // Compare thr[i] (st0) vs y (st1): JB when thr[i] < y (i.e., y > thr[i]).
     auto emit_thr_cmp = [&](uint8_t thr_disp, size_t& jb_rel32_pos) {
-        buf < 0xdd < 0x42 < thr_disp; // fld qword ptr [rdx+thr_disp]
-        buf < 0xdb < 0xf1;            // fcomi st,st(1)
-        buf < 0xdd < 0xd8;            // fstp st(0)  (pop threshold)
+        buf < 0xdd < 0x42 < thr_disp;               // fld qword ptr [rdx+thr_disp]
+        buf < 0xdb < 0xf1;                          // fcomi st,st(1)
+        buf < 0xdd < 0xd8;                          // fstp st(0)  (pop threshold)
         emit_jb(jb_rel32_pos);
     };
 
@@ -1109,64 +1109,64 @@ inline Function Sin()
 #else
     auto emit_add_rax = [](mexce_charstream& buf, uint32_t imm32) {
 #ifdef MEXCE_64
-        buf < 0x48 < 0x05; // add rax, imm32
+        buf < 0x48 < 0x05;                          // add rax, imm32
 #else
-        buf < 0x05;        // add eax, imm32
+        buf < 0x05;                                 // add eax, imm32
 #endif
         buf << imm32;
     };
 
     auto emit_horner = [&](mexce_charstream& buf, int coeff_count) {
         // y in st(0); Horner on y with coeffs at [rax + i*16].
-        buf < 0xdb < 0x28; // fld tword ptr [rax]
+        buf < 0xdb < 0x28;                          // fld tword ptr [rax]
 
         const int first_block = (coeff_count < 8) ? coeff_count : 8;
         for (int i = 1; i < first_block; ++i) {
-            buf < 0xd8 < 0xc9; // fmul st, st(1)
-            buf < 0xdb < 0x68 < (i * 0x10); // fld tword ptr [rax + i*16]
-            buf < 0xde < 0xc1; // faddp st(1), st
+            buf < 0xd8 < 0xc9;                      // fmul st, st(1)
+            buf < 0xdb < 0x68 < (i * 0x10);         // fld tword ptr [rax + i*16]
+            buf < 0xde < 0xc1;                      // faddp st(1), st
         }
 
         if (coeff_count > 8) {
             const int remaining = coeff_count - 8;
             for (int j = 0; j < remaining; ++j) {
-                buf < 0xd8 < 0xc9; // fmul st, st(1)
+                buf < 0xd8 < 0xc9;                  // fmul st, st(1)
                 if (j == 0) {
                     emit_add_rax(buf, 0x80);
-                    buf < 0xdb < 0x28; // fld tword ptr [rax]
+                    buf < 0xdb < 0x28;              // fld tword ptr [rax]
                 } else {
                     buf < 0xdb < 0x68 < (j * 0x10); // fld tword ptr [rax + j*16]
                 }
-                buf < 0xde < 0xc1; // faddp st(1), st
+                buf < 0xde < 0xc1;                  // faddp st(1), st
             }
         }
 
-        buf < 0xdd < 0xd9; // fstp st(1)  (pop y)
+        buf < 0xdd < 0xd9;                          // fstp st(1)  (pop y)
     };
 
     mexce_charstream buf;
 
 #if MEXCE_TRIG_USE_PIO2_KERNEL
     auto emit_jb = [&](size_t& rel32_pos) {
-        buf < 0x0f < 0x82; // jb rel32
+        buf < 0x0f < 0x82;                          // jb rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
 
     auto emit_jz = [&](size_t& rel32_pos) {
-        buf < 0x0f < 0x84; // jz rel32
+        buf < 0x0f < 0x84;                          // jz rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
 
     auto emit_jmp = [&](size_t& rel32_pos) {
-        buf < 0xe9; // jmp rel32
+        buf < 0xe9;                                 // jmp rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
 
     // Default quadrant: q=0 (no reduction needed).
-    buf < 0x31 < 0xc9; // xor ecx, ecx
+    buf < 0x31 < 0xc9;                              // xor ecx, ecx
 
     // mov rdx, tan_threshold_base (pi/4 at +0)
 #ifdef MEXCE_64
@@ -1182,19 +1182,19 @@ inline Function Sin()
     // Fast-path check: if |x| > pi/4, do reduction; otherwise directly evaluate the sin kernel on x.
     size_t jb_to_reduce = 0;
     buf
-        < 0xd9 < 0xc0            // fld st(0)          (x, x)
-        < 0xd9 < 0xe1            // fabs              (|x|, x)
-        < 0xdd < 0x42 < 0x00     // fld qword [rdx+0]  (pi/4, |x|, x)
-        < 0xdb < 0xf1            // fcomi st,st(1)     (pi/4 vs |x|)
-        < 0xdd < 0xd8            // fstp st(0)         (pop pi/4)
-        < 0xd9 < 0xc9            // fxch st(1)         (x, |x|)
-        < 0xdd < 0xd9;           // fstp st(1)         (pop |x|) => x
-    emit_jb(jb_to_reduce);    // jump if pi/4 < |x|
+        < 0xd9 < 0xc0                               // fld st(0)          (x, x)
+        < 0xd9 < 0xe1                               // fabs              (|x|, x)
+        < 0xdd < 0x42 < 0x00                        // fld qword [rdx+0]  (pi/4, |x|, x)
+        < 0xdb < 0xf1                               // fcomi st,st(1)     (pi/4 vs |x|)
+        < 0xdd < 0xd8                               // fstp st(0)         (pop pi/4)
+        < 0xd9 < 0xc9                               // fxch st(1)         (x, |x|)
+        < 0xdd < 0xd9;                              // fstp st(1)         (pop |x|) => x
+    emit_jb(jb_to_reduce);       // jump if pi/4 < |x|
 
     // Fast path: sin(x) kernel on |x| <= pi/4.
     buf
-        < 0xd9 < 0xc0            // fld st(0)          (x, x)
-        < 0xdc < 0xc8;           // fmul st(0), st(0)  (y, x)
+        < 0xd9 < 0xc0                               // fld st(0)          (x, x)
+        < 0xdc < 0xc8;                              // fmul st(0), st(0)  (y, x)
 
 #ifdef MEXCE_64
     buf < 0x48 < 0xb8;
@@ -1206,7 +1206,7 @@ inline Function Sin()
     buf << (uint32_t)0;
 #endif
     emit_horner(buf, 7);
-    buf < 0xde < 0xc9; // fmulp st(1), st
+    buf < 0xde < 0xc9;                              // fmulp st(1), st
 
     size_t jmp_to_end = 0;
     emit_jmp(jmp_to_end);
@@ -1225,36 +1225,36 @@ inline Function Sin()
 #endif
 
     // Reduce x = k*(pi/2) + r, with r in [-pi/4, pi/4], using k = rint(x * 2/pi).
-    buf < 0xd9 < 0xc0;        // fld st(0)            (x, x)
-    buf < 0xdd < 0x42 < 0x00; // fld qword [rdx+0]    (2/pi, x, x)
-    buf < 0xde < 0xc9;        // fmulp st(1), st      (x*2/pi, x)
-    buf < 0xd9 < 0xfc;        // frndint              (k, x)
+    buf < 0xd9 < 0xc0;                              // fld st(0)            (x, x)
+    buf < 0xdd < 0x42 < 0x00;                       // fld qword [rdx+0]    (2/pi, x, x)
+    buf < 0xde < 0xc9;                              // fmulp st(1), st      (x*2/pi, x)
+    buf < 0xd9 < 0xfc;                              // frndint              (k, x)
 #ifndef MEXCE_64
-    buf < 0x83 < 0xec < 0x08; // sub esp, 8  (scratch)
+    buf < 0x83 < 0xec < 0x08;                       // sub esp, 8  (scratch)
 #endif
-    buf < 0xdf < 0x3c < 0x24; // fistp qword [rsp]    (x)
+    buf < 0xdf < 0x3c < 0x24;                       // fistp qword [rsp]    (x)
 
-    buf < 0x8b < 0x0c < 0x24; // mov ecx, dword [rsp]
-    buf < 0x83 < 0xe1 < 0x03; // and ecx, 3
+    buf < 0x8b < 0x0c < 0x24;                       // mov ecx, dword [rsp]
+    buf < 0x83 < 0xe1 < 0x03;                       // and ecx, 3
 
-    buf < 0xdf < 0x2c < 0x24; // fild qword [rsp]     (k, x)
+    buf < 0xdf < 0x2c < 0x24;                       // fild qword [rsp]     (k, x)
 #ifndef MEXCE_64
-    buf < 0x83 < 0xc4 < 0x08; // add esp, 8  (release scratch)
+    buf < 0x83 < 0xc4 < 0x08;                       // add esp, 8  (release scratch)
 #endif
-    buf < 0xd9 < 0xc0;              // fld st(0)             (k, k, x)
-    buf < 0xdd < 0x42 < 0x08;       // fld qword [rdx+8]     (pio2_1, k, k, x)
-    buf < 0xde < 0xc9;              // fmulp st(1), st       (k*pio2_1, k, x)
-    buf < 0xde < 0xea;              // fsubp st(2), st       (k, x-k*pio2_1)
-    buf < 0xdd < 0x42 < 0x10;       // fld qword [rdx+16]    (pio2_1t, k, r1)
-    buf < 0xde < 0xc9;              // fmulp st(1), st       (k*pio2_1t, r1)
-    buf < 0xde < 0xe9;              // fsubp st(1), st       (r)
+    buf < 0xd9 < 0xc0;                              // fld st(0)             (k, k, x)
+    buf < 0xdd < 0x42 < 0x08;                       // fld qword [rdx+8]     (pio2_1, k, k, x)
+    buf < 0xde < 0xc9;                              // fmulp st(1), st       (k*pio2_1, k, x)
+    buf < 0xde < 0xea;                              // fsubp st(2), st       (k, x-k*pio2_1)
+    buf < 0xdd < 0x42 < 0x10;                       // fld qword [rdx+16]    (pio2_1t, k, r1)
+    buf < 0xde < 0xc9;                              // fmulp st(1), st       (k*pio2_1t, r1)
+    buf < 0xde < 0xe9;                              // fsubp st(1), st       (r)
 
     // y = r^2, keep r: (y, r)
-    buf < 0xd9 < 0xc0; // fld st(0)
-    buf < 0xdc < 0xc8; // fmul st(0), st(0)
+    buf < 0xd9 < 0xc0;                              // fld st(0)
+    buf < 0xdc < 0xc8;                              // fmul st(0), st(0)
 
     // If (q&1)==0 => sin kernel, else cos kernel.
-    buf < 0xf6 < 0xc1 < 0x01; // test cl, 1
+    buf < 0xf6 < 0xc1 < 0x01;                       // test cl, 1
     size_t jz_to_sin = 0;
     emit_jz(jz_to_sin);
 
@@ -1269,7 +1269,7 @@ inline Function Sin()
     buf << (uint32_t)0;
 #endif
     emit_horner(buf, 8);
-    buf < 0xdd < 0xd9; // fstp st(1) (pop r)
+    buf < 0xdd < 0xd9;                              // fstp st(1) (pop r)
 
     size_t jmp_to_have_kernel = 0;
     emit_jmp(jmp_to_have_kernel);
@@ -1287,17 +1287,17 @@ inline Function Sin()
     buf << (uint32_t)0;
 #endif
     emit_horner(buf, 7);
-    buf < 0xde < 0xc9; // fmulp st(1), st
+    buf < 0xde < 0xc9;                              // fmulp st(1), st
 
     const size_t label_have_kernel = buf.buf.size();
 
     // Sign is negative for q in {2,3} => (q & 2) != 0.
     buf
-        < 0xd9 < 0xc0            // fld st(0)
-        < 0xd9 < 0xe0            // fchs            (-v, v)
-        < 0xf6 < 0xc1 < 0x02     // test cl, 2
-        < 0xda < 0xc9            // fcmove st,st(1) (choose +v when sign not set)
-        < 0xdd < 0xd9;           // fstp st(1)
+        < 0xd9 < 0xc0                               // fld st(0)
+        < 0xd9 < 0xe0                               // fchs            (-v, v)
+        < 0xf6 < 0xc1 < 0x02                        // test cl, 2
+        < 0xda < 0xc9                               // fcmove st,st(1) (choose +v when sign not set)
+        < 0xdd < 0xd9;                              // fstp st(1)
 
     const size_t label_end = buf.buf.size();
 
@@ -1324,13 +1324,13 @@ inline Function Sin()
     return Function(0, "sin", 1, 0, buf.buf.size(), buf.buf.data());
 #else
     auto emit_jb = [&](size_t& rel32_pos) {
-        buf < 0x0f < 0x82; // jb rel32
+        buf < 0x0f < 0x82;                          // jb rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
 
     auto emit_jmp = [&](size_t& rel32_pos) {
-        buf < 0xe9; // jmp rel32
+        buf < 0xe9;                                 // jmp rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
@@ -1340,21 +1340,21 @@ inline Function Sin()
     size_t jmp_to_have_r = 0;
 
     buf
-        < 0xd9 < 0xc0     // fld st(0)        (dup x)
-        < 0xd9 < 0xe1     // fabs            (|x|, x)
-        < 0xd9 < 0xeb     // fldpi
-        < 0xdb < 0xf1     // fcomi st,st(1)  (compare pi vs |x|)
-        < 0xdd < 0xd8;    // fstp st(0)      (pop pi)
+        < 0xd9 < 0xc0                               // fld st(0)        (dup x)
+        < 0xd9 < 0xe1                               // fabs            (|x|, x)
+        < 0xd9 < 0xeb                               // fldpi
+        < 0xdb < 0xf1                               // fcomi st,st(1)  (compare pi vs |x|)
+        < 0xdd < 0xd8;                              // fstp st(0)      (pop pi)
     emit_jb(jb_to_reduce); // jump if pi < |x|
 
-    buf < 0xdd < 0xd8; // fstp st(0)      (pop |x|, keep x)
+    buf < 0xdd < 0xd8;                              // fstp st(0)      (pop |x|, keep x)
     emit_jmp(jmp_to_have_r);
 
     const size_t label_reduce = buf.buf.size();
     {
         // stack: |x|, x
-        buf < 0xd9 < 0xc9; // fxch st(1)     (x, |x|)
-        buf < 0xdd < 0xd9; // fstp st(1)     (pop |x|, keep x)
+        buf < 0xd9 < 0xc9;                          // fxch st(1)     (x, |x|)
+        buf < 0xdd < 0xd9;                          // fstp st(1)     (pop |x|, keep x)
         const uint8_t prefix[] = { MEXCE_TRIG_RANGE_REDUCE };
         buf.write(reinterpret_cast<const char*>(prefix), sizeof(prefix));
     }
@@ -1362,8 +1362,8 @@ inline Function Sin()
     const size_t label_have_r = buf.buf.size();
 
     // y = r^2, keep r for the final multiplication: stack becomes (y, r).
-    buf < 0xd9 < 0xc0; // fld st(0)
-    buf < 0xdc < 0xc8; // fmul st(0), st(0)
+    buf < 0xd9 < 0xc0;                              // fld st(0)
+    buf < 0xdc < 0xc8;                              // fmul st(0), st(0)
 
     // mov rax, coeff_base  / mov rdx, threshold_base
 #ifdef MEXCE_64
@@ -1384,9 +1384,9 @@ inline Function Sin()
 
     // Compare thr[i] (st0) vs y (st1): JB when thr[i] < y (i.e., y > thr[i]).
     auto emit_thr_cmp = [&](uint8_t thr_disp, size_t& jb_rel32_pos) {
-        buf < 0xdd < 0x42 < thr_disp; // fld qword ptr [rdx+thr_disp]
-        buf < 0xdb < 0xf1;            // fcomi st,st(1)
-        buf < 0xdd < 0xd8;            // fstp st(0)  (pop threshold)
+        buf < 0xdd < 0x42 < thr_disp;               // fld qword ptr [rdx+thr_disp]
+        buf < 0xdb < 0xf1;                          // fcomi st,st(1)
+        buf < 0xdd < 0xd8;                          // fstp st(0)  (pop threshold)
         emit_jb(jb_rel32_pos);
     };
 
@@ -1433,7 +1433,7 @@ inline Function Sin()
     emit_horner(buf, 15);
 
     const size_t label_mul = buf.buf.size();
-    buf < 0xde < 0xc9; // fmulp st(1), st  => r * P(y)
+    buf < 0xde < 0xc9;                              // fmulp st(1), st  => r * P(y)
 
     patch_rel32(buf, jb_to_reduce, label_reduce);
     patch_rel32(buf, jmp_to_have_r, label_have_r);
@@ -1462,63 +1462,63 @@ inline Function Tan()
 #else
     auto emit_add_rax = [](mexce_charstream& buf, uint32_t imm32) {
 #ifdef MEXCE_64
-        buf < 0x48 < 0x05; // add rax, imm32
+        buf < 0x48 < 0x05;                          // add rax, imm32
 #else
-        buf < 0x05;        // add eax, imm32
+        buf < 0x05;                                 // add eax, imm32
 #endif
         buf << imm32;
     };
 
     auto emit_horner = [&](mexce_charstream& buf, int coeff_count) {
         // y in st(0); Horner on y with coeffs at [rax + i*16].
-        buf < 0xdb < 0x28; // fld tword ptr [rax]
+        buf < 0xdb < 0x28;                          // fld tword ptr [rax]
 
         const int first_block = (coeff_count < 8) ? coeff_count : 8;
         for (int i = 1; i < first_block; ++i) {
-            buf < 0xd8 < 0xc9; // fmul st, st(1)
-            buf < 0xdb < 0x68 < (i * 0x10); // fld tword ptr [rax + i*16]
-            buf < 0xde < 0xc1; // faddp st(1), st
+            buf < 0xd8 < 0xc9;                      // fmul st, st(1)
+            buf < 0xdb < 0x68 < (i * 0x10);         // fld tword ptr [rax + i*16]
+            buf < 0xde < 0xc1;                      // faddp st(1), st
         }
 
         if (coeff_count > 8) {
             const int remaining = coeff_count - 8;
             for (int j = 0; j < remaining; ++j) {
-                buf < 0xd8 < 0xc9; // fmul st, st(1)
+                buf < 0xd8 < 0xc9;                  // fmul st, st(1)
                 if (j == 0) {
                     emit_add_rax(buf, 0x80);
-                    buf < 0xdb < 0x28; // fld tword ptr [rax]
+                    buf < 0xdb < 0x28;              // fld tword ptr [rax]
                 } else {
                     buf < 0xdb < 0x68 < (j * 0x10); // fld tword ptr [rax + j*16]
                 }
-                buf < 0xde < 0xc1; // faddp st(1), st
+                buf < 0xde < 0xc1;                  // faddp st(1), st
             }
         }
 
-        buf < 0xdd < 0xd9; // fstp st(1)  (pop y)
+        buf < 0xdd < 0xd9;                          // fstp st(1)  (pop y)
     };
 
     mexce_charstream buf;
 
     auto emit_jb = [&](size_t& rel32_pos) {
-        buf < 0x0f < 0x82; // jb rel32
+        buf < 0x0f < 0x82;                          // jb rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
 
     auto emit_ja = [&](size_t& rel32_pos) {
-        buf < 0x0f < 0x87; // ja rel32
+        buf < 0x0f < 0x87;                          // ja rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
 
     auto emit_jz = [&](size_t& rel32_pos) {
-        buf < 0x0f < 0x84; // jz rel32
+        buf < 0x0f < 0x84;                          // jz rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
 
     auto emit_jmp = [&](size_t& rel32_pos) {
-        buf < 0xe9; // jmp rel32
+        buf < 0xe9;                                 // jmp rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
     };
@@ -1532,29 +1532,29 @@ inline Function Tan()
     size_t jmp_to_have_r = 0;
 
     buf
-        < 0xd9 < 0xc0     // fld st(0)  (dup x)
-        < 0xd9 < 0xe1     // fabs       (|x|, x)
-        < 0xd9 < 0xeb     // fldpi
-        < 0xd9 < 0xe8     // fld1
-        < 0xd9 < 0xe0     // fchs       => -1
-        < 0xd9 < 0xc9     // fxch st(1)  (pi, -1, |x|, x)
-        < 0xd9 < 0xfd     // fscale      => pi/2
-        < 0xdd < 0xd9     // fstp st(1)   (pop -1)
-        < 0xdb < 0xf1     // fcomi st,st(1) (compare pi/2 vs |x|)
-        < 0xdd < 0xd8;    // fstp st(0)     (pop pi/2)
+        < 0xd9 < 0xc0                               // fld st(0)  (dup x)
+        < 0xd9 < 0xe1                               // fabs       (|x|, x)
+        < 0xd9 < 0xeb                               // fldpi
+        < 0xd9 < 0xe8                               // fld1
+        < 0xd9 < 0xe0                               // fchs       => -1
+        < 0xd9 < 0xc9                               // fxch st(1)  (pi, -1, |x|, x)
+        < 0xd9 < 0xfd                               // fscale      => pi/2
+        < 0xdd < 0xd9                               // fstp st(1)   (pop -1)
+        < 0xdb < 0xf1                               // fcomi st,st(1) (compare pi/2 vs |x|)
+        < 0xdd < 0xd8;                              // fstp st(0)     (pop pi/2)
     emit_jb(jb_to_reduce); // jump if pi/2 < |x|
 
-    buf < 0xdd < 0xd8; // fstp st(0)     (pop |x|) => x
+    buf < 0xdd < 0xd8;                              // fstp st(0)     (pop |x|) => x
     emit_jmp(jmp_to_have_r);
 
     const size_t label_reduce = buf.buf.size();
     buf
-        < 0xd9 < 0xc9     // fxch st(1)     (x, |x|)
-        < 0xdd < 0xd9     // fstp st(1)     (pop |x|) => x
-        < 0xd9 < 0xeb     // fldpi          (pi, x)
-        < 0xd9 < 0xc9     // fxch st(1)     (x, pi)
-        < 0xd9 < 0xf5     // fprem1         (remainder, pi)
-        < 0xdd < 0xd9;    // fstp st(1)     (pop pi)
+        < 0xd9 < 0xc9                               // fxch st(1)     (x, |x|)
+        < 0xdd < 0xd9                               // fstp st(1)     (pop |x|) => x
+        < 0xd9 < 0xeb                               // fldpi          (pi, x)
+        < 0xd9 < 0xc9                               // fxch st(1)     (x, pi)
+        < 0xd9 < 0xf5                               // fprem1         (remainder, pi)
+        < 0xdd < 0xd9;                              // fstp st(1)     (pop pi)
 
     const size_t label_have_r = buf.buf.size();
 
@@ -1572,17 +1572,17 @@ inline Function Tan()
     // If r > pi/4: u = pi/2 - r, and take reciprocal at the end.
     size_t jb_to_pos_large = 0;
     buf
-        < 0xdd < 0x42 < 0x00     // fld qword ptr [rdx+0]  (pi/4, r)
-        < 0xdb < 0xf1            // fcomi st,st(1)
-        < 0xdd < 0xd8;           // fstp st(0)  (pop pi/4)
+        < 0xdd < 0x42 < 0x00                        // fld qword ptr [rdx+0]  (pi/4, r)
+        < 0xdb < 0xf1                               // fcomi st,st(1)
+        < 0xdd < 0xd8;                              // fstp st(0)  (pop pi/4)
     emit_jb(jb_to_pos_large);
 
     // If r < -pi/4: u = pi/2 + r, take reciprocal and negate.
     size_t ja_to_neg_large = 0;
     buf
-        < 0xdd < 0x42 < 0x08     // fld qword ptr [rdx+8]  (-pi/4, r)
-        < 0xdb < 0xf1            // fcomi st,st(1)
-        < 0xdd < 0xd8;           // fstp st(0)  (pop -pi/4)
+        < 0xdd < 0x42 < 0x08                        // fld qword ptr [rdx+8]  (-pi/4, r)
+        < 0xdb < 0xf1                               // fcomi st,st(1)
+        < 0xdd < 0xd8;                              // fstp st(0)  (pop -pi/4)
     emit_ja(ja_to_neg_large); // jump if (-pi/4) > r
 
     // Direct: u = r
@@ -1594,13 +1594,13 @@ inline Function Tan()
     buf << (uint32_t)1;
     // u = pi/2 - r
     buf
-        < 0xd9 < 0xe8     // fld1
-        < 0xd9 < 0xe0     // fchs   => -1
-        < 0xd9 < 0xeb     // fldpi
-        < 0xd9 < 0xfd     // fscale => pi/2
-        < 0xdd < 0xd9     // fstp st(1)  (pop -1)
-        < 0xd9 < 0xc9     // fxch st(1)  (r, pi/2)
-        < 0xde < 0xe9;    // fsubp st(1), st  => pi/2 - r
+        < 0xd9 < 0xe8                               // fld1
+        < 0xd9 < 0xe0                               // fchs   => -1
+        < 0xd9 < 0xeb                               // fldpi
+        < 0xd9 < 0xfd                               // fscale => pi/2
+        < 0xdd < 0xd9                               // fstp st(1)  (pop -1)
+        < 0xd9 < 0xc9                               // fxch st(1)  (r, pi/2)
+        < 0xde < 0xe9;                              // fsubp st(1), st  => pi/2 - r
     size_t jmp_pos_to_have_u = 0;
     emit_jmp(jmp_pos_to_have_u);
 
@@ -1609,21 +1609,21 @@ inline Function Tan()
     buf << (uint32_t)2;
     // u = pi/2 + r  (r is negative here, so u is in [0, pi/4])
     buf
-        < 0xd9 < 0xe8     // fld1
-        < 0xd9 < 0xe0     // fchs   => -1
-        < 0xd9 < 0xeb     // fldpi
-        < 0xd9 < 0xfd     // fscale => pi/2
-        < 0xdd < 0xd9     // fstp st(1)  (pop -1)
-        < 0xd9 < 0xc9     // fxch st(1)  (r, pi/2)
-        < 0xde < 0xc1;    // faddp st(1), st  => pi/2 + r
+        < 0xd9 < 0xe8                               // fld1
+        < 0xd9 < 0xe0                               // fchs   => -1
+        < 0xd9 < 0xeb                               // fldpi
+        < 0xd9 < 0xfd                               // fscale => pi/2
+        < 0xdd < 0xd9                               // fstp st(1)  (pop -1)
+        < 0xd9 < 0xc9                               // fxch st(1)  (r, pi/2)
+        < 0xde < 0xc1;                              // faddp st(1), st  => pi/2 + r
 
     const size_t label_have_u = buf.buf.size();
 
     // y = u^2; keep u for the final multiplication.
     buf
-        < 0xd9 < 0xc0     // fld st(0)  (u, u)
-        < 0xdc < 0xc8     // fmul st(0), st(0) (y, u)
-        < 0xd9 < 0xc0;    // fld st(0)  (y, y, u)
+        < 0xd9 < 0xc0                               // fld st(0)  (u, u)
+        < 0xdc < 0xc8                               // fmul st(0), st(0) (y, u)
+        < 0xd9 < 0xc0;                              // fld st(0)  (y, y, u)
 
     // ---- cos(u) polynomial on y ----
     enum { cos_cmp_count = 5, cos_end_jmp_count = 5 };
@@ -1649,9 +1649,9 @@ inline Function Tan()
 #endif
 
     auto emit_thr_cmp = [&](uint8_t thr_disp, size_t& jb_rel32_pos) {
-        buf < 0xdd < 0x42 < thr_disp; // fld qword ptr [rdx+thr_disp]
-        buf < 0xdb < 0xf1;            // fcomi st,st(1)
-        buf < 0xdd < 0xd8;            // fstp st(0)  (pop threshold)
+        buf < 0xdd < 0x42 < thr_disp;               // fld qword ptr [rdx+thr_disp]
+        buf < 0xdb < 0xf1;                          // fcomi st,st(1)
+        buf < 0xdd < 0xd8;                          // fstp st(0)  (pop threshold)
         emit_jb(jb_rel32_pos);
     };
 
@@ -1695,7 +1695,7 @@ inline Function Tan()
     const size_t cos_label_end = buf.buf.size();
 
     // ---- sin(u) polynomial on y ----
-    buf < 0xd9 < 0xc9; // fxch st(1)  (y, cos, u)
+    buf < 0xd9 < 0xc9;                              // fxch st(1)  (y, cos, u)
 
     enum { sin_cmp_count = 5, sin_mul_jmp_count = 5 };
     size_t sin_jb_to_cmp[sin_cmp_count];
@@ -1757,25 +1757,25 @@ inline Function Tan()
     emit_horner(buf, 15);
 
     const size_t sin_label_mul = buf.buf.size();
-    buf < 0xde < 0xca; // fmulp st(2), st  => cos, sin
+    buf < 0xde < 0xca;                              // fmulp st(2), st  => cos, sin
 
-    buf < 0xd9 < 0xc9; // fxch st(1)      => sin, cos
-    buf < 0xde < 0xf1; // fdivrp st(1),st => tan(u)
+    buf < 0xd9 < 0xc9;                              // fxch st(1)      => sin, cos
+    buf < 0xde < 0xf1;                              // fdivrp st(1),st => tan(u)
 
     // If folded (ecx!=0), tan(x) = +/- 1/tan(u).
     size_t jz_to_end = 0;
 
-    buf < 0x85 < 0xc9; // test ecx,ecx
+    buf < 0x85 < 0xc9;                              // test ecx,ecx
     emit_jz(jz_to_end);
-    buf < 0xd9 < 0xe8; // fld1
-    buf < 0xde < 0xf1; // fdivrp st(1),st  => 1/tan(u)
+    buf < 0xd9 < 0xe8;                              // fld1
+    buf < 0xde < 0xf1;                              // fdivrp st(1),st  => 1/tan(u)
     // Negate for ecx==2 (neg fold): (-v, v), test cl,2 and fcmove to pick +v.
     buf
-        < 0xd9 < 0xc0            // fld st(0)
-        < 0xd9 < 0xe0            // fchs            (-v, v)
-        < 0xf6 < 0xc1 < 0x02     // test cl, 2
-        < 0xda < 0xc9            // fcmove st,st(1) (choose +v when sign not set)
-        < 0xdd < 0xd9;           // fstp st(1)
+        < 0xd9 < 0xc0                               // fld st(0)
+        < 0xd9 < 0xe0                               // fchs            (-v, v)
+        < 0xf6 < 0xc1 < 0x02                        // test cl, 2
+        < 0xda < 0xc9                               // fcmove st,st(1) (choose +v when sign not set)
+        < 0xdd < 0xd9;                              // fstp st(1)
 
     const size_t label_end = buf.buf.size();
 
@@ -1907,7 +1907,7 @@ void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
     // Corresponds to right-associative power towers of 2: ((a^2)^2)...
     // Or simply: a ^ (m * 2^k) = (a^(2^k))^m
     while ((exponent & 1) == 0) {
-        s < 0xdc < 0xc8;        // fmul st(0), st(0)
+        s < 0xdc < 0xc8;                            // fmul st(0), st(0)
         exponent >>= 1;
     }
 
@@ -1918,21 +1918,21 @@ void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
     // Exponent is odd and > 1.
     // We need to accumulate, but avoid multiplying by 1.0.
     // Initialize result with base.
-    s < 0xd9 < 0xc0;            // fld st(0)   -> stack: res, base
-    s < 0xd9 < 0xc9;            // fxch st(1)  -> stack: base, res
+    s < 0xd9 < 0xc0;                                // fld st(0)   -> stack: res, base
+    s < 0xd9 < 0xc9;                                // fxch st(1)  -> stack: base, res
 
     exponent >>= 1;
 
     while (true) {
-        s < 0xdc < 0xc8;        // fmul st(0), st(0) (base *= base)
+        s < 0xdc < 0xc8;                            // fmul st(0), st(0) (base *= base)
 
         if (exponent & 1) {
-             s < 0xdc < 0xc9;   // fmul st(1), st(0) (res *= base)
+             s < 0xdc < 0xc9;                       // fmul st(1), st(0) (res *= base)
         }
 
         exponent >>= 1;
         if (exponent == 0) {
-            s < 0xdd < 0xd8;    // fstp st(0) (pop base) -> stack: res
+            s < 0xdd < 0xd8;                        // fstp st(0) (pop base) -> stack: res
             break;
         }
     }
@@ -1993,14 +1993,14 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
         // a special case, that the exponent is 0.5
         if (v_d == 0.5) {
-            s < 0xd9 < 0xfa;                // fsqrt
+            s < 0xd9 < 0xfa;                        // fsqrt
             optimized_name = "sqrt";
         }
         else
         if (v_d == -0.5) {
-            s < 0xd9 < 0xfa                 // fsqrt
-              < 0xd9 < 0xe8                 // fld1
-              < 0xde < 0xf1;                // fdivrp st(1), st
+            s < 0xd9 < 0xfa                         // fsqrt
+              < 0xd9 < 0xe8                         // fld1
+              < 0xde < 0xf1;                        // fdivrp st(1), st
             optimized_name = "inv_sqrt";
         }
         else
@@ -2010,15 +2010,15 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             bool invert = (v_d < 0.0);
 
             if (exponent == 0) {
-                s < 0xdd < 0xd8             // fstp st(0)
-                  < 0xd9 < 0xe8;            // fld1
+                s < 0xdd < 0xd8                     // fstp st(0)
+                  < 0xd9 < 0xe8;                    // fld1
             }
             else {
                 emit_integer_power_sequence(s, exponent);
 
                 if (invert) {
-                    s < 0xd9 < 0xe8           // fld1
-                      < 0xde < 0xf1;          // fdivrp st(1), st
+                    s < 0xd9 < 0xe8                 // fld1
+                      < 0xde < 0xf1;                // fdivrp st(1), st
                 }
             }
             optimized_name = "pow_int";
@@ -2497,15 +2497,15 @@ void emit_apply_op_with_constant(evaluator* ev, impl::mexce_charstream& s, doubl
     auto constant = make_intermediate_constant(ev, v);
 
 #ifdef MEXCE_64
-    s < 0x48 < 0xb8;                        // mov            rax, qword ptr
+    s < 0x48 < 0xb8;                                // mov            rax, qword ptr
 #else
-    s < 0xb8;                               // mov            eax, dword ptr
+    s < 0xb8;                                       // mov            eax, dword ptr
 #endif
-    s << constant->address;                 //                   [the address]
+    s << constant->address;                         //                     [the address]
 
     // Constants are always emitted as 64-bit floating point values.
     assert(constant->numeric_data_type == M64FP);
-    s < 0xdc < OP;                          // f[OP]  qword ptr [eax/rax]
+    s < 0xdc < OP;                                  // f[OP]  qword ptr [eax/rax]
 }
 
 
@@ -2527,7 +2527,7 @@ void emit_load_constant(evaluator* ev, impl::mexce_charstream& s, double v)
 
     if (hit) {
         if (v < 0) {
-            s < 0xd9 < 0xe0;  // fchs
+            s < 0xd9 < 0xe0;                        // fchs
         }
         return;
     }
@@ -2535,11 +2535,11 @@ void emit_load_constant(evaluator* ev, impl::mexce_charstream& s, double v)
     auto sc = make_intermediate_constant(ev, v);
 
 #ifdef MEXCE_64
-    s < 0x48 < 0xb8;                            // mov            rax, qword ptr
+    s < 0x48 < 0xb8;                                // mov            rax, qword ptr
     s << (void*)(sc->address);
-    s < 0xdd < 0x00;                            // fld            [rax]
+    s < 0xdd < 0x00;                                // fld            [rax]
 #else
-    s < 0xdd < 0x05;                            // fld            [immediate address]
+    s < 0xdd < 0x05;                                // fld            [immediate address]
     s << (void*)(sc->address);
 #endif
 }
@@ -2560,7 +2560,7 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             auto prev = it;
             --prev;
             if (prev->type == it->type && prev->id == it->id) {
-                code_buffer < 0xd9 < 0xc0; // fld st(0)
+                code_buffer < 0xd9 < 0xc0;          // fld st(0)
                 ++current_depth;
                 if (current_depth > 8) {
                     throw std::overflow_error("Expression too complex for x87 FPU (stack overflow)");
@@ -2573,7 +2573,7 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             case Element_type::CVAR: {
                 auto tn = it->v;
 #ifdef MEXCE_64
-                code_buffer << (uint16_t)0xb848;   // move input address to rax (opcode)
+                code_buffer << (uint16_t)0xb848;    // move input address to rax (opcode)
                 code_buffer << (void*)tn->address;
 #endif
                 switch (tn->numeric_data_type) {
@@ -2955,7 +2955,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
             }
             else {
-                s < 0xde < 0xc1;  // faddp       st(1), st
+                s < 0xde < 0xc1;                    // faddp       st(1), st
             }
         }
 
@@ -3014,15 +3014,15 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             if (factor < 0) {
                 if (!have_value) {
-                    s < 0xd9 < 0xe8;    // fld1
-                    s < 0xde < 0xf1;    // fdivrp   st(1), st
+                    s < 0xd9 < 0xe8;                // fld1
+                    s < 0xde < 0xf1;                // fdivrp   st(1), st
                 }
                 else {
-                    s < 0xde < 0xf9;    // fdivp    st(1), st
+                    s < 0xde < 0xf9;                // fdivp    st(1), st
                 }
             }
             else if (have_value) {
-                s < 0xde < 0xc9;        // fmulp   st(1), st
+                s < 0xde < 0xc9;                    // fmulp   st(1), st
             }
 
             if (!have_value) {
@@ -3257,11 +3257,10 @@ inline
 string get_element_signature(const Element& e)
 {
     stringstream ss;
-    if (e.type == Element_type::CCONST) {
-        ss << "C:" << double_to_hex(e.c->value); // Exact double bits (no aliasing UB)
-    } else if (e.type == Element_type::CVAR) {
-        ss << "V:" << e.v->name;
-    } else if (e.type == Element_type::CFUNC) {
+                                               // Exact double bits (no aliasing UB)
+    if      (e.type == Element_type::CCONST) { ss << "C:" << double_to_hex(e.c->value); }
+    else if (e.type == Element_type::CVAR  ) { ss << "V:" << e.v->name; }
+    else if (e.type == Element_type::CFUNC ) {
         ss << "F:" << e.f->name << "(";
         for (const auto& arg_it : e.f->args) {
             ss << get_element_signature(*arg_it) << ",";
@@ -3306,7 +3305,9 @@ void run_cse(evaluator* ev, elist_t& elist)
         if (e.type != Element_type::CFUNC) return false;
         int fclass = get_fclass(e.f->name);
         // Not add/sub/mul/div, or no function parent.
-        if (fclass == 0 || e.f->parent == elist.end() || e.f->parent->type != Element_type::CFUNC) return false;
+        if (fclass == 0 || e.f->parent == elist.end() || e.f->parent->type != Element_type::CFUNC) {
+            return false;
+        }
         int pclass = get_fclass(e.f->parent->f->name);
         return pclass == fclass;  // Will be absorbed if same class
     };
@@ -3379,9 +3380,9 @@ void run_cse(evaluator* ev, elist_t& elist)
 #ifdef MEXCE_64
             store_code < 0x48 < 0xb8;
             store_code << (void*)temp_addr;
-            store_code < 0xdd < 0x10; // fst qword ptr [rax]
+            store_code < 0xdd < 0x10;               // fst qword ptr [rax]
 #else
-            store_code < 0xdd < 0x15; // fst qword ptr [addr]
+            store_code < 0xdd < 0x15;               // fst qword ptr [addr]
             store_code << (void*)temp_addr;
 #endif
 
@@ -4034,7 +4035,7 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 
 #ifdef MEXCE_64
     // Reserve 32 bytes of stack space for ABI compliance (Win64) and scratch.
-    code_buffer < 0x48 < 0x83 < 0xec < 0x20;   // sub  rsp, 32
+    code_buffer < 0x48 < 0x83 < 0xec < 0x20;        // sub  rsp, 32
 #endif
 
     compile_elist(code_buffer, first, last);
