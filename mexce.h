@@ -3013,8 +3013,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             switch (factor) {
                 case  1:  break;
                 case  2:  s < 0xd8 < 0xc0; break;              // fadd st(0), st(0)
-                case -2:  s < 0xd8 < 0xc0; [[fallthrough]];    // fadd st(0), st(0)
-                case -1:  s < 0xd9 < 0xe0; break;              // fchs
+                case -2:  s < 0xd8 < 0xc0 < 0xd9 < 0xe0; break; // fadd st(0), st(0) + fchs
+                case -1:  s < 0xd9 < 0xe0; break;               // fchs
                 default:  emit_apply_op_with_constant<0x08>(ev, s, static_cast<double>(factor)); break;
             }
 
