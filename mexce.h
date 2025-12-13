@@ -3336,9 +3336,8 @@ void run_cse(evaluator* ev, elist_t& elist)
 
     // Collect all CFUNC elements with their signatures.
     // Include absorbed functions: they can't be the CSE source (since they get
-    // restructured by ASMD), but they CAN be replaced with cse_temp loads.
-    // This allows CSE when the same subexpression appears in both absorbed and
-    // non-absorbed contexts.
+    // restructured by ASMD), but they CAN be replaced with cse_temp loads IF
+    // they appear AFTER a non-absorbed source in evaluation order.
     size_t scan_pos = 0;
     for (auto& root : elist) {
         if (root.type == Element_type::CFUNC && !is_constant_subtree(root)) {
@@ -3371,10 +3370,12 @@ void run_cse(evaluator* ev, elist_t& elist)
                 }
             }
 
-            // Find the first NON-ABSORBED, non-erased, still-matching element.
-            // The source must be non-absorbed so its cse_store_suffix is preserved
-            // through the ASMD optimizer. Absorbed functions get restructured and
-            // would lose the store code.
+            // Find the EARLIEST non-absorbed, non-erased, still-matching element.
+            // The source must be:
+            // 1. Non-absorbed: so its cse_store_suffix survives the ASMD optimizer
+            // 2. Earliest among non-absorbed: to ensure all loads come after the store
+            // Absorbed occurrences that come BEFORE the source cannot be replaced
+            // (they would load before the store). Only replace those AFTER the source.
             Element* source = nullptr;
             size_t source_idx = SIZE_MAX;
             for (size_t i = 0; i < entry.second.size(); ++i) {
@@ -3385,17 +3386,18 @@ void run_cse(evaluator* ev, elist_t& elist)
                 }
             }
 
-            // If all occurrences are absorbed, we cannot apply CSE (no valid source).
-            // Skip this signature group.
+            // If no non-absorbed occurrence exists, we cannot apply CSE.
             if (source == nullptr) {
                 continue;
             }
 
-            // Count valid elements that can be replaced (all except the source).
-            // This includes both absorbed and non-absorbed occurrences.
+            // Count valid elements that can be replaced: those AFTER the source.
+            // This includes both absorbed and non-absorbed occurrences, but only
+            // those with index > source_idx (which means position > source position
+            // since we sorted by position).
             size_t replaceable_count = 0;
-            for (size_t i = 0; i < entry.second.size(); ++i) {
-                if (sig_match[i] && i != source_idx) {
+            for (size_t i = source_idx + 1; i < entry.second.size(); ++i) {
+                if (sig_match[i]) {
                     replaceable_count++;
                 }
             }
@@ -3426,18 +3428,13 @@ void run_cse(evaluator* ev, elist_t& elist)
             // This will be emitted after the function's code during compilation.
             source->f->cse_store_suffix = store_code.str();
 
-            // Shared temp variable for all replacements in this group.
+            // Shared temp variable for all subsequent replacements in this group.
             const uint64_t temp_var_id = ev->m_next_element_id++;
             auto temp_var = make_shared<Variable>(temp_var_id, (volatile void*)temp_addr, "cse_temp_" + std::to_string(temp_var_id), M64FP);
 
 
-            // Transform Others: Replace with Load (both absorbed and non-absorbed)
-            for (size_t i = 0; i < entry.second.size(); ++i) {
-                // Skip the source element
-                if (i == source_idx) {
-                    continue;
-                }
-
+            // Transform Others: Replace with Load (only those AFTER source in eval order)
+            for (size_t i = source_idx + 1; i < entry.second.size(); ++i) {
                 uint64_t other_id = entry.second[i].id;
 
                 // Skip elements that were erased by a previous CSE pass (check stored ID)
