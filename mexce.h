@@ -531,6 +531,13 @@ mexce_charstream& operator < (mexce_charstream &s, int v) {
     return s;
 }
 
+inline
+void patch_rel32(mexce_charstream& s, size_t rel32_pos, size_t target_pos)
+{
+    const int32_t rel = static_cast<int32_t>(target_pos - (rel32_pos + 4));
+    std::memcpy(s.buf.data() + rel32_pos, &rel, sizeof(rel));
+}
+
 
 
 inline
@@ -818,11 +825,6 @@ inline Function Cos()
         buf << (uint32_t)0;
     };
 
-    auto patch_rel32 = [&](size_t rel32_pos, size_t target_pos) {
-        const int32_t rel = static_cast<int32_t>(target_pos - (rel32_pos + 4));
-        std::memcpy(buf.buf.data() + rel32_pos, &rel, sizeof(rel));
-    };
-
     // Default quadrant: q=0 (no reduction needed).
     buf < 0x31 < 0xc9; // xor ecx, ecx
 
@@ -955,10 +957,10 @@ inline Function Cos()
 
     const size_t label_end = buf.buf.size();
 
-    patch_rel32(jb_to_reduce, label_reduce);
-    patch_rel32(jmp_to_end, label_end);
-    patch_rel32(jz_to_cos, label_cos);
-    patch_rel32(jmp_to_have_kernel, label_have_kernel);
+    patch_rel32(buf, jb_to_reduce, label_reduce);
+    patch_rel32(buf, jmp_to_end, label_end);
+    patch_rel32(buf, jz_to_cos, label_cos);
+    patch_rel32(buf, jmp_to_have_kernel, label_have_kernel);
 
     auto patch_ptr = [&](size_t imm_pos, void* ptr) {
         std::memcpy(buf.buf.data() + imm_pos, &ptr, sizeof(ptr));
@@ -1085,24 +1087,19 @@ inline Function Cos()
     emit_horner(buf, 16);
     const size_t label_end = buf.buf.size();
 
-    auto patch_rel32 = [&](size_t rel32_pos, size_t target_pos) {
-        const int32_t rel = static_cast<int32_t>(target_pos - (rel32_pos + 4));
-        std::memcpy(buf.buf.data() + rel32_pos, &rel, sizeof(rel));
-    };
+    patch_rel32(buf, jb_to_reduce, label_reduce);
+    patch_rel32(buf, jmp_to_have_y, label_have_y);
+    patch_rel32(buf, jb_to_cmp1, label_cmp1);
+    patch_rel32(buf, jb_to_cmp2, label_cmp2);
+    patch_rel32(buf, jb_to_cmp3, label_cmp3);
+    patch_rel32(buf, jb_to_cmp4, label_cmp4);
+    patch_rel32(buf, jb_to_deg15, label_deg15);
 
-    patch_rel32(jb_to_reduce, label_reduce);
-    patch_rel32(jmp_to_have_y, label_have_y);
-    patch_rel32(jb_to_cmp1, label_cmp1);
-    patch_rel32(jb_to_cmp2, label_cmp2);
-    patch_rel32(jb_to_cmp3, label_cmp3);
-    patch_rel32(jb_to_cmp4, label_cmp4);
-    patch_rel32(jb_to_deg15, label_deg15);
-
-    patch_rel32(jmp_to_end_deg5, label_end);
-    patch_rel32(jmp_to_end_deg7, label_end);
-    patch_rel32(jmp_to_end_deg9, label_end);
-    patch_rel32(jmp_to_end_deg11, label_end);
-    patch_rel32(jmp_to_end_deg13, label_end);
+    patch_rel32(buf, jmp_to_end_deg5, label_end);
+    patch_rel32(buf, jmp_to_end_deg7, label_end);
+    patch_rel32(buf, jmp_to_end_deg9, label_end);
+    patch_rel32(buf, jmp_to_end_deg11, label_end);
+    patch_rel32(buf, jmp_to_end_deg13, label_end);
 
     void* coeff_ptr = (void*)mexce_trig_mfactors;
     void* thr_ptr   = (void*)mexce_trig_y_thresholds;
@@ -1178,11 +1175,6 @@ inline Function Sin()
         buf < 0xe9; // jmp rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
-    };
-
-    auto patch_rel32 = [&](size_t rel32_pos, size_t target_pos) {
-        const int32_t rel = static_cast<int32_t>(target_pos - (rel32_pos + 4));
-        std::memcpy(buf.buf.data() + rel32_pos, &rel, sizeof(rel));
     };
 
     // Default quadrant: q=0 (no reduction needed).
@@ -1318,10 +1310,10 @@ inline Function Sin()
 
     const size_t label_end = buf.buf.size();
 
-    patch_rel32(jb_to_reduce, label_reduce);
-    patch_rel32(jmp_to_end, label_end);
-    patch_rel32(jz_to_sin, label_sin);
-    patch_rel32(jmp_to_have_kernel, label_have_kernel);
+    patch_rel32(buf, jb_to_reduce, label_reduce);
+    patch_rel32(buf, jmp_to_end, label_end);
+    patch_rel32(buf, jz_to_sin, label_sin);
+    patch_rel32(buf, jmp_to_have_kernel, label_have_kernel);
 
     auto patch_ptr = [&](size_t imm_pos, void* ptr) {
         std::memcpy(buf.buf.data() + imm_pos, &ptr, sizeof(ptr));
@@ -1458,24 +1450,19 @@ inline Function Sin()
     const size_t label_mul = buf.buf.size();
     buf < 0xde < 0xc9; // fmulp st(1), st  => r * P(y)
 
-    auto patch_rel32 = [&](size_t rel32_pos, size_t target_pos) {
-        const int32_t rel = static_cast<int32_t>(target_pos - (rel32_pos + 4));
-        std::memcpy(buf.buf.data() + rel32_pos, &rel, sizeof(rel));
-    };
+    patch_rel32(buf, jb_to_reduce, label_reduce);
+    patch_rel32(buf, jmp_to_have_r, label_have_r);
+    patch_rel32(buf, jb_to_cmp1, label_cmp1);
+    patch_rel32(buf, jb_to_cmp2, label_cmp2);
+    patch_rel32(buf, jb_to_cmp3, label_cmp3);
+    patch_rel32(buf, jb_to_cmp4, label_cmp4);
+    patch_rel32(buf, jb_to_deg14, label_deg14);
 
-    patch_rel32(jb_to_reduce, label_reduce);
-    patch_rel32(jmp_to_have_r, label_have_r);
-    patch_rel32(jb_to_cmp1, label_cmp1);
-    patch_rel32(jb_to_cmp2, label_cmp2);
-    patch_rel32(jb_to_cmp3, label_cmp3);
-    patch_rel32(jb_to_cmp4, label_cmp4);
-    patch_rel32(jb_to_deg14, label_deg14);
-
-    patch_rel32(jmp_to_mul_deg4, label_mul);
-    patch_rel32(jmp_to_mul_deg6, label_mul);
-    patch_rel32(jmp_to_mul_deg8, label_mul);
-    patch_rel32(jmp_to_mul_deg10, label_mul);
-    patch_rel32(jmp_to_mul_deg12, label_mul);
+    patch_rel32(buf, jmp_to_mul_deg4, label_mul);
+    patch_rel32(buf, jmp_to_mul_deg6, label_mul);
+    patch_rel32(buf, jmp_to_mul_deg8, label_mul);
+    patch_rel32(buf, jmp_to_mul_deg10, label_mul);
+    patch_rel32(buf, jmp_to_mul_deg12, label_mul);
 
     void* coeff_ptr = (void*)mexce_trig_sinfactors;
     void* thr_ptr   = (void*)mexce_trig_sin_y_thresholds;
@@ -1558,11 +1545,6 @@ inline Function Tan()
         buf < 0xe9; // jmp rel32
         rel32_pos = buf.buf.size();
         buf << (uint32_t)0;
-    };
-
-    auto patch_rel32 = [&](size_t rel32_pos, size_t target_pos) {
-        const int32_t rel = static_cast<int32_t>(target_pos - (rel32_pos + 4));
-        std::memcpy(buf.buf.data() + rel32_pos, &rel, sizeof(rel));
     };
 
     // ecx = case selector: 0=direct, 1=pos fold, 2=neg fold.
@@ -1828,38 +1810,38 @@ inline Function Tan()
     const size_t label_end = buf.buf.size();
 
     // Patch control-flow rel32s.
-    patch_rel32(jb_to_reduce, label_reduce);
-    patch_rel32(jmp_to_have_r, label_have_r);
-    patch_rel32(jb_to_pos_large, label_pos_large);
-    patch_rel32(ja_to_neg_large, label_neg_large);
-    patch_rel32(jmp_to_have_u, label_have_u);
-    patch_rel32(jmp_pos_to_have_u, label_have_u);
+    patch_rel32(buf, jb_to_reduce, label_reduce);
+    patch_rel32(buf, jmp_to_have_r, label_have_r);
+    patch_rel32(buf, jb_to_pos_large, label_pos_large);
+    patch_rel32(buf, ja_to_neg_large, label_neg_large);
+    patch_rel32(buf, jmp_to_have_u, label_have_u);
+    patch_rel32(buf, jmp_pos_to_have_u, label_have_u);
 
-    patch_rel32(cos_jb_to_cmp1, cos_label_cmp1);
-    patch_rel32(cos_jb_to_cmp2, cos_label_cmp2);
-    patch_rel32(cos_jb_to_cmp3, cos_label_cmp3);
-    patch_rel32(cos_jb_to_cmp4, cos_label_cmp4);
-    patch_rel32(cos_jb_to_deg15, cos_label_deg15);
+    patch_rel32(buf, cos_jb_to_cmp1, cos_label_cmp1);
+    patch_rel32(buf, cos_jb_to_cmp2, cos_label_cmp2);
+    patch_rel32(buf, cos_jb_to_cmp3, cos_label_cmp3);
+    patch_rel32(buf, cos_jb_to_cmp4, cos_label_cmp4);
+    patch_rel32(buf, cos_jb_to_deg15, cos_label_deg15);
 
-    patch_rel32(cos_jmp_to_end_deg5, cos_label_end);
-    patch_rel32(cos_jmp_to_end_deg7, cos_label_end);
-    patch_rel32(cos_jmp_to_end_deg9, cos_label_end);
-    patch_rel32(cos_jmp_to_end_deg11, cos_label_end);
-    patch_rel32(cos_jmp_to_end_deg13, cos_label_end);
+    patch_rel32(buf, cos_jmp_to_end_deg5, cos_label_end);
+    patch_rel32(buf, cos_jmp_to_end_deg7, cos_label_end);
+    patch_rel32(buf, cos_jmp_to_end_deg9, cos_label_end);
+    patch_rel32(buf, cos_jmp_to_end_deg11, cos_label_end);
+    patch_rel32(buf, cos_jmp_to_end_deg13, cos_label_end);
 
-    patch_rel32(sin_jb_to_cmp1, sin_label_cmp1);
-    patch_rel32(sin_jb_to_cmp2, sin_label_cmp2);
-    patch_rel32(sin_jb_to_cmp3, sin_label_cmp3);
-    patch_rel32(sin_jb_to_cmp4, sin_label_cmp4);
-    patch_rel32(sin_jb_to_deg14, sin_label_deg14);
+    patch_rel32(buf, sin_jb_to_cmp1, sin_label_cmp1);
+    patch_rel32(buf, sin_jb_to_cmp2, sin_label_cmp2);
+    patch_rel32(buf, sin_jb_to_cmp3, sin_label_cmp3);
+    patch_rel32(buf, sin_jb_to_cmp4, sin_label_cmp4);
+    patch_rel32(buf, sin_jb_to_deg14, sin_label_deg14);
 
-    patch_rel32(sin_jmp_to_mul_deg4, sin_label_mul);
-    patch_rel32(sin_jmp_to_mul_deg6, sin_label_mul);
-    patch_rel32(sin_jmp_to_mul_deg8, sin_label_mul);
-    patch_rel32(sin_jmp_to_mul_deg10, sin_label_mul);
-    patch_rel32(sin_jmp_to_mul_deg12, sin_label_mul);
+    patch_rel32(buf, sin_jmp_to_mul_deg4, sin_label_mul);
+    patch_rel32(buf, sin_jmp_to_mul_deg6, sin_label_mul);
+    patch_rel32(buf, sin_jmp_to_mul_deg8, sin_label_mul);
+    patch_rel32(buf, sin_jmp_to_mul_deg10, sin_label_mul);
+    patch_rel32(buf, sin_jmp_to_mul_deg12, sin_label_mul);
 
-    patch_rel32(jz_to_end, label_end);
+    patch_rel32(buf, jz_to_end, label_end);
 
     // Patch embedded pointers.
     void* tan_thr_ptr = (void*)mexce_trig_tan_x_thresholds;
