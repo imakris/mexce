@@ -409,6 +409,16 @@ int main(int argc, char* argv[])
     size_t benchmarked_native_functions = 0;
     long double sum_native_avg_ns = 0.0L;
 
+    const std::size_t iterations_u = static_cast<std::size_t>(iterations);
+    const int timing_trials =
+        (iterations >= 10000) ? 1 :
+        (iterations >= 1000) ? 5 :
+        11;
+    std::vector<long long> timing_samples;
+    std::vector<long long> native_timing_samples;
+    timing_samples.reserve(static_cast<size_t>(timing_trials));
+    native_timing_samples.reserve(static_cast<size_t>(timing_trials));
+
     for (std::size_t idx = 0; idx < total_expressions; ++idx) {
         const std::string expr = mexce::benchmark_data::kExpressions[idx];
         const long double golden = mexce::benchmark_data::kGoldenResults[idx];
@@ -518,30 +528,40 @@ int main(int argc, char* argv[])
             update_bin_counts(rec.ulp_mexce_vs_compiler, exact_zero_count_mexce_comp, bin_counts_mexce_comp, comparisons_mexce_comp);
         }
 
-        const double t0 = mexce::get_wtime();
-        std::size_t executed = 0;
-        for (; executed < (std::size_t)iterations; ++executed) {
-            (void)eval.evaluate();
+        timing_samples.clear();
+        for (int trial = 0; trial < timing_trials; ++trial) {
+            const double t0 = mexce::get_wtime();
+            for (std::size_t i = 0; i < iterations_u; ++i) {
+                (void)eval.evaluate();
+            }
+            const double t1 = mexce::get_wtime();
+            timing_samples.push_back((long long)((t1 - t0) * 1e9));
         }
-        const double t1 = mexce::get_wtime();
-
-        rec.dur_ns = (long long)((t1 - t0) * 1e9);
-        rec.avg_ns = (uint64_t)((long double)rec.dur_ns / (long double)executed + 0.5L);
+        std::nth_element(timing_samples.begin(),
+                         timing_samples.begin() + timing_samples.size() / 2,
+                         timing_samples.end());
+        rec.dur_ns = timing_samples[timing_samples.size() / 2];
+        rec.avg_ns = (uint64_t)((long double)rec.dur_ns / (long double)iterations_u + 0.5L);
 
         total_duration_ns += rec.dur_ns;
         sum_avg_ns += (long double)rec.avg_ns;
         ++benchmarked_functions;
 
         if (rec.native_eval_ok) {
-            const double tn0 = mexce::get_wtime();
-            std::size_t native_executed = 0;
-            for (; native_executed < (std::size_t)iterations; ++native_executed) {
-                (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+            native_timing_samples.clear();
+            for (int trial = 0; trial < timing_trials; ++trial) {
+                const double tn0 = mexce::get_wtime();
+                for (std::size_t i = 0; i < iterations_u; ++i) {
+                    (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+                }
+                const double tn1 = mexce::get_wtime();
+                native_timing_samples.push_back((long long)((tn1 - tn0) * 1e9));
             }
-            const double tn1 = mexce::get_wtime();
-
-            rec.native_dur_ns = (long long)((tn1 - tn0) * 1e9);
-            rec.native_avg_ns = (uint64_t)((long double)rec.native_dur_ns / (long double)native_executed + 0.5L);
+            std::nth_element(native_timing_samples.begin(),
+                             native_timing_samples.begin() + native_timing_samples.size() / 2,
+                             native_timing_samples.end());
+            rec.native_dur_ns = native_timing_samples[native_timing_samples.size() / 2];
+            rec.native_avg_ns = (uint64_t)((long double)rec.native_dur_ns / (long double)iterations_u + 0.5L);
             total_native_duration_ns += rec.native_dur_ns;
             sum_native_avg_ns += (long double)rec.native_avg_ns;
             ++benchmarked_native_functions;
