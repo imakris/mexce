@@ -3312,11 +3312,26 @@ void run_cse(evaluator* ev, elist_t& elist)
         return pclass == fclass;  // Will be absorbed if same class
     };
 
+    // Skip constant-only subtrees: they'll be folded by the constant-elimination pass and
+    // should not be turned into CVAR temporaries (which would block further folding).
+    std::function<bool(const Element&)> is_constant_subtree;
+    is_constant_subtree = [&](const Element& e) -> bool {
+        if (e.type == Element_type::CCONST) return true;
+        if (e.type == Element_type::CVAR) return false;
+        if (e.type != Element_type::CFUNC) return false;
+        for (auto arg_it : e.f->args) {
+            if (!is_constant_subtree(*arg_it)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     // Collect all CFUNC elements with their signatures
     // Skip functions that will be absorbed (optimizer reorders, breaking CSE)
     size_t scan_pos = 0;
     for (auto& root : elist) {
-        if (root.type == Element_type::CFUNC && !will_be_absorbed(root)) {
+        if (root.type == Element_type::CFUNC && !will_be_absorbed(root) && !is_constant_subtree(root)) {
             string sig = get_element_signature(root);
             occurrences[sig].push_back({&root, root.id, scan_pos});
         }
