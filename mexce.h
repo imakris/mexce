@@ -2806,9 +2806,10 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         int pclass = (pname == "add" || pname == "sub") ? 1 : (pname == "mul" || pname == "div") ? 2 : 0;
         bool parg2_inv = (pname == "sub" || pname == "div");
 
-        if (pclass && pclass == fclass) {
+        if (pclass && pclass == fclass && f->cse_store_suffix.empty()) {
 
             // the function will be absorbed by its parent
+            // (unless it has cse_store_suffix - then it must remain standalone to emit store code)
 
             bool parent_inv_op = f->parent_arg_index == 0 && parg2_inv; // arg 0 in postfix, is the second infix argument
 
@@ -3290,10 +3291,12 @@ void run_cse(evaluator* ev, elist_t& elist)
     // Store ID alongside pointer to avoid dereferencing freed memory.
     // Store scan position to reliably reflect evaluation order (list order),
     // rather than relying on Element::id allocation order.
+    // Track whether each occurrence is "absorbed" (will be merged into parent by ASMD).
     struct Occurrence {
         Element*  element;
         uint64_t  id;
         size_t    position;
+        bool      absorbed;  // If true, cannot be the CSE source (but can be replaced)
     };
     map<string, vector<Occurrence> > occurrences;
 
@@ -3332,13 +3335,16 @@ void run_cse(evaluator* ev, elist_t& elist)
         return true;
     };
 
-    // Collect all CFUNC elements with their signatures
-    // Skip functions that will be absorbed (optimizer reorders, breaking CSE)
+    // Collect all CFUNC elements with their signatures.
+    // Include absorbed functions: they can't be the CSE source (since they get
+    // restructured by ASMD), but they CAN be replaced with cse_temp loads IF
+    // they appear AFTER a non-absorbed source in evaluation order.
     size_t scan_pos = 0;
     for (auto& root : elist) {
-        if (root.type == Element_type::CFUNC && !will_be_absorbed(root) && !is_constant_subtree(root)) {
+        if (root.type == Element_type::CFUNC && !is_constant_subtree(root)) {
+            bool absorbed = will_be_absorbed(root);
             string sig = get_element_signature(root);
-            occurrences[sig].push_back({&root, root.id, scan_pos});
+            occurrences[sig].push_back({&root, root.id, scan_pos, absorbed});
         }
         ++scan_pos;
     }
@@ -3365,27 +3371,38 @@ void run_cse(evaluator* ev, elist_t& elist)
                 }
             }
 
-            // Find the first non-erased, still-matching element (use stored ID)
-            Element* first = nullptr;
-            size_t first_idx = 0;
+            // Find the EARLIEST non-erased, still-matching element as the source.
+            // The source will have cse_store_suffix set, which prevents it from
+            // being absorbed by ASMD (see asmd_optimizer check for cse_store_suffix).
+            // This allows CSE to work even when all occurrences would be absorbed.
+            Element* source = nullptr;
+            size_t source_idx = SIZE_MAX;
             for (size_t i = 0; i < entry.second.size(); ++i) {
                 if (sig_match[i]) {
-                    first = entry.second[i].element;
-                    first_idx = i;
+                    source = entry.second[i].element;
+                    source_idx = i;
                     break;
                 }
             }
 
-            // Count remaining valid elements (still matching the signature)
-            size_t valid_count = 0;
-            for (size_t i = first_idx; i < entry.second.size(); ++i) {
+            // No valid source found (all erased or mutated).
+            if (source == nullptr) {
+                continue;
+            }
+
+            // Count valid elements that can be replaced: those AFTER the source.
+            // This includes both absorbed and non-absorbed occurrences, but only
+            // those with index > source_idx (which means position > source position
+            // since we sorted by position).
+            size_t replaceable_count = 0;
+            for (size_t i = source_idx + 1; i < entry.second.size(); ++i) {
                 if (sig_match[i]) {
-                    valid_count++;
+                    replaceable_count++;
                 }
             }
 
-            // Need at least 2 valid occurrences for CSE to be worthwhile
-            if (valid_count < 2 || first == nullptr) {
+            // Need at least 1 replaceable occurrence for CSE to be worthwhile
+            if (replaceable_count < 1) {
                 continue;
             }
 
@@ -3393,7 +3410,7 @@ void run_cse(evaluator* ev, elist_t& elist)
             ev->m_cse_temps.push_back(0.0);
             double* temp_addr = &ev->m_cse_temps.back();
 
-            // Transform First: Set CSE store suffix
+            // Transform Source: Set CSE store suffix
             // Generate FST instruction to store result after function executes.
             // We store this as cse_store_suffix which survives optimizer transformations.
             mexce_charstream store_code;
@@ -3406,17 +3423,17 @@ void run_cse(evaluator* ev, elist_t& elist)
             store_code << (void*)temp_addr;
 #endif
 
-            // Set the CSE store suffix on the function.
+            // Set the CSE store suffix on the source function.
             // This will be emitted after the function's code during compilation.
-            first->f->cse_store_suffix = store_code.str();
+            source->f->cse_store_suffix = store_code.str();
 
             // Shared temp variable for all subsequent replacements in this group.
             const uint64_t temp_var_id = ev->m_next_element_id++;
             auto temp_var = make_shared<Variable>(temp_var_id, (volatile void*)temp_addr, "cse_temp_" + std::to_string(temp_var_id), M64FP);
 
 
-            // Transform Others: Replace with Load
-            for (size_t i = first_idx + 1; i < entry.second.size(); ++i) {
+            // Transform Others: Replace with Load (only those AFTER source in eval order)
+            for (size_t i = source_idx + 1; i < entry.second.size(); ++i) {
                 uint64_t other_id = entry.second[i].id;
 
                 // Skip elements that were erased by a previous CSE pass (check stored ID)
