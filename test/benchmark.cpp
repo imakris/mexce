@@ -186,6 +186,54 @@ static uint64_t ulp_distance(double a, double b)
     return (ua > ub) ? (ua - ub) : (ub - ua);
 }
 
+struct ulp_sum_t {
+    uint64_t hi;
+    uint64_t lo;
+
+    ulp_sum_t() : hi(0), lo(0) {}
+
+    void add(uint64_t value)
+    {
+        if (value == UINT64_MAX) {
+            return;
+        }
+        uint64_t old = lo;
+        lo += value;
+        if (lo < old) {
+            ++hi;
+        }
+    }
+};
+
+static std::string to_decimal_u128(uint64_t hi, uint64_t lo)
+{
+    if (hi == 0) {
+        return std::to_string(lo);
+    }
+
+    uint32_t words[4];
+    words[0] = (uint32_t)(hi >> 32);
+    words[1] = (uint32_t)hi;
+    words[2] = (uint32_t)(lo >> 32);
+    words[3] = (uint32_t)lo;
+
+    std::string digits;
+    digits.reserve(39);
+
+    while (words[0] || words[1] || words[2] || words[3]) {
+        uint64_t rem = 0;
+        for (int i = 0; i < 4; ++i) {
+            uint64_t cur = (rem << 32) | words[i];
+            words[i] = (uint32_t)(cur / 10);
+            rem = cur % 10;
+        }
+        digits.push_back((char)('0' + rem));
+    }
+
+    std::reverse(digits.begin(), digits.end());
+    return digits;
+}
+
 // ------------------------------ Main ---------------------------------
 
 int main(int argc, char* argv[])
@@ -323,6 +371,9 @@ int main(int argc, char* argv[])
     size_t comparisons_mexce_ref = 0;
     size_t comparisons_mexce_comp = 0;
     size_t comparisons_comp_ref = 0;
+    ulp_sum_t ulp_sum_mexce_ref;
+    ulp_sum_t ulp_sum_mexce_comp;
+    ulp_sum_t ulp_sum_comp_ref;
     constexpr long double k_zero_abs_tol = 1e-12L;
 
     auto update_bin_counts = [&](uint64_t ulp, size_t& exact_zero_count, std::vector<size_t>& bins, size_t& comparisons) {
@@ -357,6 +408,16 @@ int main(int argc, char* argv[])
     long long total_native_duration_ns = 0;
     size_t benchmarked_native_functions = 0;
     long double sum_native_avg_ns = 0.0L;
+
+    const std::size_t iterations_u = static_cast<std::size_t>(iterations);
+    const int timing_trials =
+        (iterations >= 10000) ? 1 :
+        (iterations >= 1000) ? 5 :
+        11;
+    std::vector<long long> timing_samples;
+    std::vector<long long> native_timing_samples;
+    timing_samples.reserve(static_cast<size_t>(timing_trials));
+    native_timing_samples.reserve(static_cast<size_t>(timing_trials));
 
     for (std::size_t idx = 0; idx < total_expressions; ++idx) {
         const std::string expr = mexce::benchmark_data::kExpressions[idx];
@@ -405,6 +466,7 @@ int main(int argc, char* argv[])
             else {
                 rec.ulp_compiler_vs_reference = ulp_distance(rec.native_result, golden_d);
             }
+            ulp_sum_comp_ref.add(rec.ulp_compiler_vs_reference);
             update_bin_counts(rec.ulp_compiler_vs_reference, exact_zero_count_comp_ref, bin_counts_comp_ref, comparisons_comp_ref);
         }
 
@@ -451,6 +513,7 @@ int main(int argc, char* argv[])
         else {
             rec.ulp_mexce_vs_reference = ulp_distance(rec.mexce_result, golden_d);
         }
+        ulp_sum_mexce_ref.add(rec.ulp_mexce_vs_reference);
         update_bin_counts(rec.ulp_mexce_vs_reference, exact_zero_count_mexce_ref, bin_counts_mexce_ref, comparisons_mexce_ref);
 
         if (rec.native_eval_ok) {
@@ -461,33 +524,44 @@ int main(int argc, char* argv[])
             else {
                 rec.ulp_mexce_vs_compiler = ulp_distance(rec.mexce_result, rec.native_result);
             }
+            ulp_sum_mexce_comp.add(rec.ulp_mexce_vs_compiler);
             update_bin_counts(rec.ulp_mexce_vs_compiler, exact_zero_count_mexce_comp, bin_counts_mexce_comp, comparisons_mexce_comp);
         }
 
-        const double t0 = mexce::get_wtime();
-        std::size_t executed = 0;
-        for (; executed < (std::size_t)iterations; ++executed) {
-            (void)eval.evaluate();
+        timing_samples.clear();
+        for (int trial = 0; trial < timing_trials; ++trial) {
+            const double t0 = mexce::get_wtime();
+            for (std::size_t i = 0; i < iterations_u; ++i) {
+                (void)eval.evaluate();
+            }
+            const double t1 = mexce::get_wtime();
+            timing_samples.push_back((long long)((t1 - t0) * 1e9));
         }
-        const double t1 = mexce::get_wtime();
-
-        rec.dur_ns = (long long)((t1 - t0) * 1e9);
-        rec.avg_ns = (uint64_t)((long double)rec.dur_ns / (long double)executed + 0.5L);
+        std::nth_element(timing_samples.begin(),
+                         timing_samples.begin() + timing_samples.size() / 2,
+                         timing_samples.end());
+        rec.dur_ns = timing_samples[timing_samples.size() / 2];
+        rec.avg_ns = (uint64_t)((long double)rec.dur_ns / (long double)iterations_u + 0.5L);
 
         total_duration_ns += rec.dur_ns;
         sum_avg_ns += (long double)rec.avg_ns;
         ++benchmarked_functions;
 
         if (rec.native_eval_ok) {
-            const double tn0 = mexce::get_wtime();
-            std::size_t native_executed = 0;
-            for (; native_executed < (std::size_t)iterations; ++native_executed) {
-                (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+            native_timing_samples.clear();
+            for (int trial = 0; trial < timing_trials; ++trial) {
+                const double tn0 = mexce::get_wtime();
+                for (std::size_t i = 0; i < iterations_u; ++i) {
+                    (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+                }
+                const double tn1 = mexce::get_wtime();
+                native_timing_samples.push_back((long long)((tn1 - tn0) * 1e9));
             }
-            const double tn1 = mexce::get_wtime();
-
-            rec.native_dur_ns = (long long)((tn1 - tn0) * 1e9);
-            rec.native_avg_ns = (uint64_t)((long double)rec.native_dur_ns / (long double)native_executed + 0.5L);
+            std::nth_element(native_timing_samples.begin(),
+                             native_timing_samples.begin() + native_timing_samples.size() / 2,
+                             native_timing_samples.end());
+            rec.native_dur_ns = native_timing_samples[native_timing_samples.size() / 2];
+            rec.native_avg_ns = (uint64_t)((long double)rec.native_dur_ns / (long double)iterations_u + 0.5L);
             total_native_duration_ns += rec.native_dur_ns;
             sum_native_avg_ns += (long double)rec.native_avg_ns;
             ++benchmarked_native_functions;
@@ -611,6 +685,12 @@ int main(int argc, char* argv[])
 
     out << "\n";
 
+    out << "Accumulated ULP distance (sum):\n";
+    print_kv("Mexce vs Reference", comparisons_mexce_ref == 0 ? "-" : to_decimal_u128(ulp_sum_mexce_ref.hi, ulp_sum_mexce_ref.lo));
+    print_kv("Compiler vs Reference", comparisons_comp_ref == 0 ? "-" : to_decimal_u128(ulp_sum_comp_ref.hi, ulp_sum_comp_ref.lo));
+    print_kv("Mexce vs Compiler", comparisons_mexce_comp == 0 ? "-" : to_decimal_u128(ulp_sum_mexce_comp.hi, ulp_sum_mexce_comp.lo));
+    out << "\n";
+
     out << "Compilation time histogram:" << "\n";
     if (compile_times.empty()) {
         out << "No successfully compiled expressions." << "\n";
@@ -719,7 +799,7 @@ int main(int argc, char* argv[])
 
     out << "\n";
 
-    out << "\n" << line << "\n" << "BENCHMARK SUMMARY" << "\n" << line << "\n";
+    out << line << "\n" << "BENCHMARK SUMMARY" << "\n" << line << "\n";
 
     struct Summary_column {
         std::string title;
