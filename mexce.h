@@ -601,11 +601,10 @@ Token_type get_infix_rank(char infix_op)
 }
 
 
-// 80-bit Maclaurin coeffs as 16-byte records (mantissa 8 + exp/sign 2 + pad)
-// Full precision series for cos(x) = sum_{n=0}^{N} (-1)^n * x^{2n} / (2n)!
-// 14 terms (up to x^26) provide full 64-bit precision for |x| <= pi
-// NOTE: Faster implementations could use quarter-wave reduction to [0, pi/4]
-// with fewer terms, but this requires complex quadrant tracking in JIT code.
+// 14-term Maclaurin series coefficients for cos(x) on [-π, π]
+// cos(x) = 1 - x²/2! + x⁴/4! - x⁶/6! + ... evaluated via Horner on y = x²
+// These coefficients are in 80-bit extended precision format (10 bytes each)
+// Polynomial covers terms from y^13 (x^26) down to constant term for full double precision
 static uint64_t mexce_trig_mfactors[] = {
     0xc4742fe35272cd1c, 0x000000000000bfa6,     // -1/(26!)
     0xf96780cb97abbe65, 0x0000000000003faf,     // +1/(24!)
