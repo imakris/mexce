@@ -1,62 +1,76 @@
 #pragma once
 
 #include <chrono>
-#include <limits>
 
-#ifdef _OPENMP
-#  include <omp.h>
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#include <intrin.h>
 #endif
 
 namespace mexce {
-namespace detail {
 
-inline double chrono_resolution_seconds() noexcept
-{
-    typedef std::chrono::steady_clock clock;
-    typedef clock::period period;
-    return static_cast<double>(period::num) / static_cast<double>(period::den);
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+// Use RDTSC on x86/x64 Windows for higher precision
+namespace detail {
+    inline bool has_invariant_tsc() noexcept
+    {
+        // Check CPUID.80000007H:EDX[8] for invariant TSC
+        int cpu_info[4];
+        __cpuid(cpu_info, 0x80000000);
+        unsigned int max_ext_level = cpu_info[0];
+
+        if (max_ext_level >= 0x80000007) {
+            __cpuid(cpu_info, 0x80000007);
+            return (cpu_info[3] & (1 << 8)) != 0; // EDX bit 8
+        }
+        return false;
+    }
+
+    inline double get_tsc_frequency() noexcept
+    {
+        // Calibrate TSC frequency using chrono over a short period
+        typedef std::chrono::steady_clock clock;
+        const auto t0 = clock::now();
+        const unsigned long long tsc0 = __rdtsc();
+
+        // Busy wait for ~10ms
+        auto t1 = clock::now();
+        while (std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count() < 10) {
+            t1 = clock::now();
+        }
+
+        const unsigned long long tsc1 = __rdtsc();
+        const double elapsed_sec = std::chrono::duration<double>(t1 - t0).count();
+
+        return (double)(tsc1 - tsc0) / elapsed_sec;
+    }
 }
 
-inline double chrono_now_seconds() noexcept
+inline double get_wtime() noexcept
+{
+    static const bool use_tsc = detail::has_invariant_tsc();
+    if (use_tsc) {
+        static const double tsc_freq = detail::get_tsc_frequency();
+        const unsigned long long tsc = __rdtsc();
+        return (double)tsc / tsc_freq;
+    }
+    else {
+        // Fall back to chrono if no invariant TSC
+        typedef std::chrono::steady_clock clock;
+        const clock::time_point now = clock::now();
+        const std::chrono::duration<double> seconds = now.time_since_epoch();
+        return seconds.count();
+    }
+}
+#else
+// Fallback to chrono on other platforms
+inline double get_wtime() noexcept
 {
     typedef std::chrono::steady_clock clock;
     const clock::time_point now = clock::now();
     const std::chrono::duration<double> seconds = now.time_since_epoch();
     return seconds.count();
 }
-
-inline double omp_resolution_seconds() noexcept
-{
-#ifdef _OPENMP
-    const double tick = omp_get_wtick();
-    return (tick > 0.0) ? tick : std::numeric_limits<double>::infinity();
-#else
-    return std::numeric_limits<double>::infinity();
 #endif
-}
-
-inline bool should_use_chrono() noexcept
-{
-    const double chrono_res = chrono_resolution_seconds();
-    const double omp_res = omp_resolution_seconds();
-    if (!(chrono_res > 0.0)) {
-        return false;
-    }
-    return chrono_res < omp_res;
-}
-
-} // namespace detail
-
-inline double get_wtime() noexcept
-{
-    static const bool use_chrono = detail::should_use_chrono();
-#ifdef _OPENMP
-    if (!use_chrono) {
-        return omp_get_wtime();
-    }
-#endif
-    return detail::chrono_now_seconds();
-}
 
 } // namespace mexce
 

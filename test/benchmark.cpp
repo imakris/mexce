@@ -102,6 +102,39 @@ static std::string format_ns(uint64_t ns)
     return out;
 }
 
+// Overload for double values
+static std::string format_ns(double ns)
+{
+    struct unit_t { const char* name; double factor; };
+    static const unit_t s_units[] = {
+        {"sec", 1000000000.0},
+        {"ms",     1000000.0},
+        {"us",        1000.0},
+        {"ns",           1.0}
+    };
+
+    if (ns < 0.0001) {
+        return "0.0 ns";
+    }
+
+    const unit_t* chosen = &s_units[3];
+    for (size_t i = 0; i < sizeof(s_units) / sizeof(s_units[0]); ++i) {
+        double value = ns / s_units[i].factor;
+        if (value >= 1.0 && value <= 999.0) {
+            chosen = &s_units[i];
+            break;
+        }
+    }
+    if (ns / s_units[0].factor >= 1000.0) {
+        chosen = &s_units[0];
+    }
+
+    double value = ns / chosen->factor;
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.2f %s", value, chosen->name);
+    return std::string(buffer);
+}
+
 enum Iteration_parse_result {
     success,
     not_numeric,
@@ -346,10 +379,10 @@ int main(int argc, char* argv[])
         uint64_t ulp_mexce_vs_reference;
         uint64_t ulp_compiler_vs_reference;
         uint64_t compile_ns;
-        uint64_t avg_ns;
-        long long dur_ns;
-        uint64_t native_avg_ns;
-        long long native_dur_ns;
+        double avg_ns;
+        double dur_ns;
+        double native_avg_ns;
+        double native_dur_ns;
         std::string error;
     };
 
@@ -402,10 +435,10 @@ int main(int argc, char* argv[])
     std::vector<uint64_t> compile_times;
     compile_times.reserve(total_expressions);
 
-    long long total_duration_ns = 0;
+    double total_duration_ns = 0;
     size_t benchmarked_functions = 0;
     long double sum_avg_ns = 0.0L;
-    long long total_native_duration_ns = 0;
+    double total_native_duration_ns = 0;
     size_t benchmarked_native_functions = 0;
     long double sum_native_avg_ns = 0.0L;
 
@@ -414,8 +447,8 @@ int main(int argc, char* argv[])
         (iterations >= 10000) ? 1 :
         (iterations >= 1000) ? 5 :
         11;
-    std::vector<long long> timing_samples;
-    std::vector<long long> native_timing_samples;
+    std::vector<double> timing_samples;
+    std::vector<double> native_timing_samples;
     timing_samples.reserve(static_cast<size_t>(timing_trials));
     native_timing_samples.reserve(static_cast<size_t>(timing_trials));
 
@@ -535,13 +568,13 @@ int main(int argc, char* argv[])
                 (void)eval.evaluate();
             }
             const double t1 = mexce::get_wtime();
-            timing_samples.push_back((long long)((t1 - t0) * 1e9));
+            timing_samples.push_back((t1 - t0) * 1e9);
         }
         std::nth_element(timing_samples.begin(),
                          timing_samples.begin() + timing_samples.size() / 2,
                          timing_samples.end());
         rec.dur_ns = timing_samples[timing_samples.size() / 2];
-        rec.avg_ns = (uint64_t)((long double)rec.dur_ns / (long double)iterations_u + 0.5L);
+        rec.avg_ns = (double)rec.dur_ns / (double)iterations_u;
 
         total_duration_ns += rec.dur_ns;
         sum_avg_ns += (long double)rec.avg_ns;
@@ -555,13 +588,13 @@ int main(int argc, char* argv[])
                     (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
                 }
                 const double tn1 = mexce::get_wtime();
-                native_timing_samples.push_back((long long)((tn1 - tn0) * 1e9));
+                native_timing_samples.push_back((tn1 - tn0) * 1e9);
             }
             std::nth_element(native_timing_samples.begin(),
                              native_timing_samples.begin() + native_timing_samples.size() / 2,
                              native_timing_samples.end());
             rec.native_dur_ns = native_timing_samples[native_timing_samples.size() / 2];
-            rec.native_avg_ns = (uint64_t)((long double)rec.native_dur_ns / (long double)iterations_u + 0.5L);
+            rec.native_avg_ns = (double)rec.native_dur_ns / (double)iterations_u;
             total_native_duration_ns += rec.native_dur_ns;
             sum_native_avg_ns += (long double)rec.native_avg_ns;
             ++benchmarked_native_functions;
@@ -828,9 +861,9 @@ int main(int argc, char* argv[])
             mexce_column.values[3] = format_ns((uint64_t)total_compile_duration_ns);
         }
         if (benchmarked_functions > 0) {
-            const uint64_t avg_per_func_ns = (uint64_t)(sum_avg_ns / (long double)benchmarked_functions + 0.5L);
+            const double avg_per_func_ns = sum_avg_ns / (long double)benchmarked_functions;
             mexce_column.values[2] = format_ns(avg_per_func_ns);
-            mexce_column.values[4] = format_ns((uint64_t)total_duration_ns);
+            mexce_column.values[4] = format_ns(total_duration_ns);
         }
         summary_columns.push_back(std::move(mexce_column));
     }
@@ -841,9 +874,9 @@ int main(int argc, char* argv[])
         compiler_column.values.assign(summary_rows.size(), "-");
         compiler_column.values[0] = std::to_string(benchmarked_native_functions);
         if (benchmarked_native_functions > 0) {
-            const uint64_t avg_native_ns = (uint64_t)(sum_native_avg_ns / (long double)benchmarked_native_functions + 0.5L);
+            const double avg_native_ns = sum_native_avg_ns / (long double)benchmarked_native_functions;
             compiler_column.values[2] = format_ns(avg_native_ns);
-            compiler_column.values[4] = format_ns((uint64_t)total_native_duration_ns);
+            compiler_column.values[4] = format_ns(total_native_duration_ns);
         }
         summary_columns.push_back(std::move(compiler_column));
     }
