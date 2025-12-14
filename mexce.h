@@ -662,6 +662,21 @@ Token_type get_infix_rank(char infix_op)
 #   define MEXCE_USE_LIBM_YLOG2 MEXCE_USE_LIBM_TRANSCENDENTALS
 #endif
 
+#ifndef MEXCE_USE_LIBM_SIN
+#   define MEXCE_USE_LIBM_SIN MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_COS
+#   define MEXCE_USE_LIBM_COS MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_TAN
+#   define MEXCE_USE_LIBM_TAN MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+
+// --- Optional compile-time optimizations ---
+#ifndef MEXCE_ENABLE_CSE
+#   define MEXCE_ENABLE_CSE 0
+#endif
+
 // Small wrappers so we always have a concrete function pointer to patch into JIT code.
 inline double mexce_libm_pow(double base, double exp) { return std::pow(base, exp); }
 inline double mexce_libm_exp(double x) { return std::exp(x); }
@@ -670,21 +685,22 @@ inline double mexce_libm_log10(double x) { return std::log10(x); }
 inline double mexce_libm_log2(double x) { return std::log2(x); }
 inline double mexce_libm_logb(double base, double value) { return std::log(value) / std::log(base); }
 inline double mexce_libm_ylog2(double y, double x) { return y * std::log2(x); }
+inline double mexce_libm_sin(double x) { return std::sin(x); }
+inline double mexce_libm_cos(double x) { return std::cos(x); }
+inline double mexce_libm_tan(double x) { return std::tan(x); }
 
 // Emit a call to a libm-style unary function: st(0)=x -> st(0)=fn(x)
 inline void emit_libm_unary_call(mexce_charstream& s, void* fn_ptr)
 {
 #ifdef MEXCE_64
-    // Align stack (Win64 shadow space is already reserved by the mexce prologue).
-    s < 0x48 < 0x83 < 0xEC < 0x08;               // sub rsp, 8
-    // Store argument outside Win64 shadow space: [rsp+0x20] (32).
-    s < 0xDD < 0x5C < 0x24 < 0x20;               // fstp qword ptr [rsp+0x20]
-    s < 0xF2 < 0x0F < 0x10 < 0x44 < 0x24 < 0x20; // movsd xmm0, qword ptr [rsp+0x20]
+    // Caller is responsible for reserving Win64 shadow space and keeping 16-byte alignment at the call site.
+    // We use the (reserved) shadow space at [rsp] as scratch.
+    s < 0xDD < 0x1C < 0x24;                      // fstp qword ptr [rsp]
+    s < 0xF2 < 0x0F < 0x10 < 0x04 < 0x24;        // movsd xmm0, qword ptr [rsp]
     s < 0x48 < 0xB8; s << fn_ptr;                // mov rax, fn_ptr
     s < 0xFF < 0xD0;                             // call rax
-    s < 0xF2 < 0x0F < 0x11 < 0x44 < 0x24 < 0x20; // movsd qword ptr [rsp+0x20], xmm0
-    s < 0xDD < 0x44 < 0x24 < 0x20;               // fld qword ptr [rsp+0x20]
-    s < 0x48 < 0x83 < 0xC4 < 0x08;               // add rsp, 8
+    s < 0xF2 < 0x0F < 0x11 < 0x04 < 0x24;        // movsd qword ptr [rsp], xmm0
+    s < 0xDD < 0x04 < 0x24;                      // fld qword ptr [rsp]
 #else
     // Preserve original ESP, align to 16, then call.
     s < 0x89 < 0xE0;                             // mov eax, esp
@@ -702,17 +718,16 @@ inline void emit_libm_unary_call(mexce_charstream& s, void* fn_ptr)
 inline void emit_libm_binary_call(mexce_charstream& s, void* fn_ptr)
 {
 #ifdef MEXCE_64
-    // Need 16 bytes for args outside Win64 shadow space; reserve 24 bytes to keep 16-byte alignment.
-    s < 0x48 < 0x83 < 0xEC < 0x18;               // sub rsp, 24
-    s < 0xDD < 0x5C < 0x24 < 0x20;               // fstp qword ptr [rsp+0x20] (b)
-    s < 0xDD < 0x5C < 0x24 < 0x28;               // fstp qword ptr [rsp+0x28] (a)
-    s < 0xF2 < 0x0F < 0x10 < 0x44 < 0x24 < 0x28; // movsd xmm0, qword ptr [rsp+0x28]
-    s < 0xF2 < 0x0F < 0x10 < 0x4C < 0x24 < 0x20; // movsd xmm1, qword ptr [rsp+0x20]
+    // Caller is responsible for reserving Win64 shadow space and keeping 16-byte alignment at the call site.
+    // We use the (reserved) shadow space at [rsp] as scratch.
+    s < 0xDD < 0x1C < 0x24;                      // fstp qword ptr [rsp] (b)
+    s < 0xDD < 0x5C < 0x24 < 0x08;               // fstp qword ptr [rsp+8] (a)
+    s < 0xF2 < 0x0F < 0x10 < 0x44 < 0x24 < 0x08; // movsd xmm0, qword ptr [rsp+8]
+    s < 0xF2 < 0x0F < 0x10 < 0x0C < 0x24;        // movsd xmm1, qword ptr [rsp]
     s < 0x48 < 0xB8; s << fn_ptr;                // mov rax, fn_ptr
     s < 0xFF < 0xD0;                             // call rax
-    s < 0xF2 < 0x0F < 0x11 < 0x44 < 0x24 < 0x20; // movsd qword ptr [rsp+0x20], xmm0
-    s < 0xDD < 0x44 < 0x24 < 0x20;               // fld qword ptr [rsp+0x20]
-    s < 0x48 < 0x83 < 0xC4 < 0x18;               // add rsp, 24
+    s < 0xF2 < 0x0F < 0x11 < 0x04 < 0x24;        // movsd qword ptr [rsp], xmm0
+    s < 0xDD < 0x04 < 0x24;                      // fld qword ptr [rsp]
 #else
     s < 0x89 < 0xE0;                             // mov eax, esp
     s < 0x83 < 0xE4 < 0xF0;                      // and esp, 0xFFFFFFF0
@@ -863,7 +878,11 @@ static const double mexce_trig_tan_x_thresholds[] = {
 
 inline Function Cos()
 {
-#if MEXCE_TRIG_USE_X87
+#if MEXCE_USE_LIBM_COS
+    mexce_charstream s;
+    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::cos));
+    return Function(0, "cos", 1, 1, s.buf.size(), s.buf.data());
+#elif MEXCE_TRIG_USE_X87
     uint8_t code[] = { 0xd9, 0xff }; // fcos
     return Function(0, "cos", 1, 0, sizeof(code), code);
 #else
@@ -1203,7 +1222,11 @@ inline Function Cos()
 
 inline Function Sin()
 {
-#if MEXCE_TRIG_USE_X87
+#if MEXCE_USE_LIBM_SIN
+    mexce_charstream s;
+    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::sin));
+    return Function(0, "sin", 1, 1, s.buf.size(), s.buf.data());
+#elif MEXCE_TRIG_USE_X87
     uint8_t code[] = { 0xd9, 0xfe }; // fsin
     return Function(0, "sin", 1, 0, sizeof(code), code);
 #else
@@ -1553,7 +1576,11 @@ inline Function Sin()
 
 inline Function Tan()
 {
-#if MEXCE_TRIG_USE_X87
+#if MEXCE_USE_LIBM_TAN
+    mexce_charstream s;
+    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::tan));
+    return Function(0, "tan", 1, 1, s.buf.size(), s.buf.data());
+#elif MEXCE_TRIG_USE_X87
     uint8_t code[] = {
         0xd9, 0xf2,                                 // fptan
         0xdd, 0xd8                                  // fstp        st(0)
@@ -2169,7 +2196,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             // Generic pow (non-integer constant exponent)
             mexce_charstream s;
 #if MEXCE_USE_LIBM_GENERIC_POW
-            emit_libm_binary_call(s, (void*)&mexce_libm_pow);
+            emit_libm_binary_call(s, (void*)static_cast<double(*)(double,double)>(std::pow));
 #else
             s < 0xd9 < 0xc9                         // fxch                                 }
               < 0xd9 < 0xe4                         // ftst                                 } if base is 0, leave it in st(0)
@@ -2258,7 +2285,7 @@ inline Function Pow()
 
     const size_t non_zero_exponent = s.buf.size();
 #if MEXCE_USE_LIBM_GENERIC_POW
-    emit_libm_binary_call(s, (void*)&mexce_libm_pow);
+    emit_libm_binary_call(s, (void*)static_cast<double(*)(double,double)>(std::pow));
 #else
     // Original x87 generic pow implementation (kept as a fallback)
     s <0xd9 <0xc9;                               // fxch
@@ -2304,7 +2331,7 @@ inline Function Exp()
 {
 #if MEXCE_USE_LIBM_EXP
     mexce_charstream s;
-    emit_libm_unary_call(s, (void*)&mexce_libm_exp);
+    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::exp));
     return Function(0, "exp", 1, 1, s.buf.size(), s.buf.data());
 #else
     uint8_t code[] = {
@@ -2354,7 +2381,7 @@ inline Function Ln()
 {
 #if MEXCE_USE_LIBM_LOG
     mexce_charstream s;
-    emit_libm_unary_call(s, (void*)&mexce_libm_log);
+    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::log));
     return Function(0, "ln", 1, 1, s.buf.size(), s.buf.data());
 #else
     uint8_t code[] = {
@@ -2380,7 +2407,7 @@ inline Function Log10()
 {
 #if MEXCE_USE_LIBM_LOG10
     mexce_charstream s;
-    emit_libm_unary_call(s, (void*)&mexce_libm_log10);
+    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::log10));
     return Function(0, "log10", 1, 0, s.buf.size(), s.buf.data());
 #else
     uint8_t code[] = {
@@ -2397,7 +2424,7 @@ inline Function Log2()
 {
 #if MEXCE_USE_LIBM_LOG2
     mexce_charstream s;
-    emit_libm_unary_call(s, (void*)&mexce_libm_log2);
+    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::log2));
     return Function(0, "log2", 1, 0, s.buf.size(), s.buf.data());
 #else
     uint8_t code[] = {
@@ -4153,10 +4180,12 @@ void evaluator::set_expression(std::string e)
     // link functions to their arguments (1)
     link_arguments(m_elist);
 
+#if MEXCE_ENABLE_CSE
     // Run Common Subexpression Elimination (CSE)
     // This must run before destructive optimizers (asmd, pow) to catch 
     // identical subtrees like div(2.2, y).
     run_cse(this, m_elist);
+#endif
 
     // choose more suitable functions, where applicable
     for (auto y = m_elist.begin(); y != m_elist.end(); ) {
@@ -4223,7 +4252,25 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 {
     using namespace impl;
 
-    const static uint8_t return_sequence[] = {
+#ifdef MEXCE_64
+    // If the expression contains any external calls (libm-backed transcendentals), we must reserve
+    // Win64 shadow space and keep 16-byte stack alignment at the call site.
+    bool needs_call_shadow = false;
+    for (auto it = first; it != last && !needs_call_shadow; ++it) {
+        if (it->type != Element_type::CFUNC) {
+            continue;
+        }
+        const auto& fc = it->f->code;
+        for (size_t i = 1; i < fc.size(); ++i) {
+            if (uint8_t(fc[i - 1]) == 0xFF && uint8_t(fc[i]) == 0xD0) { // call rax/eax
+                needs_call_shadow = true;
+                break;
+            }
+        }
+    }
+#endif
+
+    const static uint8_t return_sequence_fast[] = {
 #ifdef MEXCE_64
         // Right before the function returns, in 32-bit x86, the result is in
         // st(0), where it is expected to be. There is nothing further to do there
@@ -4233,10 +4280,27 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
         // to avoid depending on any member variable address (move-safe).
         0xdd, 0x1c, 0x24,                                           // fstp qword ptr [rsp]
         0xf2, 0x0f, 0x10, 0x04, 0x24,                               // movsd xmm0, qword ptr [rsp]
-        0x48, 0x83, 0xc4, 0x20,                                     // add  rsp, 32
+        0x48, 0x83, 0xc4, 0x08,                                     // add  rsp, 8
 #endif
         0xc3                                                        // ret
     };
+
+    const static uint8_t return_sequence_shadow[] = {
+#ifdef MEXCE_64
+        0xdd, 0x1c, 0x24,                                           // fstp qword ptr [rsp]
+        0xf2, 0x0f, 0x10, 0x04, 0x24,                               // movsd xmm0, qword ptr [rsp]
+        0x48, 0x83, 0xc4, 0x28,                                     // add  rsp, 40
+#endif
+        0xc3                                                        // ret
+    };
+
+#ifdef MEXCE_64
+    const uint8_t* return_sequence = needs_call_shadow ? return_sequence_shadow : return_sequence_fast;
+    const size_t return_sequence_size = needs_call_shadow ? sizeof(return_sequence_shadow) : sizeof(return_sequence_fast);
+#else
+    const uint8_t* return_sequence = return_sequence_fast;
+    const size_t return_sequence_size = sizeof(return_sequence_fast);
+#endif
 
     mexce_charstream code_buffer;
     // Reduce vector growth reallocations during compilation (helps when compiling many
@@ -4251,8 +4315,13 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     }
 
 #ifdef MEXCE_64
-    // Reserve 32 bytes of stack space for ABI compliance (Win64) and scratch.
-    code_buffer < 0x48 < 0x83 < 0xec < 0x20;        // sub  rsp, 32
+    if (needs_call_shadow) {
+        // 32 bytes Win64 shadow space + 8 bytes scratch, and keep 16-byte stack alignment.
+        code_buffer < 0x48 < 0x83 < 0xec < 0x28;    // sub  rsp, 40
+    } else {
+        // Reserve 8 bytes of stack space for scratch and to keep 16-byte stack alignment on x64.
+        code_buffer < 0x48 < 0x83 < 0xec < 0x08;    // sub  rsp, 8
+    }
 #endif
 
     compile_elist(code_buffer, first, last);
@@ -4262,7 +4331,7 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 #endif
 
     // copy the return sequence
-    code_buffer.buf.insert(code_buffer.buf.end(), return_sequence, return_sequence + sizeof(return_sequence));
+    code_buffer.buf.insert(code_buffer.buf.end(), return_sequence, return_sequence + return_sequence_size);
 
     m_buffer_size = code_buffer.buf.size();
     auto buffer = get_executable_buffer(m_buffer_size);
@@ -4281,6 +4350,7 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 
     evaluate_fptr = lock_executable_buffer(buffer, m_buffer_size);
 }
+
 
 } // mexce
 
