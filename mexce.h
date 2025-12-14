@@ -631,6 +631,101 @@ Token_type get_infix_rank(char infix_op)
 #   define MEXCE_TRIG_USE_PIO2_KERNEL 0
 #endif
 
+
+// --- Libm-backed transcendental functions ---
+//
+// mexce historically used x87 transcendental instructions for exp/log/pow, etc.
+// On many modern targets libm implementations can be faster, so these are
+// enabled by default but can be disabled at compile time.
+#ifndef MEXCE_USE_LIBM_TRANSCENDENTALS
+#   define MEXCE_USE_LIBM_TRANSCENDENTALS 1
+#endif
+#ifndef MEXCE_USE_LIBM_GENERIC_POW
+#   define MEXCE_USE_LIBM_GENERIC_POW MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_EXP
+#   define MEXCE_USE_LIBM_EXP MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_LOG
+#   define MEXCE_USE_LIBM_LOG MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_LOG10
+#   define MEXCE_USE_LIBM_LOG10 MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_LOG2
+#   define MEXCE_USE_LIBM_LOG2 MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_LOGB
+#   define MEXCE_USE_LIBM_LOGB MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_YLOG2
+#   define MEXCE_USE_LIBM_YLOG2 MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+
+// Small wrappers so we always have a concrete function pointer to patch into JIT code.
+inline double mexce_libm_pow(double base, double exp) { return std::pow(base, exp); }
+inline double mexce_libm_exp(double x) { return std::exp(x); }
+inline double mexce_libm_log(double x) { return std::log(x); }
+inline double mexce_libm_log10(double x) { return std::log10(x); }
+inline double mexce_libm_log2(double x) { return std::log2(x); }
+inline double mexce_libm_logb(double base, double value) { return std::log(value) / std::log(base); }
+inline double mexce_libm_ylog2(double y, double x) { return y * std::log2(x); }
+
+// Emit a call to a libm-style unary function: st(0)=x -> st(0)=fn(x)
+inline void emit_libm_unary_call(mexce_charstream& s, void* fn_ptr)
+{
+#ifdef MEXCE_64
+    // Align stack (Win64 shadow space is already reserved by the mexce prologue).
+    s < 0x48 < 0x83 < 0xEC < 0x08;               // sub rsp, 8
+    // Store argument outside Win64 shadow space: [rsp+0x20] (32).
+    s < 0xDD < 0x5C < 0x24 < 0x20;               // fstp qword ptr [rsp+0x20]
+    s < 0xF2 < 0x0F < 0x10 < 0x44 < 0x24 < 0x20; // movsd xmm0, qword ptr [rsp+0x20]
+    s < 0x48 < 0xB8; s << fn_ptr;                // mov rax, fn_ptr
+    s < 0xFF < 0xD0;                             // call rax
+    s < 0xF2 < 0x0F < 0x11 < 0x44 < 0x24 < 0x20; // movsd qword ptr [rsp+0x20], xmm0
+    s < 0xDD < 0x44 < 0x24 < 0x20;               // fld qword ptr [rsp+0x20]
+    s < 0x48 < 0x83 < 0xC4 < 0x08;               // add rsp, 8
+#else
+    // Preserve original ESP, align to 16, then call.
+    s < 0x89 < 0xE0;                             // mov eax, esp
+    s < 0x83 < 0xE4 < 0xF0;                      // and esp, 0xFFFFFFF0
+    s < 0x83 < 0xEC < 0x10;                      // sub esp, 16
+    s < 0x89 < 0x44 < 0x24 < 0x08;               // mov [esp+8], eax
+    s < 0xDD < 0x1C < 0x24;                      // fstp qword ptr [esp]
+    s < 0xB8; s << fn_ptr;                       // mov eax, fn_ptr
+    s < 0xFF < 0xD0;                             // call eax
+    s < 0x8B < 0x64 < 0x24 < 0x08;               // mov esp, [esp+8]
+#endif
+}
+
+// Emit a call to a libm-style binary function: st(1)=a, st(0)=b -> st(0)=fn(a,b)
+inline void emit_libm_binary_call(mexce_charstream& s, void* fn_ptr)
+{
+#ifdef MEXCE_64
+    // Need 16 bytes for args outside Win64 shadow space; reserve 24 bytes to keep 16-byte alignment.
+    s < 0x48 < 0x83 < 0xEC < 0x18;               // sub rsp, 24
+    s < 0xDD < 0x5C < 0x24 < 0x20;               // fstp qword ptr [rsp+0x20] (b)
+    s < 0xDD < 0x5C < 0x24 < 0x28;               // fstp qword ptr [rsp+0x28] (a)
+    s < 0xF2 < 0x0F < 0x10 < 0x44 < 0x24 < 0x28; // movsd xmm0, qword ptr [rsp+0x28]
+    s < 0xF2 < 0x0F < 0x10 < 0x4C < 0x24 < 0x20; // movsd xmm1, qword ptr [rsp+0x20]
+    s < 0x48 < 0xB8; s << fn_ptr;                // mov rax, fn_ptr
+    s < 0xFF < 0xD0;                             // call rax
+    s < 0xF2 < 0x0F < 0x11 < 0x44 < 0x24 < 0x20; // movsd qword ptr [rsp+0x20], xmm0
+    s < 0xDD < 0x44 < 0x24 < 0x20;               // fld qword ptr [rsp+0x20]
+    s < 0x48 < 0x83 < 0xC4 < 0x18;               // add rsp, 24
+#else
+    s < 0x89 < 0xE0;                             // mov eax, esp
+    s < 0x83 < 0xE4 < 0xF0;                      // and esp, 0xFFFFFFF0
+    s < 0x83 < 0xEC < 0x18;                      // sub esp, 24
+    s < 0x89 < 0x44 < 0x24 < 0x10;               // mov [esp+16], eax
+    s < 0xDD < 0x5C < 0x24 < 0x08;               // fstp qword ptr [esp+8] (b)
+    s < 0xDD < 0x1C < 0x24;                      // fstp qword ptr [esp] (a)
+    s < 0xB8; s << fn_ptr;                       // mov eax, fn_ptr
+    s < 0xFF < 0xD0;                             // call eax
+    s < 0x8B < 0x64 < 0x24 < 0x10;               // mov esp, [esp+16]
+#endif
+}
+
 // 80-bit Maclaurin coeffs as 16-byte records (mantissa 8 + exp/sign 2 + pad).
 // Order: highest degree -> constant, for Horner on y=x^2.
 static const uint64_t mexce_trig_mfactors[] = {
@@ -2071,10 +2166,13 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             *it = Element(f_opt);
         }
         else {
-            // Generic pow (runtime exponent)
+            // Generic pow (non-integer constant exponent)
+            mexce_charstream s;
+#if MEXCE_USE_LIBM_GENERIC_POW
+            emit_libm_binary_call(s, (void*)&mexce_libm_pow);
+#else
             s < 0xd9 < 0xc9                         // fxch                                 }
-              < 0xd9 < 0xe4                         // ftst                                 }
-              < 0x9b                                // wait                                 } if base is 0, leave it in st(0)
+              < 0xd9 < 0xe4                         // ftst                                 } if base is 0, leave it in st(0)
               < 0xdf < 0xe0                         // fnstsw      ax                       } and exit
               < 0x9e                                // sahf                                 }
               < 0x74 < 0x14                         // je          store_and_exit           }
@@ -2089,7 +2187,8 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
               < 0x77 < 0x02                         // ja          store_and_exit
               < 0xd9 < 0xe0                         // fchs
 // store_and_exit:
-              < 0xdd < 0xd9;                        // fstp        st(1)
+              < 0xdd < 0xd9;                        // fstp st(1)
+#endif
 
             uint8_t* cc = push_intermediate_code(ev, s.str());
             auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2, 0, s.buf.size(), cc, nullptr);
@@ -2104,125 +2203,171 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
 inline Function Pow()
 {
-    uint8_t code[]  =  {
-        0xd9, 0xc0,                                 // fld         st(0)                    }
-        0xd9, 0xfc,                                 // frndint                              }
-        0xd8, 0xd1,                                 // fcom        st(1)                    } if (abs(exponent) != round(abs(exponent)))
-        0xdf, 0xe0,                                 // fnstsw      ax                       }    goto generic_pow;
-        0x9e,                                       // sahf                                 }
-        0x75, 0x3c,                                 // jne         pop_before_generic_pow   }
+    // Pow() has several fast paths (small integer exponents, etc.).
+    // We only replace the expensive generic pow path with an optional libm call.
+    mexce_charstream s;
 
-        0xd9, 0xe1,                                 // fabs                                 }
-        0x66, 0xc7, 0x44, 0x24, 0xfe, 0xff, 0xff,   // mov         word ptr [esp-2],0ffffh  }
-        0xdf, 0x5c, 0x24, 0xfe,                     // fistp       word ptr [esp-2]         }
-        0x66, 0x8b, 0x44, 0x24, 0xfe,               // mov         ax, word ptr [esp-2]     } if (abs(exponent) > 32)
-        0x66, 0x83, 0xe8, 0x01,                     // sub         ax, 1                    }    goto generic_pow;
-        0x66, 0x83, 0xf8, 0x21,                     // cmp         ax, 1fh                  }
-        0x77, 0x22,                                 // ja          generic_pow              }
+    // Integer exponent path
+    s <0xd9 <0xc0;                               // fld         st(0)
+    s <0xd9 <0xfc;                               // frndint
+    s <0xd8 <0xd1;                               // fcom        st(1)
+    s <0xdf <0xe0;                               // fnstsw      ax
+    s <0x9e;                                     // sahf
+    s <0x0f <0x85; size_t jne_pop_before_generic_pow = s.buf.size(); s << int32_t(0); // jne pop_before_generic_pow
 
-        0xd9, 0xc1,                                 // fld         st(1)
-// loop_start:
-        0x66, 0x85, 0xc0,                           // test        ax, ax
-        0x74, 0x08,                                 // je          loop_end
-        0xdc, 0xca,                                 // fmul        st(2), st
-        0x66, 0x83, 0xe8, 0x01,                     // sub         ax, 1
-        0xeb, 0xf3,                                 // jmp         loop_start
+    s <0xd9 <0xe1;                               // fabs
+    s <0x66 <0xc7 <0x44 <0x24 <0xfe <0xff <0xff; // mov         word ptr [esp-2], 0xffff
+    s <0xdf <0x5c <0x24 <0xfe;                   // fistp       word ptr [esp-2]
+    s <0x66 <0x8b <0x44 <0x24 <0xfe;             // mov         ax, word ptr [esp-2]
+    s <0x66 <0x83 <0xe8 <0x01;                   // sub         ax, 1
+    s <0x66 <0x83 <0xf8 <0x21;                   // cmp         ax, 0x21
+    s <0x0f <0x87; size_t ja_generic_pow = s.buf.size(); s << int32_t(0);             // ja generic_pow
 
-// loop_end:
+    s <0xd9 <0xc1;                               // fld         st(1)
+    const size_t loop_start = s.buf.size();
+    s <0x66 <0x85 <0xc0;                         // test        ax, ax
+    s <0x0f <0x84; size_t je_loop_end = s.buf.size(); s << int32_t(0);                // je loop_end
+    s <0xdc <0xca;                               // fmul        st(2), st
+    s <0x66 <0x83 <0xe8 <0x01;                   // sub         ax, 1
+    s <0xe9; size_t jmp_loop_start = s.buf.size(); s << int32_t(0);                  // jmp loop_start
 
-        0xdd, 0xd8,                                 // fstp        st(0)                    }
-        0xd9, 0xe4,                                 // ftst                                 }
-        0xdf, 0xe0,                                 // fnstsw      ax                       } if the exponent was NOT negative
-        0x9e,                                       // sahf                                 }     goto exit_point
-        0xdd, 0xd8,                                 // fstp        st(0)                    }
-        0x77, 0x36,                                 // ja          exit_point               }
+    const size_t loop_end = s.buf.size();
+    s <0xdd <0xd8;                               // fstp        st(0)
+    s <0xd9 <0xe4;                               // ftst
+    s <0xdf <0xe0;                               // fnstsw      ax
+    s <0x9e;                                     // sahf
+    s <0xdd <0xd8;                               // fstp        st(0)
+    s <0x0f <0x87; size_t ja_exit_point_posexp = s.buf.size(); s << int32_t(0);       // ja exit_point
+    s <0xd9 <0xe8;                               // fld1
+    s <0xde <0xf1;                               // fdivrp      st(1), st
+    s <0xe9; size_t jmp_exit_point_inv = s.buf.size(); s << int32_t(0);              // jmp exit_point
 
-        0xd9, 0xe8,                                 // fld1                                 }
-        0xde, 0xf1,                                 // fdivrp      st(1),st                 } inverse
-        0xeb, 0x30,                                 // jmp         exit_point               }
+    // Generic pow path
+    const size_t pop_before_generic_pow = s.buf.size();
+    s <0xdd <0xd8;                               // fstp        st(0)
 
-// pop_before_generic_pow:
-        0xdd, 0xd8,                                 // fstp        st(0)
-// generic_pow:
-        0xd9, 0xe4,                                 // ftst                                 }
-        0xdf, 0xe0,                                 // fnstsw      ax                       }
-        0x9e,                                       // sahf                                 }
-        0x75, 0x08,                                 // jne         non_zero_exponent        } if exponent is 0
-        0xdd, 0xd8,                                 // fstp        st(0)                    } return 1
-        0xdd, 0xd8,                                 // fstp        st(0)                    }
-        0xd9, 0xe8,                                 // fld1                                 }
-        0xeb, 0x1f,                                 // jmp         exit_point               }
-// non_zero_exponent:
-        0xd9, 0xc9,                                 // fxch                                 }
-        0xd9, 0xe4,                                 // ftst                                 }
-        0xdf, 0xe0,                                 // fnstsw      ax                       } if base is 0, leave it in st(0)
-        0x9e,                                       // sahf                                 } and exit
-        0x74, 0x14,                                 // je          store_and_exit           }
-        0xd9, 0xe1,                                 // fabs
-        0xd9, 0xf1,                                 // fyl2x                                }
-        0xd9, 0xe8,                                 // fld1                                 }
-        0xd9, 0xc1,                                 // fld         st(1)                    }
-        0xd9, 0xf8,                                 // fprem                                } b^n = 2^(n*log2(b))
-        0xd9, 0xf0,                                 // f2xm1                                }
-        0xde, 0xc1,                                 // faddp       st(1), st                }
-        0xd9, 0xfd,                                 // fscale                               }
-        0x77, 0x02,                                 // ja          store_and_exit
-        0xd9, 0xe0,                                 // fchs
-// store_and_exit:
-        0xdd, 0xd9,                                 // fstp        st(1)
-// exit_point:
-    };
-    return Function(0, "pow", 2, 1, sizeof(code), code, pow_optimizer);
+    const size_t generic_pow = s.buf.size();
+    s <0xd9 <0xe4;                               // ftst
+    s <0xdf <0xe0;                               // fnstsw      ax
+    s <0x9e;                                     // sahf
+    s <0x0f <0x85; size_t jne_non_zero_exponent = s.buf.size(); s << int32_t(0);      // jne non_zero_exponent
+    s <0xdd <0xd8;                               // fstp        st(0)
+    s <0xdd <0xd8;                               // fstp        st(0)
+    s <0xd9 <0xe8;                               // fld1
+    s <0xe9; size_t jmp_exit_point_zeroexp = s.buf.size(); s << int32_t(0);          // jmp exit_point
+
+    const size_t non_zero_exponent = s.buf.size();
+#if MEXCE_USE_LIBM_GENERIC_POW
+    emit_libm_binary_call(s, (void*)&mexce_libm_pow);
+#else
+    // Original x87 generic pow implementation (kept as a fallback)
+    s <0xd9 <0xc9;                               // fxch
+    s <0xd9 <0xe4;                               // ftst
+    s <0xdf <0xe0;                               // fnstsw      ax
+    s <0x9e;                                     // sahf
+    s <0x0f <0x84; size_t je_store_and_exit = s.buf.size(); s << int32_t(0);          // je store_and_exit
+    s <0xd9 <0xe1;                               // fabs
+    s <0xd9 <0xf1;                               // fyl2x
+    s <0xd9 <0xe8;                               // fld1
+    s <0xd9 <0xc1;                               // fld         st(1)
+    s <0xd9 <0xf8;                               // fprem
+    s <0xd9 <0xf0;                               // f2xm1
+    s <0xde <0xc1;                               // faddp       st(1), st
+    s <0xd9 <0xfd;                               // fscale
+    s <0x0f <0x87; size_t ja_store_and_exit = s.buf.size(); s << int32_t(0);          // ja store_and_exit
+    s <0xd9 <0xe0;                               // fchs
+    const size_t store_and_exit = s.buf.size();
+    s <0xdd <0xd9;                               // fstp        st(1)
+#endif
+
+    const size_t exit_point = s.buf.size();
+
+    // Patch jumps
+    patch_rel32(s, jne_pop_before_generic_pow, pop_before_generic_pow);
+    patch_rel32(s, ja_generic_pow, generic_pow);
+    patch_rel32(s, je_loop_end, loop_end);
+    patch_rel32(s, jmp_loop_start, loop_start);
+    patch_rel32(s, ja_exit_point_posexp, exit_point);
+    patch_rel32(s, jmp_exit_point_inv, exit_point);
+    patch_rel32(s, jne_non_zero_exponent, non_zero_exponent);
+    patch_rel32(s, jmp_exit_point_zeroexp, exit_point);
+#if !MEXCE_USE_LIBM_GENERIC_POW
+    patch_rel32(s, je_store_and_exit, store_and_exit);
+    patch_rel32(s, ja_store_and_exit, store_and_exit);
+#endif
+
+    return Function(0, "pow", 2, 1, s.buf.size(), s.buf.data(), pow_optimizer);
 }
 
 
 inline Function Exp()
 {
-    uint8_t code[]  =  {
+#if MEXCE_USE_LIBM_EXP
+    mexce_charstream s;
+    emit_libm_unary_call(s, (void*)&mexce_libm_exp);
+    return Function(0, "exp", 1, 1, s.buf.size(), s.buf.data());
+#else
+    uint8_t code[] = {
         0xd9, 0xea,                                 // fldl2e
         0xde, 0xc9,                                 // fmulp       st(1), st
-        0xd9, 0xe8,                                 // fld1
-        0xd9, 0xc1,                                 // fld         st(1)
-        0xd9, 0xf8,                                 // fprem
+        0xd9, 0xc0,                                 // fld st
+        0xd9, 0xfc,                                 // frndint
+        0xd8, 0xe1,                                 // fsub        st, st(1)
         0xd9, 0xf0,                                 // f2xm1
+        0xd9, 0xe8,                                 // fld1
         0xde, 0xc1,                                 // faddp       st(1), st
         0xd9, 0xfd,                                 // fscale
         0xdd, 0xd9,                                 // fstp        st(1)
+        0xdd, 0xd9                                  // fstp        st(1)
     };
     return Function(0, "exp", 1, 1, sizeof(code), code);
+#endif
 }
 
 
-inline Function Logb()  // implementation with base
+inline Function Logb()
 {
-    uint8_t code[]  =  {
-        0xd9, 0xe8,                                 // fld1
-        0xd9, 0xc9,                                 // fxch        st(1)
+#if MEXCE_USE_LIBM_LOGB
+    mexce_charstream s;
+    emit_libm_binary_call(s, (void*)&mexce_libm_logb);
+    return Function(0, "logb", 2, 1, s.buf.size(), s.buf.data());
+#else
+    uint8_t code[] = {
+        0xd9, 0xc9,                                 // fxch
+        0xd9, 0xc0,                                 // fld         st
+        0xd9, 0xea,                                 // fldl2e
+        0xde, 0xc9,                                 // fmulp       st(1), st
         0xd9, 0xf1,                                 // fyl2x
-        0xd9, 0xc9,                                 // fxch        st(1)
-        0xd9, 0xe8,                                 // fld1
-        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xc2,                                 // fld         st(2)
+        0xd9, 0xea,                                 // fldl2e
+        0xde, 0xc9,                                 // fmulp       st(1), st
         0xd9, 0xf1,                                 // fyl2x
-        0xde, 0xf9                                  // fdivp       st(1),st
+        0xde, 0xf1,                                 // fdivp       st(1), st
+        0xdd, 0xd9                                  // fstp        st(1)
     };
     return Function(0, "logb", 2, 1, sizeof(code), code);
+#endif
 }
 
 
 inline Function Ln()
 {
-    uint8_t code[]  =  {
+#if MEXCE_USE_LIBM_LOG
+    mexce_charstream s;
+    emit_libm_unary_call(s, (void*)&mexce_libm_log);
+    return Function(0, "ln", 1, 1, s.buf.size(), s.buf.data());
+#else
+    uint8_t code[] = {
         0xd9, 0xe8,                                 // fld1
-        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xc9,                                 // fxch
         0xd9, 0xf1,                                 // fyl2x
         0xd9, 0xea,                                 // fldl2e
-        0xde, 0xf9                                  // fdivp       st(1),st
+        0xde, 0xf9                                  // fdivp       st(1), st
     };
     return Function(0, "ln", 1, 1, sizeof(code), code);
+#endif
 }
 
-
-// this is an alias, because of C's math.h
 inline Function Log()
 {
     Function f = Ln();
@@ -2233,34 +2378,50 @@ inline Function Log()
 
 inline Function Log10()
 {
-    uint8_t code[]  =  {
-        0xd9, 0xe8,                                 // fld1
-        0xd9, 0xc9,                                 // fxch        st(1)
-        0xd9, 0xf1,                                 // fyl2x
-        0xd9, 0xe9,                                 // fldl2t
-        0xde, 0xf9                                  // fdivp       st(1),st
+#if MEXCE_USE_LIBM_LOG10
+    mexce_charstream s;
+    emit_libm_unary_call(s, (void*)&mexce_libm_log10);
+    return Function(0, "log10", 1, 0, s.buf.size(), s.buf.data());
+#else
+    uint8_t code[] = {
+        0xd9, 0xec, // fldlg2
+        0xd9, 0xc9, // fxch
+        0xd9, 0xf1  // fyl2x
     };
-    return Function(0, "log10", 1, 1, sizeof(code), code);
+    return Function(0, "log10", 1, 0, sizeof(code), code);
+#endif
 }
 
 
 inline Function Log2()
 {
+#if MEXCE_USE_LIBM_LOG2
+    mexce_charstream s;
+    emit_libm_unary_call(s, (void*)&mexce_libm_log2);
+    return Function(0, "log2", 1, 0, s.buf.size(), s.buf.data());
+#else
     uint8_t code[] = {
         0xd9, 0xe8,                                 // fld1
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1                                  // fyl2x
     };
     return Function(0, "log2", 1, 0, sizeof(code), code);
+#endif
 }
 
 
 inline Function Ylog2()
 {
+#if MEXCE_USE_LIBM_YLOG2
+    mexce_charstream s;
+    emit_libm_binary_call(s, (void*)&mexce_libm_ylog2);
+    return Function(0, "ylog2", 2, 0, s.buf.size(), s.buf.data());
+#else
     uint8_t code[] = {
         0xd9, 0xf1                                  // fyl2x
     };
     return Function(0, "ylog2", 2, 0, sizeof(code), code);
+#endif
 }
 
 
