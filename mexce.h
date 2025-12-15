@@ -677,6 +677,36 @@ Token_type get_infix_rank(char infix_op)
 #   define MEXCE_ENABLE_CSE 0
 #endif
 
+// --- Codegen backend selection ---
+//
+// By default, mexce uses SSE2 scalar instructions for expressions that only contain
+// basic arithmetic (add, sub, mul, div, neg, abs) with constants/variables. This
+// generates faster code on modern CPUs and matches the x64 ABI's use of XMM registers.
+// For expressions with transcendentals or other unsupported operations, the x87 backend
+// is used automatically.
+//
+// Define MEXCE_PREFER_X87 to always use the x87 backend (compatibility mode).
+#ifndef MEXCE_PREFER_X87
+#   define MEXCE_PREFER_X87 0
+#endif
+
+// --- SSE2 helper constants for neg/abs ---
+// These are 128-bit aligned constants used by xorpd/andpd for sign manipulation.
+// sign_mask: flip sign bit (for negate)
+// abs_mask: clear sign bit (for absolute value)
+struct alignas(16) sse2_masks {
+    // sign_mask = -0.0 (0x8000000000000000) replicated
+    uint64_t sign_mask[2] = { 0x8000000000000000ULL, 0x8000000000000000ULL };
+    // abs_mask = ~sign_bit (0x7FFFFFFFFFFFFFFF) replicated
+    uint64_t abs_mask[2]  = { 0x7FFFFFFFFFFFFFFFULL, 0x7FFFFFFFFFFFFFFFULL };
+};
+
+// Global instance for SSE2 mask constants
+inline const sse2_masks& get_sse2_masks() {
+    static const sse2_masks masks;
+    return masks;
+}
+
 // Small wrappers so we always have a concrete function pointer to patch into JIT code.
 inline double mexce_libm_pow(double base, double exp) { return std::pow(base, exp); }
 inline double mexce_libm_exp(double x) { return std::exp(x); }
@@ -2843,6 +2873,387 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
 }
 
 
+// --- SSE2 backend ---
+//
+// The SSE2 backend uses XMM registers to simulate a stack similar to the x87 FPU.
+// XMM0 is the bottom of the stack, and we use XMM0-XMM7 for up to 8 levels.
+// This matches the x64 ABI where XMM0 is used for return values.
+
+// Check if a function name is supported by the SSE2 backend
+inline bool is_sse2_supported_function(const string& fn_name)
+{
+    // Basic arithmetic operations that SSE2 can handle directly
+    static const std::set<string> supported = {
+        "add", "sub", "mul", "div", "neg", "abs"
+    };
+    return supported.find(fn_name) != supported.end();
+}
+
+
+// Check if an expression list can be fully compiled with the SSE2 backend
+inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::elist_const_it_t last)
+{
+    using namespace impl;
+
+#if MEXCE_PREFER_X87 || !defined(MEXCE_64)
+    // SSE2 backend is only available on x64 when not explicitly preferring x87
+    (void)first; (void)last;
+    return false;
+#else
+    // Estimate stack depth required - SSE2 uses XMM0-XMM7 (8 registers max)
+    int max_depth = 0;
+    int current_depth = 0;
+
+    for (auto it = first; it != last; ++it) {
+        if (it->type == Element_type::CFUNC) {
+            if (!is_sse2_supported_function(it->f->name)) {
+                return false;
+            }
+            // Function consumes args and produces 1 result
+            current_depth = current_depth - static_cast<int>(it->f->num_args) + 1;
+        } else {
+            // CVAR or CCONST pushes one value
+            ++current_depth;
+        }
+        if (current_depth > max_depth) {
+            max_depth = current_depth;
+        }
+    }
+
+    // If max depth exceeds 8 (XMM register limit), use x87 with optimizer instead
+    // The x87 asmd_optimizer can reduce stack depth for chains of operations
+    if (max_depth > 8) {
+        return false;
+    }
+
+    return true;
+#endif
+}
+
+
+// Emit code to load a 64-bit address into RAX (x64 only)
+inline void emit_load_address_rax(impl::mexce_charstream& s, const void* addr)
+{
+#ifdef MEXCE_64
+    s << (uint16_t)0xb848;    // mov rax, imm64
+    s << addr;
+#else
+    (void)s; (void)addr;
+#endif
+}
+
+
+// Emit movsd xmm[reg], [rax] - load double from memory pointed by RAX
+inline void emit_sse2_load_from_rax(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // movsd xmm[reg], [rax]
+    // F2 [REX] 0F 10 ModRM
+    // ModRM = (00 << 6) | (reg << 3) | 0 = reg * 8
+    if (reg >= 8) {
+        s < 0xF2 < 0x44 < 0x0F < 0x10 < (uint8_t)((reg - 8) * 8);
+    } else {
+        s < 0xF2 < 0x0F < 0x10 < (uint8_t)(reg * 8);
+    }
+#else
+    (void)s; (void)reg;
+#endif
+}
+
+
+// Emit movsd xmm[dst], xmm[src] - copy between XMM registers
+inline void emit_sse2_mov_reg_reg(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // movsd xmm[dst], xmm[src]
+    // F2 [REX] 0F 10 ModRM
+    // ModRM = (11 << 6) | (dst << 3) | src = 0xC0 + dst*8 + src
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;  // REX.R
+    if (src >= 8) rex |= 0x41;  // REX.B
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x10 < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+
+// Emit addsd xmm[dst], xmm[src]
+inline void emit_sse2_addsd(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // F2 [REX] 0F 58 ModRM
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;
+    if (src >= 8) rex |= 0x41;
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x58 < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+
+// Emit subsd xmm[dst], xmm[src]
+inline void emit_sse2_subsd(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // F2 [REX] 0F 5C ModRM
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;
+    if (src >= 8) rex |= 0x41;
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x5C < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+
+// Emit mulsd xmm[dst], xmm[src]
+inline void emit_sse2_mulsd(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // F2 [REX] 0F 59 ModRM
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;
+    if (src >= 8) rex |= 0x41;
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x59 < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+
+// Emit divsd xmm[dst], xmm[src]
+inline void emit_sse2_divsd(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // F2 [REX] 0F 5E ModRM
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;
+    if (src >= 8) rex |= 0x41;
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x5E < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+
+// Emit xorpd xmm[reg], [addr] - XOR with 128-bit memory (for negate)
+inline void emit_sse2_xorpd_mem(impl::mexce_charstream& s, int reg, const void* addr)
+{
+#ifdef MEXCE_64
+    // Load address into RAX first, then xorpd xmm[reg], [rax]
+    emit_load_address_rax(s, addr);
+    // 66 [REX] 0F 57 ModRM
+    uint8_t rex = 0;
+    if (reg >= 8) rex |= 0x44;
+    int reg_enc = reg & 7;
+    s < 0x66;
+    if (rex) s < rex;
+    s < 0x0F < 0x57 < (uint8_t)(reg_enc * 8);  // ModRM for [rax]
+#else
+    (void)s; (void)reg; (void)addr;
+#endif
+}
+
+
+// Emit andpd xmm[reg], [addr] - AND with 128-bit memory (for abs)
+inline void emit_sse2_andpd_mem(impl::mexce_charstream& s, int reg, const void* addr)
+{
+#ifdef MEXCE_64
+    // Load address into RAX first, then andpd xmm[reg], [rax]
+    emit_load_address_rax(s, addr);
+    // 66 [REX] 0F 54 ModRM
+    uint8_t rex = 0;
+    if (reg >= 8) rex |= 0x44;
+    int reg_enc = reg & 7;
+    s < 0x66;
+    if (rex) s < rex;
+    s < 0x0F < 0x54 < (uint8_t)(reg_enc * 8);  // ModRM for [rax]
+#else
+    (void)s; (void)reg; (void)addr;
+#endif
+}
+
+
+// Emit xorpd xmm[reg], xmm[reg] - zero a register
+inline void emit_sse2_xorpd_self(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // 66 [REX] 0F 57 ModRM
+    uint8_t rex = 0;
+    if (reg >= 8) rex |= 0x44 | 0x01;  // REX.R and REX.B
+    int reg_enc = reg & 7;
+    s < 0x66;
+    if (rex) s < rex;
+    s < 0x0F < 0x57 < (uint8_t)(0xC0 + reg_enc * 8 + reg_enc);
+#else
+    (void)s; (void)reg;
+#endif
+}
+
+
+// Compile an expression list using SSE2 instructions (x64 only)
+// Uses XMM registers as a simulated stack: XMM0 = bottom, XMM7 = top
+#ifdef MEXCE_64
+inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last)
+{
+    using namespace impl;
+
+    int depth = 0;  // Current stack depth (number of values on simulated stack)
+    const auto& masks = get_sse2_masks();
+
+    for (auto it = first; it != last; ++it) {
+        // Peephole: if the same leaf is loaded twice in a row, duplicate the register
+        if (it != first && (it->type == Element_type::CVAR || it->type == Element_type::CCONST)) {
+            auto prev = it;
+            --prev;
+            if (prev->type == it->type && prev->id == it->id) {
+                // Copy xmm[depth-1] to xmm[depth]
+                emit_sse2_mov_reg_reg(code_buffer, depth, depth - 1);
+                ++depth;
+                if (depth > 8) {
+                    throw std::overflow_error("Expression too complex for SSE2 backend (register overflow)");
+                }
+                continue;
+            }
+        }
+
+        switch (it->type) {
+            case Element_type::CVAR: {
+                auto tn = it->v;
+                // Load variable into xmm[depth]
+
+                // For non-double types, we need to convert. For simplicity, use x87 for conversion
+                // and then transfer to XMM. Actually, let's handle M64FP directly and fall back for others.
+                if (tn->numeric_data_type == M64FP) {
+                    emit_load_address_rax(code_buffer, (void*)tn->address);
+                    emit_sse2_load_from_rax(code_buffer, depth);
+                }
+                else if (tn->numeric_data_type == M32FP) {
+                    // cvtss2sd xmm[depth], [rax] - convert single to double
+                    emit_load_address_rax(code_buffer, (void*)tn->address);
+                    // F3 0F 5A ModRM (cvtss2sd)
+                    int reg = depth;
+                    if (reg >= 8) {
+                        code_buffer < 0xF3 < 0x44 < 0x0F < 0x5A < (uint8_t)((reg - 8) * 8);
+                    } else {
+                        code_buffer < 0xF3 < 0x0F < 0x5A < (uint8_t)(reg * 8);
+                    }
+                }
+                else {
+                    // Integer types: load to x87, convert, store to stack, load to XMM
+                    // This is a fallback path; for full SSE2 we'd need separate int->double conversion
+                    emit_load_address_rax(code_buffer, (void*)tn->address);
+                    switch (tn->numeric_data_type) {
+                        case M16INT:  code_buffer < 0xdf < 0x00; break;  // fild word ptr [rax]
+                        case M32INT:  code_buffer < 0xdb < 0x00; break;  // fild dword ptr [rax]
+                        case M64INT:  code_buffer < 0xdf < 0x28; break;  // fild qword ptr [rax]
+                        default: break;
+                    }
+                    // fstp qword ptr [rsp]
+                    code_buffer < 0xDD < 0x1C < 0x24;
+                    // movsd xmm[depth], [rsp]
+                    int reg = depth;
+                    if (reg >= 8) {
+                        code_buffer < 0xF2 < 0x44 < 0x0F < 0x10 < (uint8_t)(0x04 + (reg - 8) * 8) < 0x24;
+                    } else {
+                        code_buffer < 0xF2 < 0x0F < 0x10 < (uint8_t)(0x04 + reg * 8) < 0x24;
+                    }
+                }
+                ++depth;
+                break;
+            }
+            case Element_type::CCONST: {
+                auto tn = it->c;
+                double v = tn->value;
+
+                // Fast path for zero
+                if (v == 0.0 && !std::signbit(v)) {
+                    emit_sse2_xorpd_self(code_buffer, depth);
+                }
+                else {
+                    // Load constant from memory
+                    emit_load_address_rax(code_buffer, (void*)tn->address);
+                    emit_sse2_load_from_rax(code_buffer, depth);
+                }
+                ++depth;
+                break;
+            }
+            case Element_type::CFUNC: {
+                auto tf = it->f;
+                const string& fn = tf->name;
+
+                if (fn == "add") {
+                    // xmm[depth-2] = xmm[depth-2] + xmm[depth-1]
+                    emit_sse2_addsd(code_buffer, depth - 2, depth - 1);
+                    --depth;
+                }
+                else if (fn == "sub") {
+                    // xmm[depth-2] = xmm[depth-2] - xmm[depth-1]
+                    emit_sse2_subsd(code_buffer, depth - 2, depth - 1);
+                    --depth;
+                }
+                else if (fn == "mul") {
+                    // xmm[depth-2] = xmm[depth-2] * xmm[depth-1]
+                    emit_sse2_mulsd(code_buffer, depth - 2, depth - 1);
+                    --depth;
+                }
+                else if (fn == "div") {
+                    // xmm[depth-2] = xmm[depth-2] / xmm[depth-1]
+                    emit_sse2_divsd(code_buffer, depth - 2, depth - 1);
+                    --depth;
+                }
+                else if (fn == "neg") {
+                    // xmm[depth-1] = -xmm[depth-1] via XOR with sign mask
+                    emit_sse2_xorpd_mem(code_buffer, depth - 1, (void*)masks.sign_mask);
+                }
+                else if (fn == "abs") {
+                    // xmm[depth-1] = |xmm[depth-1]| via AND with abs mask
+                    emit_sse2_andpd_mem(code_buffer, depth - 1, (void*)masks.abs_mask);
+                }
+                // Note: CSE store suffix is not emitted in SSE2 path as CSE uses x87 instructions
+                break;
+            }
+        }
+
+        if (depth > 8) {
+            throw std::overflow_error("Expression too complex for SSE2 backend (register overflow)");
+        }
+    }
+
+    // After processing, result should be in xmm[depth-1].
+    // For return, we need it in xmm0.
+    if (depth == 1) {
+        // Result is in xmm0, perfect
+    }
+    else if (depth > 1) {
+        // Move result to xmm0
+        emit_sse2_mov_reg_reg(code_buffer, 0, depth - 1);
+    }
+    // depth == 0 means empty expression, xmm0 will be undefined
+}
+#endif
 
 
 inline string infix_operator_to_function_name(const string& op)
@@ -4181,10 +4592,14 @@ void evaluator::set_expression(std::string e)
 
 #if MEXCE_ENABLE_CSE
     // Run Common Subexpression Elimination (CSE)
-    // This must run before destructive optimizers (asmd, pow) to catch 
+    // This must run before destructive optimizers (asmd, pow) to catch
     // identical subtrees like div(2.2, y).
     run_cse(this, m_elist);
 #endif
+
+    // Check if the expression is SSE2-compatible BEFORE running optimizers.
+    // If so, we skip the asmd_optimizer which would generate x87 code.
+    bool skip_asmd_optimizer = is_sse2_compatible(m_elist.begin(), m_elist.end());
 
     // choose more suitable functions, where applicable
     for (auto y = m_elist.begin(); y != m_elist.end(); ) {
@@ -4228,8 +4643,15 @@ void evaluator::set_expression(std::string e)
                 }
             }
 
+            // Skip asmd_optimizer for SSE2-compatible expressions to preserve
+            // the function nodes in their original form for SSE2 code generation
             if (f->optimizer != 0) {
-                f->optimizer(y, this, &m_elist);
+                if (skip_asmd_optimizer && f->optimizer == asmd_optimizer) {
+                    // Don't run asmd_optimizer, SSE2 backend will handle these
+                }
+                else {
+                    f->optimizer(y, this, &m_elist);
+                }
             }
         }
         y = y_next;
@@ -4252,8 +4674,53 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     using namespace impl;
 
 #ifdef MEXCE_64
-    // If the expression contains any external calls (libm-backed transcendentals), we must reserve
-    // Win64 shadow space and keep 16-byte stack alignment at the call site.
+    // Check if we can use the faster SSE2 backend
+    bool use_sse2 = is_sse2_compatible(first, last);
+
+    if (use_sse2) {
+        // SSE2 backend: simpler prologue/epilogue since result is already in xmm0
+        mexce_charstream code_buffer;
+
+        // Reserve buffer space
+        {
+            size_t n = 0;
+            for (auto it = first; it != last; ++it) {
+                ++n;
+            }
+            code_buffer.buf.reserve(64 + n * 16);
+        }
+
+        // Minimal prologue: reserve 8 bytes for scratch space (int->double conversion)
+        // and keep 16-byte stack alignment.
+        code_buffer < 0x48 < 0x83 < 0xec < 0x08;    // sub  rsp, 8
+
+        // Generate SSE2 code
+        compile_elist_sse2(code_buffer, first, last);
+
+        // SSE2 return: result is already in xmm0, just restore stack and return
+        code_buffer < 0x48 < 0x83 < 0xc4 < 0x08;    // add  rsp, 8
+        code_buffer < 0xc3;                          // ret
+
+        m_buffer_size = code_buffer.buf.size();
+        auto buffer = get_executable_buffer(m_buffer_size);
+
+#ifdef _WIN32
+        if (!buffer) {
+            throw std::bad_alloc();
+        }
+#elif defined(__linux__)
+        if (buffer == MAP_FAILED) {
+            throw std::bad_alloc();
+        }
+#endif
+
+        memcpy(buffer, code_buffer.buf.data(), m_buffer_size);
+        evaluate_fptr = lock_executable_buffer(buffer, m_buffer_size);
+        return;
+    }
+
+    // x87 backend: If the expression contains any external calls (libm-backed transcendentals),
+    // we must reserve Win64 shadow space and keep 16-byte stack alignment at the call site.
     bool needs_call_shadow = false;
     for (auto it = first; it != last && !needs_call_shadow; ++it) {
         if (it->type != Element_type::CFUNC) {
