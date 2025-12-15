@@ -735,6 +735,295 @@ void test_fpu_stack_overflow(TestSuite& suite) {
     );
 }
 
+// Test SSE4.1 rounding functions with SSE2 backend explicitly enabled
+void test_sse2_rounding_functions(TestSuite& suite) {
+#ifdef MEXCE_64
+    mexce::evaluator eval;
+    eval.use_sse2_backend();  // Force SSE2 backend
+
+    double value = 3.75;
+    eval.bind(value, "v");
+
+    eval.set_expression("floor(v)");
+    suite.expect_near("sse2_floor", eval.evaluate(), std::floor(value));
+
+    eval.set_expression("ceil(v)");
+    suite.expect_near("sse2_ceil", eval.evaluate(), std::ceil(value));
+
+    eval.set_expression("round(v)");
+    suite.expect_near("sse2_round", eval.evaluate(), std::round(value));
+
+    eval.set_expression("trunc(v)");
+    suite.expect_near("sse2_trunc", eval.evaluate(), std::trunc(value));
+
+    eval.set_expression("int(v)");
+    suite.expect_near("sse2_int", eval.evaluate(), std::nearbyint(value));
+
+    // Test with negative value
+    value = -2.7;
+    eval.set_expression("floor(v)");
+    suite.expect_near("sse2_floor_neg", eval.evaluate(), std::floor(value));
+
+    eval.set_expression("ceil(v)");
+    suite.expect_near("sse2_ceil_neg", eval.evaluate(), std::ceil(value));
+
+    eval.set_expression("trunc(v)");
+    suite.expect_near("sse2_trunc_neg", eval.evaluate(), std::trunc(value));
+
+    // Test rounding in expressions
+    double x = 5.5, y = 2.3;
+    eval.bind(x, "x", y, "y");
+    eval.set_expression("floor(x) + ceil(y)");
+    suite.expect_near("sse2_floor_ceil_expr", eval.evaluate(), std::floor(x) + std::ceil(y));
+#else
+    (void)suite;
+#endif
+}
+
+// Test SSE2 expression simplification
+void test_sse2_expression_simplification(TestSuite& suite) {
+#ifdef MEXCE_64
+    mexce::evaluator eval;
+    eval.use_sse2_backend();     // Force SSE2 backend
+    eval.enable_fast_math();     // Enable simplifications
+
+    double x = -1.5, y = 4.0, z = 2.0;
+    eval.bind(x, "x", y, "y", z, "z");
+
+    // Test z/z cancellation: y/z*z should simplify to y
+    eval.set_expression("y/z*z");
+    suite.expect_near("sse2_simplify_cancel_z", eval.evaluate(), y);
+
+    // Check the optimized expression shows simplification
+    std::string opt = eval.get_optimized_expression();
+    suite.expect_true("sse2_simplify_cancel_z_opt", opt.find('z') == std::string::npos);
+
+    // Test constant folding in multiplicative chain
+    eval.set_expression("y*2.0*3.0");
+    suite.expect_near("sse2_simplify_const_fold", eval.evaluate(), y * 6.0);
+
+    // Test mixed additive/multiplicative simplification
+    // 3.123 - y/z*9.123*3.123/5.123*z = 3.123 - y*5.56141...
+    eval.set_expression("3.123 - y/z*9.123*3.123/5.123*z");
+    double expected = 3.123 - y * (9.123 * 3.123 / 5.123);
+    suite.expect_near("sse2_simplify_mixed", eval.evaluate(), expected);
+
+    // Test x+x simplification
+    eval.set_expression("x+x");
+    suite.expect_near("sse2_simplify_x_plus_x", eval.evaluate(), 2.0 * x);
+
+    // Test x*x simplification
+    eval.set_expression("x*x");
+    suite.expect_near("sse2_simplify_x_times_x", eval.evaluate(), x * x);
+#else
+    (void)suite;
+#endif
+}
+
+// Test trunc function (missing from original rounding tests)
+void test_trunc_function(TestSuite& suite) {
+    mexce::evaluator eval;
+
+    double pos_val = 3.75;
+    double neg_val = -3.75;
+    eval.bind(pos_val, "pos_val", neg_val, "neg_val");
+
+    eval.set_expression("trunc(pos_val)");
+    suite.expect_near("trunc_positive", eval.evaluate(), std::trunc(pos_val));
+
+    eval.set_expression("trunc(neg_val)");
+    suite.expect_near("trunc_negative", eval.evaluate(), std::trunc(neg_val));
+
+    // Test trunc at boundaries
+    double half = 0.5;
+    eval.bind(half, "half");
+    eval.set_expression("trunc(half)");
+    suite.expect_near("trunc_half", eval.evaluate(), 0.0);
+
+    half = -0.5;
+    eval.set_expression("trunc(half)");
+    suite.expect_near("trunc_neg_half", eval.evaluate(), 0.0);
+}
+
+// Test options API coverage (get_options, set_options, set_use_libm)
+void test_options_api(TestSuite& suite) {
+    mexce::evaluator eval;
+
+    // Test get_options returns current state
+    const mexce::options& opts_ref = eval.get_options();
+    suite.expect_true("get_options_fast_math_default", opts_ref.fast_math == false);
+    suite.expect_true("get_options_prefer_x87_default", opts_ref.prefer_x87 == false);
+
+    // Test set_options
+    mexce::options new_opts;
+    new_opts.fast_math = true;
+    new_opts.prefer_x87 = true;
+    new_opts.enable_cse = true;
+    eval.set_options(new_opts);
+
+    const mexce::options& updated = eval.get_options();
+    suite.expect_true("set_options_fast_math", updated.fast_math == true);
+    suite.expect_true("set_options_prefer_x87", updated.prefer_x87 == true);
+    suite.expect_true("set_options_enable_cse", updated.enable_cse == true);
+
+    // Test set_use_libm convenience function
+    mexce::options libm_opts;
+    libm_opts.set_use_libm(false);
+    suite.expect_true("set_use_libm_sin", libm_opts.use_libm_sin == false);
+    suite.expect_true("set_use_libm_cos", libm_opts.use_libm_cos == false);
+    suite.expect_true("set_use_libm_tan", libm_opts.use_libm_tan == false);
+    suite.expect_true("set_use_libm_exp", libm_opts.use_libm_exp == false);
+    suite.expect_true("set_use_libm_log", libm_opts.use_libm_log == false);
+    suite.expect_true("set_use_libm_log10", libm_opts.use_libm_log10 == false);
+    suite.expect_true("set_use_libm_log2", libm_opts.use_libm_log2 == false);
+    suite.expect_true("set_use_libm_logb", libm_opts.use_libm_logb == false);
+    suite.expect_true("set_use_libm_ylog2", libm_opts.use_libm_ylog2 == false);
+    suite.expect_true("set_use_libm_generic_pow", libm_opts.use_libm_generic_pow == false);
+
+    // Test set_use_libm(true) sets all back
+    libm_opts.set_use_libm(true);
+    suite.expect_true("set_use_libm_true_sin", libm_opts.use_libm_sin == true);
+    suite.expect_true("set_use_libm_true_cos", libm_opts.use_libm_cos == true);
+    suite.expect_true("set_use_libm_true_tan", libm_opts.use_libm_tan == true);
+
+    // Verify options affect compilation by testing prefer_x87
+    mexce::evaluator eval2;
+    double x = 2.0;
+    eval2.bind(x, "x");
+    eval2.use_x87_backend();
+    eval2.set_expression("x + 1");
+    suite.expect_near("options_affect_compilation", eval2.evaluate(), 3.0);
+}
+
+// Test Common Subexpression Elimination (CSE)
+// Note: CSE uses x87 store instructions, so must use x87 backend
+void test_cse_coverage(TestSuite& suite) {
+    mexce::evaluator eval;
+    eval.enable_cse();
+    eval.use_x87_backend();  // CSE requires x87 backend
+
+    double a = 2.0, b = 3.0, c = 4.0;
+    eval.bind(a, "a", b, "b", c, "c");
+
+    // CSE with transcendental functions (won't be absorbed by ASMD)
+    eval.set_expression("sin(a) + sin(a) * 2");
+    double expected = std::sin(a) + std::sin(a) * 2;
+    suite.expect_near("cse_sin", eval.evaluate(), expected);
+
+    // More complex CSE case
+    eval.set_expression("cos(b) + cos(b) + cos(b)");
+    expected = std::cos(b) * 3;
+    suite.expect_near("cse_cos", eval.evaluate(), expected);
+
+    // CSE with nested expression
+    eval.set_expression("exp(a+b) * exp(a+b)");
+    expected = std::exp(a + b) * std::exp(a + b);
+    suite.expect_near("cse_exp", eval.evaluate(), expected);
+}
+
+// Test SSE2 neg and abs operations (covers xorpd/andpd emit functions)
+void test_sse2_neg_abs(TestSuite& suite) {
+#ifdef MEXCE_64
+    mexce::evaluator eval;
+    eval.use_sse2_backend();  // Force SSE2
+
+    double x = 5.0;
+    eval.bind(x, "x");
+
+    // Test negation
+    eval.set_expression("neg(x)");
+    suite.expect_near("sse2_neg_positive", eval.evaluate(), -5.0);
+
+    x = -3.0;
+    eval.set_expression("neg(x)");
+    suite.expect_near("sse2_neg_negative", eval.evaluate(), 3.0);
+
+    // Test absolute value
+    eval.set_expression("abs(x)");
+    suite.expect_near("sse2_abs_negative", eval.evaluate(), 3.0);
+
+    x = 7.0;
+    eval.set_expression("abs(x)");
+    suite.expect_near("sse2_abs_positive", eval.evaluate(), 7.0);
+
+    // Combined neg and abs
+    x = -4.0;
+    eval.set_expression("abs(neg(x))");
+    suite.expect_near("sse2_abs_neg", eval.evaluate(), 4.0);
+#else
+    (void)suite;
+#endif
+}
+
+// Test SSE2 log10 and log2 functions
+void test_sse2_log_functions(TestSuite& suite) {
+#ifdef MEXCE_64
+    mexce::evaluator eval;
+    eval.use_sse2_backend();  // Force SSE2
+
+    double x = 100.0;
+    eval.bind(x, "x");
+
+    eval.set_expression("log10(x)");
+    suite.expect_near("sse2_log10", eval.evaluate(), std::log10(x));
+
+    x = 8.0;
+    eval.set_expression("log2(x)");
+    suite.expect_near("sse2_log2", eval.evaluate(), std::log2(x));
+
+    // Test with different values
+    x = 1000.0;
+    eval.set_expression("log10(x)");
+    suite.expect_near("sse2_log10_1000", eval.evaluate(), 3.0);
+
+    x = 16.0;
+    eval.set_expression("log2(x)");
+    suite.expect_near("sse2_log2_16", eval.evaluate(), 4.0);
+#else
+    (void)suite;
+#endif
+}
+
+// Test different numeric data types for x87 load instructions
+void test_numeric_data_types(TestSuite& suite) {
+    mexce::evaluator eval;
+    eval.use_x87_backend();  // Force x87 to test type-specific loads
+
+    // Test all supported numeric types
+    double d_val = 3.14159;
+    float f_val = 2.71828f;
+    int16_t i16_val = 100;
+    int32_t i32_val = 1000;
+    int64_t i64_val = 10000;
+
+    eval.bind(d_val, "d", f_val, "f", i16_val, "i16", i32_val, "i32", i64_val, "i64");
+
+    // Test double (M64FP)
+    eval.set_expression("d");
+    suite.expect_near("x87_load_m64fp", eval.evaluate(), d_val);
+
+    // Test float (M32FP)
+    eval.set_expression("f");
+    suite.expect_near("x87_load_m32fp", eval.evaluate(), static_cast<double>(f_val));
+
+    // Test int16_t (M16INT)
+    eval.set_expression("i16");
+    suite.expect_near("x87_load_m16int", eval.evaluate(), static_cast<double>(i16_val));
+
+    // Test int32_t (M32INT)
+    eval.set_expression("i32");
+    suite.expect_near("x87_load_m32int", eval.evaluate(), static_cast<double>(i32_val));
+
+    // Test int64_t (M64INT)
+    eval.set_expression("i64");
+    suite.expect_near("x87_load_m64int", eval.evaluate(), static_cast<double>(i64_val));
+
+    // Test arithmetic with mixed types
+    eval.set_expression("d + f + i16 + i32 + i64");
+    double expected = d_val + static_cast<double>(f_val) + i16_val + i32_val + i64_val;
+    suite.expect_near("x87_mixed_types", eval.evaluate(), expected);
+}
+
 } // namespace
 
 int main() {
@@ -764,6 +1053,14 @@ int main() {
     test_executable_buffer_failure_paths(suite);
 #endif
     test_fpu_stack_overflow(suite);
+    test_sse2_rounding_functions(suite);
+    test_sse2_expression_simplification(suite);
+    test_trunc_function(suite);
+    test_options_api(suite);
+    test_cse_coverage(suite);
+    test_sse2_neg_abs(suite);
+    test_sse2_log_functions(suite);
+    test_numeric_data_types(suite);
 
     if (!suite.failures.empty()) {
         std::cerr << "mexce unit tests failed (" << suite.failures.size() << ")" << std::endl;
