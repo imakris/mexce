@@ -2340,15 +2340,13 @@ inline Function Exp()
     uint8_t code[] = {
         0xd9, 0xea,                                 // fldl2e
         0xde, 0xc9,                                 // fmulp       st(1), st
-        0xd9, 0xc0,                                 // fld st
-        0xd9, 0xfc,                                 // frndint
-        0xd8, 0xe1,                                 // fsub        st, st(1)
-        0xd9, 0xf0,                                 // f2xm1
         0xd9, 0xe8,                                 // fld1
+        0xd9, 0xc1,                                 // fld         st(1)
+        0xd9, 0xf8,                                 // fprem
+        0xd9, 0xf0,                                 // f2xm1
         0xde, 0xc1,                                 // faddp       st(1), st
         0xd9, 0xfd,                                 // fscale
         0xdd, 0xd9,                                 // fstp        st(1)
-        0xdd, 0xd9                                  // fstp        st(1)
     };
     return Function(0, "exp", 1, 1, sizeof(code), code);
 #endif
@@ -2363,17 +2361,14 @@ inline Function Logb()
     return Function(0, "logb", 2, 1, s.buf.size(), s.buf.data());
 #else
     uint8_t code[] = {
-        0xd9, 0xc9,                                 // fxch
-        0xd9, 0xc0,                                 // fld         st
-        0xd9, 0xea,                                 // fldl2e
-        0xde, 0xc9,                                 // fmulp       st(1), st
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1,                                 // fyl2x
-        0xd9, 0xc2,                                 // fld         st(2)
-        0xd9, 0xea,                                 // fldl2e
-        0xde, 0xc9,                                 // fmulp       st(1), st
+        0xd9, 0xc9,                                 // fxch        st(1)
+        0xd9, 0xe8,                                 // fld1
+        0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1,                                 // fyl2x
-        0xde, 0xf1,                                 // fdivp       st(1), st
-        0xdd, 0xd9                                  // fstp        st(1)
+        0xde, 0xf9                                  // fdivp       st(1), st
     };
     return Function(0, "logb", 2, 1, sizeof(code), code);
 #endif
