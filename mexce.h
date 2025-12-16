@@ -157,7 +157,51 @@
 namespace mexce {
 
 
+// Forward declarations
 class evaluator;
+
+// --- Runtime-configurable options ---
+//
+// These options can be set at runtime before calling set_expression().
+// Changes take effect on the next expression compilation.
+struct options {
+    // Algebraic simplifications (x-x→0, x/x→1, 0*x→0) ignoring IEEE corner cases
+    // Note: In strict IEEE mode, x-x is NaN when x is NaN; enable fast_math to simplify to 0
+    bool fast_math = false;
+
+    // Common subexpression elimination
+    bool enable_cse = false;
+
+    // Force x87 backend even when SSE2 is available
+    bool prefer_x87 = false;
+
+    // Use libm functions instead of inline x87 assembly (currently compile-time only)
+    // These are included for completeness; runtime switching requires recompilation
+    bool use_libm_sin = true;
+    bool use_libm_cos = true;
+    bool use_libm_tan = true;
+    bool use_libm_exp = true;
+    bool use_libm_log = true;
+    bool use_libm_log10 = true;
+    bool use_libm_log2 = true;
+    bool use_libm_logb = true;
+    bool use_libm_ylog2 = true;
+    bool use_libm_generic_pow = true;
+
+    // Convenience: set all libm options at once
+    void set_use_libm(bool value) {
+        use_libm_sin = value;
+        use_libm_cos = value;
+        use_libm_tan = value;
+        use_libm_exp = value;
+        use_libm_log = value;
+        use_libm_log10 = value;
+        use_libm_log2 = value;
+        use_libm_logb = value;
+        use_libm_ylog2 = value;
+        use_libm_generic_pow = value;
+    }
+};
 
 
 namespace impl {
@@ -240,7 +284,25 @@ public:
      */
     std::string get_byte_representation() const;
 
+    /**
+     * @brief Get the current options.
+     * Options affect expression compilation; changes take effect on next set_expression().
+     */
+    const options& get_options() const { return m_options; }
+
+    /**
+     * @brief Set options. Must be called before set_expression() to take effect.
+     */
+    void set_options(const options& opts) { m_options = opts; }
+
+    /**
+     * @brief Get mutable reference to options for direct modification.
+     * Example: eval.opts().fast_math = true;
+     */
+    options& opts() { return m_options; }
+
 private:
+    options                 m_options;
 
     bool                    is_constant_expression      = false;
     double                  constant_expression_value   = 0.0;
@@ -2938,15 +3000,20 @@ inline bool sse2_needs_libm_calls(const impl::elist_const_it_t first, const impl
 }
 
 // Check if an expression list can be fully compiled with the SSE2 backend
-inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::elist_const_it_t last)
+inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::elist_const_it_t last, bool prefer_x87 = false)
 {
     using namespace impl;
 
-#if MEXCE_PREFER_X87 || !defined(MEXCE_64)
-    // SSE2 backend is only available on x64 when not explicitly preferring x87
-    (void)first; (void)last;
+#ifndef MEXCE_64
+    // SSE2 backend is only available on x64
+    (void)first; (void)last; (void)prefer_x87;
     return false;
 #else
+    // Runtime check for x87 preference
+    if (prefer_x87) {
+        (void)first; (void)last;
+        return false;
+    }
     // Estimate stack depth required - SSE2 uses XMM0-XMM7 (8 registers max)
     int max_depth = 0;
     int current_depth = 0;
@@ -4837,16 +4904,16 @@ void evaluator::set_expression(std::string e)
     // link functions to their arguments (1)
     link_arguments(m_elist);
 
-#if MEXCE_ENABLE_CSE
     // Run Common Subexpression Elimination (CSE)
     // This must run before destructive optimizers (asmd, pow) to catch
     // identical subtrees like div(2.2, y).
-    run_cse(this, m_elist);
-#endif
+    if (m_options.enable_cse) {
+        run_cse(this, m_elist);
+    }
 
     // Check if the expression is SSE2-compatible BEFORE running optimizers.
     // If so, we skip the asmd_optimizer which would generate x87 code.
-    bool skip_asmd_optimizer = is_sse2_compatible(m_elist.begin(), m_elist.end());
+    bool skip_asmd_optimizer = is_sse2_compatible(m_elist.begin(), m_elist.end(), m_options.prefer_x87);
 
     // choose more suitable functions, where applicable
     for (auto y = m_elist.begin(); y != m_elist.end(); ) {
@@ -4891,10 +4958,9 @@ void evaluator::set_expression(std::string e)
             }
 
             // Fast-math algebraic simplifications
-            // When MEXCE_FAST_MATH is enabled, we apply aggressive simplifications
+            // When fast_math is enabled, we apply aggressive simplifications
             // that may not preserve IEEE semantics for special values (NaN, Inf, -0.0)
-#if MEXCE_FAST_MATH
-            if (f->num_args == 2) {
+            if (m_options.fast_math && f->num_args == 2) {
                 // Check for self-canceling patterns: x - x → 0, x / x → 1
                 if (f->name == "sub" || f->name == "div") {
                     auto arg0_chunk = get_dependent_chunk(f->args[0]);
@@ -4933,7 +4999,6 @@ void evaluator::set_expression(std::string e)
                     }
                 }
             }
-#endif
 
             // Skip asmd_optimizer for SSE2-compatible expressions to preserve
             // the function nodes in their original form for SSE2 code generation.
@@ -4969,7 +5034,7 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 
 #ifdef MEXCE_64
     // Check if we can use the faster SSE2 backend
-    bool use_sse2 = is_sse2_compatible(first, last);
+    bool use_sse2 = is_sse2_compatible(first, last, m_options.prefer_x87);
 
     if (use_sse2) {
         // SSE2 backend: simpler prologue/epilogue since result is already in xmm0

@@ -470,13 +470,12 @@ int main(int argc, char* argv[])
             update_bin_counts(rec.ulp_compiler_vs_reference, exact_zero_count_comp_ref, bin_counts_comp_ref, comparisons_comp_ref);
         }
 
-        const double compile_start = mexce::get_wtime();
+        mexce::stopwatch compile_timer;
         try {
             eval.set_expression(expr);
             rec.optimized_expr = eval.get_optimized_expression();
             rec.bytes_expr = eval.get_byte_representation();
-            const double compile_end = mexce::get_wtime();
-            rec.compile_ns = (uint64_t)((compile_end - compile_start) * 1e9 + 0.5L);
+            rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
             rec.compiled = true;
             ++compiled_count;
             total_compile_duration_ns += (long long)rec.compile_ns;
@@ -486,8 +485,7 @@ int main(int argc, char* argv[])
             compile_times.push_back(rec.compile_ns);
         }
         catch (const std::exception& e) {
-            const double compile_end = mexce::get_wtime();
-            rec.compile_ns = (uint64_t)((compile_end - compile_start) * 1e9 + 0.5L);
+            rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
             ++compile_fail_count;
             rec.error = std::string("compile: ") + e.what();
             records.push_back(rec);
@@ -530,12 +528,11 @@ int main(int argc, char* argv[])
 
         timing_samples.clear();
         for (int trial = 0; trial < timing_trials; ++trial) {
-            const double t0 = mexce::get_wtime();
+            mexce::stopwatch timer;
             for (std::size_t i = 0; i < iterations_u; ++i) {
                 (void)eval.evaluate();
             }
-            const double t1 = mexce::get_wtime();
-            timing_samples.push_back((long long)((t1 - t0) * 1e9));
+            timing_samples.push_back(timer.elapsed_nanoseconds());
         }
         std::nth_element(timing_samples.begin(),
                          timing_samples.begin() + timing_samples.size() / 2,
@@ -550,12 +547,11 @@ int main(int argc, char* argv[])
         if (rec.native_eval_ok) {
             native_timing_samples.clear();
             for (int trial = 0; trial < timing_trials; ++trial) {
-                const double tn0 = mexce::get_wtime();
+                mexce::stopwatch timer;
                 for (std::size_t i = 0; i < iterations_u; ++i) {
                     (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
                 }
-                const double tn1 = mexce::get_wtime();
-                native_timing_samples.push_back((long long)((tn1 - tn0) * 1e9));
+                native_timing_samples.push_back(timer.elapsed_nanoseconds());
             }
             std::nth_element(native_timing_samples.begin(),
                              native_timing_samples.begin() + native_timing_samples.size() / 2,
