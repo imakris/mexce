@@ -690,6 +690,21 @@ Token_type get_infix_rank(char infix_op)
 #   define MEXCE_PREFER_X87 0
 #endif
 
+// --- Fast-math mode ---
+//
+// When MEXCE_FAST_MATH is enabled, algebraic simplifications are applied more
+// aggressively, potentially ignoring IEEE floating-point corner cases:
+// - x - x → 0 (even when x is NaN)
+// - a * x / x → a (even when x is 0)
+// - 0 * x → 0 (even when x is inf or NaN)
+// - x / x → 1 (even when x is 0, inf, or NaN)
+//
+// This can speed up expression evaluation by eliminating redundant operations,
+// but may produce different results for special values (NaN, Inf, -0.0).
+#ifndef MEXCE_FAST_MATH
+#   define MEXCE_FAST_MATH 0
+#endif
+
 // --- SSE2 helper constants for neg/abs ---
 // These are 128-bit aligned constants used by xorpd/andpd for sign manipulation.
 // sign_mask: flip sign bit (for negate)
@@ -4874,6 +4889,51 @@ void evaluator::set_expression(std::string e)
                     continue;
                 }
             }
+
+            // Fast-math algebraic simplifications
+            // When MEXCE_FAST_MATH is enabled, we apply aggressive simplifications
+            // that may not preserve IEEE semantics for special values (NaN, Inf, -0.0)
+#if MEXCE_FAST_MATH
+            if (f->num_args == 2) {
+                // Check for self-canceling patterns: x - x → 0, x / x → 1
+                if (f->name == "sub" || f->name == "div") {
+                    auto arg0_chunk = get_dependent_chunk(f->args[0]);
+                    auto arg1_chunk = get_dependent_chunk(f->args[1]);
+                    elist_t chunk0(arg0_chunk.first, arg0_chunk.second);
+                    elist_t chunk1(arg1_chunk.first, arg1_chunk.second);
+                    elist_comparison comp;
+                    // Two chunks are equal if neither is less than the other
+                    if (!comp(chunk0, chunk1) && !comp(chunk1, chunk0)) {
+                        // x - x → 0, x / x → 1
+                        double result = (f->name == "sub") ? 0.0 : 1.0;
+                        // Erase both argument subtrees and replace function with constant
+                        m_elist.erase(arg1_chunk.first, arg1_chunk.second);
+                        // Re-get arg0 chunk after erasing arg1 (iterators may have shifted)
+                        arg0_chunk = get_dependent_chunk(f->args[0]);
+                        m_elist.erase(arg0_chunk.first, arg0_chunk.second);
+                        *y = Element(make_intermediate_constant(this, result));
+                        y = y_next;
+                        continue;
+                    }
+                }
+                // Check for multiplication by zero: 0 * x → 0, x * 0 → 0
+                if (f->name == "mul") {
+                    bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
+                    bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
+                    if (arg0_is_zero || arg1_is_zero) {
+                        // Erase both argument subtrees and replace function with 0
+                        auto arg0_chunk = get_dependent_chunk(f->args[0]);
+                        auto arg1_chunk = get_dependent_chunk(f->args[1]);
+                        m_elist.erase(arg1_chunk.first, arg1_chunk.second);
+                        arg0_chunk = get_dependent_chunk(f->args[0]);
+                        m_elist.erase(arg0_chunk.first, arg0_chunk.second);
+                        *y = Element(make_intermediate_constant(this, 0.0));
+                        y = y_next;
+                        continue;
+                    }
+                }
+            }
+#endif
 
             // Skip asmd_optimizer for SSE2-compatible expressions to preserve
             // the function nodes in their original form for SSE2 code generation.
