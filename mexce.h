@@ -2879,8 +2879,8 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
 // XMM0 is the bottom of the stack, and we use XMM0-XMM7 for up to 8 levels.
 // This matches the x64 ABI where XMM0 is used for return values.
 
-// Check if a function name is supported by the SSE2 backend
-inline bool is_sse2_supported_function(const string& fn_name)
+// Check if a function is a direct SSE2 arithmetic operation
+inline bool is_sse2_direct_function(const string& fn_name)
 {
     // Basic arithmetic operations that SSE2 can handle directly
     static const std::set<string> supported = {
@@ -2889,6 +2889,38 @@ inline bool is_sse2_supported_function(const string& fn_name)
     return supported.find(fn_name) != supported.end();
 }
 
+// Check if a function can be called via libm in SSE2 mode
+// Note: pow is NOT included because pow_optimizer handles special cases
+// (negative bases, nested powers, integer exponents) that std::pow doesn't
+inline bool is_sse2_libm_function(const string& fn_name)
+{
+    // Transcendental and other functions that we call via libm
+    static const std::set<string> libm_funcs = {
+        "sin", "cos", "tan",
+        "exp", "ln", "log", "log10", "log2",
+        "sqrt", "logb"
+    };
+    return libm_funcs.find(fn_name) != libm_funcs.end();
+}
+
+// Check if a function name is supported by the SSE2 backend (either direct or via libm)
+inline bool is_sse2_supported_function(const string& fn_name)
+{
+    return is_sse2_direct_function(fn_name) || is_sse2_libm_function(fn_name);
+}
+
+
+// Check if an expression list contains any libm-callable functions
+inline bool sse2_needs_libm_calls(const impl::elist_const_it_t first, const impl::elist_const_it_t last)
+{
+    using namespace impl;
+    for (auto it = first; it != last; ++it) {
+        if (it->type == Element_type::CFUNC && is_sse2_libm_function(it->f->name)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 // Check if an expression list can be fully compiled with the SSE2 backend
 inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::elist_const_it_t last)
@@ -2906,6 +2938,11 @@ inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::e
 
     for (auto it = first; it != last; ++it) {
         if (it->type == Element_type::CFUNC) {
+            // Optimized functions (from pow_optimizer etc.) have embedded x87 code
+            // and a non-empty debug_desc. These cannot be handled by SSE2.
+            if (!it->f->debug_desc.empty()) {
+                return false;
+            }
             if (!is_sse2_supported_function(it->f->name)) {
                 return false;
             }
@@ -3113,6 +3150,170 @@ inline void emit_sse2_xorpd_self(impl::mexce_charstream& s, int reg)
 }
 
 
+// Emit movsd [rsp+offset], xmm[reg] - save XMM register to stack
+inline void emit_sse2_save_to_stack(impl::mexce_charstream& s, int reg, int offset)
+{
+#ifdef MEXCE_64
+    // movsd [rsp+offset], xmm[reg]
+    // F2 [REX] 0F 11 ModRM SIB disp8/disp32
+    uint8_t rex = 0;
+    if (reg >= 8) rex |= 0x44;  // REX.R
+    int reg_enc = reg & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x11;
+    if (offset == 0) {
+        s < (uint8_t)(0x04 + reg_enc * 8) < 0x24;  // [rsp]
+    } else if (offset <= 127) {
+        s < (uint8_t)(0x44 + reg_enc * 8) < 0x24 < (uint8_t)offset;  // [rsp+disp8]
+    } else {
+        s < (uint8_t)(0x84 + reg_enc * 8) < 0x24;  // [rsp+disp32]
+        s << (uint32_t)offset;
+    }
+#else
+    (void)s; (void)reg; (void)offset;
+#endif
+}
+
+
+// Emit movsd xmm[reg], [rsp+offset] - restore XMM register from stack
+inline void emit_sse2_load_from_stack(impl::mexce_charstream& s, int reg, int offset)
+{
+#ifdef MEXCE_64
+    // movsd xmm[reg], [rsp+offset]
+    // F2 [REX] 0F 10 ModRM SIB disp8/disp32
+    uint8_t rex = 0;
+    if (reg >= 8) rex |= 0x44;  // REX.R
+    int reg_enc = reg & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x10;
+    if (offset == 0) {
+        s < (uint8_t)(0x04 + reg_enc * 8) < 0x24;  // [rsp]
+    } else if (offset <= 127) {
+        s < (uint8_t)(0x44 + reg_enc * 8) < 0x24 < (uint8_t)offset;  // [rsp+disp8]
+    } else {
+        s < (uint8_t)(0x84 + reg_enc * 8) < 0x24;  // [rsp+disp32]
+        s << (uint32_t)offset;
+    }
+#else
+    (void)s; (void)reg; (void)offset;
+#endif
+}
+
+
+// Emit sqrtsd xmm[dst], xmm[src] - square root
+inline void emit_sse2_sqrtsd(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // F2 [REX] 0F 51 ModRM
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;
+    if (src >= 8) rex |= 0x41;
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x51 < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+
+// Emit a unary libm call in SSE2 mode
+// Argument is at xmm[depth-1], result will be at xmm[depth-1]
+// Saves and restores xmm registers 0 to depth-2 around the call
+inline void emit_sse2_libm_unary_call(impl::mexce_charstream& s, void* fn_ptr, int depth)
+{
+#ifdef MEXCE_64
+    const int arg_reg = depth - 1;
+    const int save_start_offset = 48;  // [rsp+48] onwards for XMM saves
+
+    // Save XMM0 to XMM[arg_reg-1] to stack
+    for (int i = 0; i < arg_reg; ++i) {
+        emit_sse2_save_to_stack(s, i, save_start_offset + i * 8);
+    }
+
+    // Move argument to XMM0 if not already there
+    if (arg_reg != 0) {
+        emit_sse2_mov_reg_reg(s, 0, arg_reg);
+    }
+
+    // Call the function
+    s < 0x48 < 0xB8;  // mov rax, imm64
+    s << fn_ptr;
+    s < 0xFF < 0xD0;  // call rax
+
+    // Move result from XMM0 to target register
+    if (arg_reg != 0) {
+        emit_sse2_mov_reg_reg(s, arg_reg, 0);
+    }
+
+    // Restore XMM0 to XMM[arg_reg-1] from stack
+    for (int i = 0; i < arg_reg; ++i) {
+        emit_sse2_load_from_stack(s, i, save_start_offset + i * 8);
+    }
+#else
+    (void)s; (void)fn_ptr; (void)depth;
+#endif
+}
+
+
+// Emit a binary libm call in SSE2 mode
+// Arguments are at xmm[depth-2] (first arg) and xmm[depth-1] (second arg)
+// Result will be at xmm[depth-2], depth becomes depth-1
+// Saves and restores xmm registers 0 to depth-3 around the call
+inline void emit_sse2_libm_binary_call(impl::mexce_charstream& s, void* fn_ptr, int depth)
+{
+#ifdef MEXCE_64
+    const int arg1_reg = depth - 2;  // First argument (goes to XMM0)
+    const int arg2_reg = depth - 1;  // Second argument (goes to XMM1)
+    const int save_start_offset = 48;  // [rsp+48] onwards for XMM saves
+
+    // Save XMM0 to XMM[arg1_reg-1] to stack (registers below arguments)
+    for (int i = 0; i < arg1_reg; ++i) {
+        emit_sse2_save_to_stack(s, i, save_start_offset + i * 8);
+    }
+
+    // Move arguments to XMM0 and XMM1
+    // Be careful about order to avoid clobbering
+    if (arg1_reg == 1) {
+        // arg1 is in XMM1, arg2 is in XMM2
+        // Move XMM2 to XMM1 first, then XMM1 to XMM0
+        emit_sse2_mov_reg_reg(s, 1, arg2_reg);
+        emit_sse2_mov_reg_reg(s, 0, arg1_reg);  // arg1_reg is still 1, but we already saved it
+    } else if (arg1_reg == 0) {
+        // arg1 is in XMM0 (already correct), arg2 is in XMM1 (already correct or not)
+        if (arg2_reg != 1) {
+            emit_sse2_mov_reg_reg(s, 1, arg2_reg);
+        }
+    } else {
+        // arg1_reg >= 2, both need to move
+        emit_sse2_mov_reg_reg(s, 0, arg1_reg);
+        emit_sse2_mov_reg_reg(s, 1, arg2_reg);
+    }
+
+    // Call the function
+    s < 0x48 < 0xB8;  // mov rax, imm64
+    s << fn_ptr;
+    s < 0xFF < 0xD0;  // call rax
+
+    // Move result from XMM0 to target register (arg1_reg position)
+    if (arg1_reg != 0) {
+        emit_sse2_mov_reg_reg(s, arg1_reg, 0);
+    }
+
+    // Restore XMM0 to XMM[arg1_reg-1] from stack
+    for (int i = 0; i < arg1_reg; ++i) {
+        emit_sse2_load_from_stack(s, i, save_start_offset + i * 8);
+    }
+#else
+    (void)s; (void)fn_ptr; (void)depth;
+#endif
+}
+
+
 // Compile an expression list using SSE2 instructions (x64 only)
 // Uses XMM registers as a simulated stack: XMM0 = bottom, XMM7 = top
 #ifdef MEXCE_64
@@ -3231,6 +3432,37 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 else if (fn == "abs") {
                     // xmm[depth-1] = |xmm[depth-1]| via AND with abs mask
                     emit_sse2_andpd_mem(code_buffer, depth - 1, (void*)masks.abs_mask);
+                }
+                // --- libm unary functions ---
+                else if (fn == "sin") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::sin), depth);
+                }
+                else if (fn == "cos") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::cos), depth);
+                }
+                else if (fn == "tan") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::tan), depth);
+                }
+                else if (fn == "exp") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::exp), depth);
+                }
+                else if (fn == "ln" || fn == "log") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log), depth);
+                }
+                else if (fn == "log10") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log10), depth);
+                }
+                else if (fn == "log2") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log2), depth);
+                }
+                else if (fn == "sqrt") {
+                    // sqrt has a direct SSE2 instruction
+                    emit_sse2_sqrtsd(code_buffer, depth - 1, depth - 1);
+                }
+                // --- libm binary functions ---
+                else if (fn == "logb") {
+                    emit_sse2_libm_binary_call(code_buffer, (void*)&mexce_libm_logb, depth);
+                    --depth;
                 }
                 // Note: CSE store suffix is not emitted in SSE2 path as CSE uses x87 instructions
                 break;
@@ -4644,10 +4876,12 @@ void evaluator::set_expression(std::string e)
             }
 
             // Skip asmd_optimizer for SSE2-compatible expressions to preserve
-            // the function nodes in their original form for SSE2 code generation
+            // the function nodes in their original form for SSE2 code generation.
+            // Note: pow_optimizer is always run because it handles special cases
+            // (negative bases, nested powers) that std::pow() doesn't handle correctly.
             if (f->optimizer != 0) {
                 if (skip_asmd_optimizer && f->optimizer == asmd_optimizer) {
-                    // Don't run asmd_optimizer, SSE2 backend will handle these
+                    // Don't run asmd_optimizer, SSE2 backend will handle add/sub/mul/div directly
                 }
                 else {
                     f->optimizer(y, this, &m_elist);
@@ -4680,25 +4914,36 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     if (use_sse2) {
         // SSE2 backend: simpler prologue/epilogue since result is already in xmm0
         mexce_charstream code_buffer;
+        bool needs_libm = sse2_needs_libm_calls(first, last);
 
-        // Reserve buffer space
+        // Reserve buffer space (more if libm calls are present)
         {
             size_t n = 0;
             for (auto it = first; it != last; ++it) {
                 ++n;
             }
-            code_buffer.buf.reserve(64 + n * 16);
+            code_buffer.buf.reserve((needs_libm ? 128 : 64) + n * 24);
         }
 
-        // Minimal prologue: reserve 8 bytes for scratch space (int->double conversion)
-        // and keep 16-byte stack alignment.
-        code_buffer < 0x48 < 0x83 < 0xec < 0x08;    // sub  rsp, 8
+        if (needs_libm) {
+            // Prologue for SSE2 with libm calls:
+            // 104 bytes = 8 scratch + 32 shadow space + 56 XMM save area + 8 alignment
+            code_buffer < 0x48 < 0x83 < 0xec < 0x68;    // sub  rsp, 104
+        } else {
+            // Minimal prologue: reserve 8 bytes for scratch space (int->double conversion)
+            // and keep 16-byte stack alignment.
+            code_buffer < 0x48 < 0x83 < 0xec < 0x08;    // sub  rsp, 8
+        }
 
         // Generate SSE2 code
         compile_elist_sse2(code_buffer, first, last);
 
         // SSE2 return: result is already in xmm0, just restore stack and return
-        code_buffer < 0x48 < 0x83 < 0xc4 < 0x08;    // add  rsp, 8
+        if (needs_libm) {
+            code_buffer < 0x48 < 0x83 < 0xc4 < 0x68;    // add  rsp, 104
+        } else {
+            code_buffer < 0x48 < 0x83 < 0xc4 < 0x08;    // add  rsp, 8
+        }
         code_buffer < 0xc3;                          // ret
 
         m_buffer_size = code_buffer.buf.size();
