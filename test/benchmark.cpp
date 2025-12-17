@@ -404,10 +404,8 @@ int main(int argc, char* argv[])
 
     long long total_duration_ns = 0;
     size_t benchmarked_functions = 0;
-    long double sum_avg_ns = 0.0L;
     long long total_native_duration_ns = 0;
     size_t benchmarked_native_functions = 0;
-    long double sum_native_avg_ns = 0.0L;
 
     const std::size_t iterations_u = static_cast<std::size_t>(iterations);
     const int timing_trials =
@@ -541,7 +539,6 @@ int main(int argc, char* argv[])
         rec.avg_ns = (uint64_t)((long double)rec.dur_ns / (long double)iterations_u + 0.5L);
 
         total_duration_ns += rec.dur_ns;
-        sum_avg_ns += (long double)rec.avg_ns;
         ++benchmarked_functions;
 
         if (rec.native_eval_ok) {
@@ -559,7 +556,6 @@ int main(int argc, char* argv[])
             rec.native_dur_ns = native_timing_samples[native_timing_samples.size() / 2];
             rec.native_avg_ns = (uint64_t)((long double)rec.native_dur_ns / (long double)iterations_u + 0.5L);
             total_native_duration_ns += rec.native_dur_ns;
-            sum_native_avg_ns += (long double)rec.native_avg_ns;
             ++benchmarked_native_functions;
         }
 
@@ -824,7 +820,12 @@ int main(int argc, char* argv[])
             mexce_column.values[3] = format_ns((uint64_t)total_compile_duration_ns);
         }
         if (benchmarked_functions > 0) {
-            const uint64_t avg_per_func_ns = (uint64_t)(sum_avg_ns / (long double)benchmarked_functions + 0.5L);
+            // Compute average time per single function call from totals
+            // avg = total_time / (num_functions * iterations_per_function)
+            const uint64_t total_calls = (uint64_t)benchmarked_functions * (uint64_t)iterations;
+            const uint64_t avg_per_func_ns = (total_calls > 0)
+                ? (uint64_t)((double)total_duration_ns / (double)total_calls + 0.5)
+                : 0;
             mexce_column.values[2] = format_ns(avg_per_func_ns);
             mexce_column.values[4] = format_ns((uint64_t)total_duration_ns);
         }
@@ -837,7 +838,11 @@ int main(int argc, char* argv[])
         compiler_column.values.assign(summary_rows.size(), "-");
         compiler_column.values[0] = std::to_string(benchmarked_native_functions);
         if (benchmarked_native_functions > 0) {
-            const uint64_t avg_native_ns = (uint64_t)(sum_native_avg_ns / (long double)benchmarked_native_functions + 0.5L);
+            // Compute average time per single function call from totals
+            const uint64_t total_native_calls = (uint64_t)benchmarked_native_functions * (uint64_t)iterations;
+            const uint64_t avg_native_ns = (total_native_calls > 0)
+                ? (uint64_t)((double)total_native_duration_ns / (double)total_native_calls + 0.5)
+                : 0;
             compiler_column.values[2] = format_ns(avg_native_ns);
             compiler_column.values[4] = format_ns((uint64_t)total_native_duration_ns);
         }
