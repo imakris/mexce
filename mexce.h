@@ -3257,6 +3257,79 @@ inline void emit_sse2_divsd(impl::mexce_charstream& s, int dst, int src)
 }
 
 
+// --- RIP-relative memory operand variants for arithmetic ---
+// These emit instructions like "addsd xmm, [rip+disp32]" with placeholder displacement
+// Returns the patch offset for the displacement
+
+inline size_t emit_sse2_addsd_rip_placeholder(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // addsd xmm[reg], [rip+disp32]: F2 [REX] 0F 58 ModRM disp32
+    s < 0xF2;
+    if (reg >= 8) s < 0x44;
+    s < 0x0F < 0x58;
+    s < (uint8_t)(0x05 + (reg & 7) * 8);  // ModRM: mod=00, reg=reg&7, r/m=101
+    size_t patch_offset = s.buf.size();
+    s << (int32_t)0;
+    return patch_offset;
+#else
+    (void)s; (void)reg;
+    return 0;
+#endif
+}
+
+inline size_t emit_sse2_subsd_rip_placeholder(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // subsd xmm[reg], [rip+disp32]: F2 [REX] 0F 5C ModRM disp32
+    s < 0xF2;
+    if (reg >= 8) s < 0x44;
+    s < 0x0F < 0x5C;
+    s < (uint8_t)(0x05 + (reg & 7) * 8);
+    size_t patch_offset = s.buf.size();
+    s << (int32_t)0;
+    return patch_offset;
+#else
+    (void)s; (void)reg;
+    return 0;
+#endif
+}
+
+inline size_t emit_sse2_mulsd_rip_placeholder(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // mulsd xmm[reg], [rip+disp32]: F2 [REX] 0F 59 ModRM disp32
+    s < 0xF2;
+    if (reg >= 8) s < 0x44;
+    s < 0x0F < 0x59;
+    s < (uint8_t)(0x05 + (reg & 7) * 8);
+    size_t patch_offset = s.buf.size();
+    s << (int32_t)0;
+    return patch_offset;
+#else
+    (void)s; (void)reg;
+    return 0;
+#endif
+}
+
+inline size_t emit_sse2_divsd_rip_placeholder(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // divsd xmm[reg], [rip+disp32]: F2 [REX] 0F 5E ModRM disp32
+    s < 0xF2;
+    if (reg >= 8) s < 0x44;
+    s < 0x0F < 0x5E;
+    s < (uint8_t)(0x05 + (reg & 7) * 8);
+    size_t patch_offset = s.buf.size();
+    s << (int32_t)0;
+    return patch_offset;
+#else
+    (void)s; (void)reg;
+    return 0;
+#endif
+}
+
+
 // Emit xorpd xmm[reg], [addr] - XOR with 128-bit memory (for negate)
 inline void emit_sse2_xorpd_mem(impl::mexce_charstream& s, int reg, const void* addr)
 {
@@ -3501,6 +3574,12 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
         }
     };
 
+    // Memory operand fusion: track pending constant for binary operations
+    // When we see CCONST followed by add/sub/mul/div, we can skip the load
+    // and use a memory operand directly in the arithmetic instruction
+    bool has_pending_mem_operand = false;
+    double pending_mem_value = 0.0;
+
     for (auto it = first; it != last; ++it) {
         // Peephole: if the same leaf is loaded twice in a row, duplicate the register
         if (it != first && (it->type == Element_type::CVAR || it->type == Element_type::CCONST)) {
@@ -3569,14 +3648,36 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 // Fast path for zero
                 if (v == 0.0 && !std::signbit(v)) {
                     emit_sse2_xorpd_self(code_buffer, depth);
+                    ++depth;
                 }
                 else {
-                    // Use RIP-relative addressing for constants (embedded at end of code)
-                    // This saves 6 bytes per load vs absolute addressing (8 vs 14 bytes)
-                    size_t patch_pos = emit_sse2_load_rip_relative_placeholder(code_buffer, depth);
-                    pending_constants.push_back({patch_pos, v});
+                    // Check if we can fuse this constant load with the next binary operation
+                    // Look ahead: if next element is add/sub/mul/div and depth > 0, we can skip
+                    // the load and use memory operand directly in the arithmetic instruction
+                    auto next_it = it;
+                    ++next_it;
+                    bool can_fuse = false;
+                    if (depth > 0 && next_it != last && next_it->type == Element_type::CFUNC) {
+                        const string& next_fn = next_it->f->name;
+                        if (next_fn == "add" || next_fn == "sub" || next_fn == "mul" || next_fn == "div") {
+                            can_fuse = true;
+                        }
+                    }
+
+                    if (can_fuse) {
+                        // Don't emit load; store pending constant for the next binary op
+                        has_pending_mem_operand = true;
+                        pending_mem_value = v;
+                        // Note: depth does NOT increase (we're not pushing to register stack)
+                    }
+                    else {
+                        // Use RIP-relative addressing for constants (embedded at end of code)
+                        // This saves 6 bytes per load vs absolute addressing (8 vs 14 bytes)
+                        size_t patch_pos = emit_sse2_load_rip_relative_placeholder(code_buffer, depth);
+                        pending_constants.push_back({patch_pos, v});
+                        ++depth;
+                    }
                 }
-                ++depth;
                 break;
             }
             case Element_type::CFUNC: {
@@ -3584,24 +3685,53 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 const string& fn = tf->name;
 
                 if (fn == "add") {
-                    // xmm[depth-2] = xmm[depth-2] + xmm[depth-1]
-                    emit_sse2_addsd(code_buffer, depth - 2, depth - 1);
-                    --depth;
+                    if (has_pending_mem_operand) {
+                        // Fused: addsd xmm[depth-1], [rip+const]
+                        size_t patch_pos = emit_sse2_addsd_rip_placeholder(code_buffer, depth - 1);
+                        pending_constants.push_back({patch_pos, pending_mem_value});
+                        has_pending_mem_operand = false;
+                        // depth stays the same (we didn't push the constant)
+                    } else {
+                        // xmm[depth-2] = xmm[depth-2] + xmm[depth-1]
+                        emit_sse2_addsd(code_buffer, depth - 2, depth - 1);
+                        --depth;
+                    }
                 }
                 else if (fn == "sub") {
-                    // xmm[depth-2] = xmm[depth-2] - xmm[depth-1]
-                    emit_sse2_subsd(code_buffer, depth - 2, depth - 1);
-                    --depth;
+                    if (has_pending_mem_operand) {
+                        // Fused: subsd xmm[depth-1], [rip+const]
+                        size_t patch_pos = emit_sse2_subsd_rip_placeholder(code_buffer, depth - 1);
+                        pending_constants.push_back({patch_pos, pending_mem_value});
+                        has_pending_mem_operand = false;
+                    } else {
+                        // xmm[depth-2] = xmm[depth-2] - xmm[depth-1]
+                        emit_sse2_subsd(code_buffer, depth - 2, depth - 1);
+                        --depth;
+                    }
                 }
                 else if (fn == "mul") {
-                    // xmm[depth-2] = xmm[depth-2] * xmm[depth-1]
-                    emit_sse2_mulsd(code_buffer, depth - 2, depth - 1);
-                    --depth;
+                    if (has_pending_mem_operand) {
+                        // Fused: mulsd xmm[depth-1], [rip+const]
+                        size_t patch_pos = emit_sse2_mulsd_rip_placeholder(code_buffer, depth - 1);
+                        pending_constants.push_back({patch_pos, pending_mem_value});
+                        has_pending_mem_operand = false;
+                    } else {
+                        // xmm[depth-2] = xmm[depth-2] * xmm[depth-1]
+                        emit_sse2_mulsd(code_buffer, depth - 2, depth - 1);
+                        --depth;
+                    }
                 }
                 else if (fn == "div") {
-                    // xmm[depth-2] = xmm[depth-2] / xmm[depth-1]
-                    emit_sse2_divsd(code_buffer, depth - 2, depth - 1);
-                    --depth;
+                    if (has_pending_mem_operand) {
+                        // Fused: divsd xmm[depth-1], [rip+const]
+                        size_t patch_pos = emit_sse2_divsd_rip_placeholder(code_buffer, depth - 1);
+                        pending_constants.push_back({patch_pos, pending_mem_value});
+                        has_pending_mem_operand = false;
+                    } else {
+                        // xmm[depth-2] = xmm[depth-2] / xmm[depth-1]
+                        emit_sse2_divsd(code_buffer, depth - 2, depth - 1);
+                        --depth;
+                    }
                 }
                 else if (fn == "neg") {
                     // xmm[depth-1] = -xmm[depth-1] via XOR with sign mask
