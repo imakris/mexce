@@ -845,6 +845,56 @@ void test_trunc_function(TestSuite& suite) {
     suite.expect_near("trunc_neg_half", eval.evaluate(), 0.0);
 }
 
+// Test options API coverage (get_options, set_options, set_use_libm)
+void test_options_api(TestSuite& suite) {
+    mexce::evaluator eval;
+
+    // Test get_options returns current state
+    const mexce::options& opts_ref = eval.get_options();
+    suite.expect_true("get_options_fast_math_default", opts_ref.fast_math == false);
+    suite.expect_true("get_options_prefer_x87_default", opts_ref.prefer_x87 == false);
+
+    // Test set_options
+    mexce::options new_opts;
+    new_opts.fast_math = true;
+    new_opts.prefer_x87 = true;
+    new_opts.enable_cse = true;
+    eval.set_options(new_opts);
+
+    const mexce::options& updated = eval.get_options();
+    suite.expect_true("set_options_fast_math", updated.fast_math == true);
+    suite.expect_true("set_options_prefer_x87", updated.prefer_x87 == true);
+    suite.expect_true("set_options_enable_cse", updated.enable_cse == true);
+
+    // Test set_use_libm convenience function
+    mexce::options libm_opts;
+    libm_opts.set_use_libm(false);
+    suite.expect_true("set_use_libm_sin", libm_opts.use_libm_sin == false);
+    suite.expect_true("set_use_libm_cos", libm_opts.use_libm_cos == false);
+    suite.expect_true("set_use_libm_tan", libm_opts.use_libm_tan == false);
+    suite.expect_true("set_use_libm_exp", libm_opts.use_libm_exp == false);
+    suite.expect_true("set_use_libm_log", libm_opts.use_libm_log == false);
+    suite.expect_true("set_use_libm_log10", libm_opts.use_libm_log10 == false);
+    suite.expect_true("set_use_libm_log2", libm_opts.use_libm_log2 == false);
+    suite.expect_true("set_use_libm_logb", libm_opts.use_libm_logb == false);
+    suite.expect_true("set_use_libm_ylog2", libm_opts.use_libm_ylog2 == false);
+    suite.expect_true("set_use_libm_generic_pow", libm_opts.use_libm_generic_pow == false);
+
+    // Test set_use_libm(true) sets all back
+    libm_opts.set_use_libm(true);
+    suite.expect_true("set_use_libm_true_sin", libm_opts.use_libm_sin == true);
+    suite.expect_true("set_use_libm_true_cos", libm_opts.use_libm_cos == true);
+    suite.expect_true("set_use_libm_true_tan", libm_opts.use_libm_tan == true);
+
+    // Verify options affect compilation by testing prefer_x87
+    mexce::evaluator eval2;
+    double x = 2.0;
+    eval2.bind(x, "x");
+    eval2.opts().prefer_x87 = true;
+    eval2.set_expression("x + 1");
+    suite.expect_near("options_affect_compilation", eval2.evaluate(), 3.0);
+}
+
 } // namespace
 
 int main() {
@@ -877,6 +927,7 @@ int main() {
     test_sse2_rounding_functions(suite);
     test_sse2_expression_simplification(suite);
     test_trunc_function(suite);
+    test_options_api(suite);
 
     if (!suite.failures.empty()) {
         std::cerr << "mexce unit tests failed (" << suite.failures.size() << ")" << std::endl;
