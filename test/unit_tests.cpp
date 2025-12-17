@@ -895,6 +895,135 @@ void test_options_api(TestSuite& suite) {
     suite.expect_near("options_affect_compilation", eval2.evaluate(), 3.0);
 }
 
+// Test Common Subexpression Elimination (CSE)
+// Note: CSE uses x87 store instructions, so must use x87 backend
+void test_cse_coverage(TestSuite& suite) {
+    mexce::evaluator eval;
+    eval.opts().enable_cse = true;
+    eval.opts().prefer_x87 = true;  // CSE requires x87 backend
+
+    double a = 2.0, b = 3.0, c = 4.0;
+    eval.bind(a, "a", b, "b", c, "c");
+
+    // CSE with transcendental functions (won't be absorbed by ASMD)
+    eval.set_expression("sin(a) + sin(a) * 2");
+    double expected = std::sin(a) + std::sin(a) * 2;
+    suite.expect_near("cse_sin", eval.evaluate(), expected);
+
+    // More complex CSE case
+    eval.set_expression("cos(b) + cos(b) + cos(b)");
+    expected = std::cos(b) * 3;
+    suite.expect_near("cse_cos", eval.evaluate(), expected);
+
+    // CSE with nested expression
+    eval.set_expression("exp(a+b) * exp(a+b)");
+    expected = std::exp(a + b) * std::exp(a + b);
+    suite.expect_near("cse_exp", eval.evaluate(), expected);
+}
+
+// Test SSE2 neg and abs operations (covers xorpd/andpd emit functions)
+void test_sse2_neg_abs(TestSuite& suite) {
+#ifdef MEXCE_64
+    mexce::evaluator eval;
+    eval.opts().prefer_x87 = false;  // Force SSE2
+
+    double x = 5.0;
+    eval.bind(x, "x");
+
+    // Test negation
+    eval.set_expression("neg(x)");
+    suite.expect_near("sse2_neg_positive", eval.evaluate(), -5.0);
+
+    x = -3.0;
+    eval.set_expression("neg(x)");
+    suite.expect_near("sse2_neg_negative", eval.evaluate(), 3.0);
+
+    // Test absolute value
+    eval.set_expression("abs(x)");
+    suite.expect_near("sse2_abs_negative", eval.evaluate(), 3.0);
+
+    x = 7.0;
+    eval.set_expression("abs(x)");
+    suite.expect_near("sse2_abs_positive", eval.evaluate(), 7.0);
+
+    // Combined neg and abs
+    x = -4.0;
+    eval.set_expression("abs(neg(x))");
+    suite.expect_near("sse2_abs_neg", eval.evaluate(), 4.0);
+#else
+    (void)suite;
+#endif
+}
+
+// Test SSE2 log10 and log2 functions
+void test_sse2_log_functions(TestSuite& suite) {
+#ifdef MEXCE_64
+    mexce::evaluator eval;
+    eval.opts().prefer_x87 = false;  // Force SSE2
+
+    double x = 100.0;
+    eval.bind(x, "x");
+
+    eval.set_expression("log10(x)");
+    suite.expect_near("sse2_log10", eval.evaluate(), std::log10(x));
+
+    x = 8.0;
+    eval.set_expression("log2(x)");
+    suite.expect_near("sse2_log2", eval.evaluate(), std::log2(x));
+
+    // Test with different values
+    x = 1000.0;
+    eval.set_expression("log10(x)");
+    suite.expect_near("sse2_log10_1000", eval.evaluate(), 3.0);
+
+    x = 16.0;
+    eval.set_expression("log2(x)");
+    suite.expect_near("sse2_log2_16", eval.evaluate(), 4.0);
+#else
+    (void)suite;
+#endif
+}
+
+// Test different numeric data types for x87 load instructions
+void test_numeric_data_types(TestSuite& suite) {
+    mexce::evaluator eval;
+    eval.opts().prefer_x87 = true;  // Force x87 to test type-specific loads
+
+    // Test all supported numeric types
+    double d_val = 3.14159;
+    float f_val = 2.71828f;
+    int16_t i16_val = 100;
+    int32_t i32_val = 1000;
+    int64_t i64_val = 10000;
+
+    eval.bind(d_val, "d", f_val, "f", i16_val, "i16", i32_val, "i32", i64_val, "i64");
+
+    // Test double (M64FP)
+    eval.set_expression("d");
+    suite.expect_near("x87_load_m64fp", eval.evaluate(), d_val);
+
+    // Test float (M32FP)
+    eval.set_expression("f");
+    suite.expect_near("x87_load_m32fp", eval.evaluate(), static_cast<double>(f_val));
+
+    // Test int16_t (M16INT)
+    eval.set_expression("i16");
+    suite.expect_near("x87_load_m16int", eval.evaluate(), static_cast<double>(i16_val));
+
+    // Test int32_t (M32INT)
+    eval.set_expression("i32");
+    suite.expect_near("x87_load_m32int", eval.evaluate(), static_cast<double>(i32_val));
+
+    // Test int64_t (M64INT)
+    eval.set_expression("i64");
+    suite.expect_near("x87_load_m64int", eval.evaluate(), static_cast<double>(i64_val));
+
+    // Test arithmetic with mixed types
+    eval.set_expression("d + f + i16 + i32 + i64");
+    double expected = d_val + static_cast<double>(f_val) + i16_val + i32_val + i64_val;
+    suite.expect_near("x87_mixed_types", eval.evaluate(), expected);
+}
+
 } // namespace
 
 int main() {
@@ -928,6 +1057,10 @@ int main() {
     test_sse2_expression_simplification(suite);
     test_trunc_function(suite);
     test_options_api(suite);
+    test_cse_coverage(suite);
+    test_sse2_neg_abs(suite);
+    test_sse2_log_functions(suite);
+    test_numeric_data_types(suite);
 
     if (!suite.failures.empty()) {
         std::cerr << "mexce unit tests failed (" << suite.failures.size() << ")" << std::endl;
