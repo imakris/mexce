@@ -340,6 +340,12 @@ static bool parse_args(int argc, char* argv[], benchmark_config& config)
         config.comprehensive = true;
     }
 
+    // If output file is explicitly specified (not default), use single mode by default
+    // This preserves backward compatibility with CI that expects benchmark_results.txt
+    if (output_set && !explicit_comprehensive) {
+        config.comprehensive = false;
+    }
+
     return true;
 }
 
@@ -477,6 +483,85 @@ static config_result run_config_benchmark(
     return result;
 }
 
+// Run benchmark for native (compiler-generated) expressions
+static config_result run_native_benchmark(
+    int iterations,
+    std::ostream& progress_out)
+{
+    config_result result;
+    result.config_name = "Native";
+
+    const size_t total = mexce::benchmark_data::kExpressionCount;
+    const size_t native_count = mexce::benchmark_data::kNativeExpressionsCount;
+    const size_t iterations_u = static_cast<size_t>(iterations);
+
+    mexce::benchmark_data::NativeContext native_ctx{};
+
+    progress_out << "  Testing Native..." << std::flush;
+
+    for (size_t idx = 0; idx < total; ++idx) {
+        const long double golden = mexce::benchmark_data::kGoldenResults[idx];
+        const double golden_d = static_cast<double>(golden);
+
+        result.expressions_tested++;
+
+        // Check if native expression is available for this index
+        if (idx >= native_count) {
+            continue;
+        }
+
+        // Evaluate once for precision
+        native_ctx.a = 1.1;
+        native_ctx.b = 2.2;
+        native_ctx.c = 3.3;
+        native_ctx.x = 4.4;
+        native_ctx.y = 5.5;
+        native_ctx.z = 6.6;
+        native_ctx.w = 7.7;
+
+        double native_result;
+        try {
+            native_result = mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+            result.expressions_evaluated++;
+        }
+        catch (...) {
+            continue;
+        }
+        result.expressions_compiled++;  // Native is always "compiled" if available
+
+        // Compute ULP distance vs reference
+        const bool native_zero = std::fabs(native_result) <= (double)k_zero_abs_tol;
+        const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
+        uint64_t ulp;
+        if (native_zero && golden_zero) {
+            ulp = 0;
+        } else {
+            ulp = ulp_distance(native_result, golden_d);
+        }
+        result.ulp_sum.add(ulp);
+        update_ulp_bins(ulp, result.exact_zero_count, result.ulp_bins);
+
+        // Timing benchmark
+        mexce::stopwatch eval_timer;
+        for (size_t i = 0; i < iterations_u; ++i) {
+            (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+        }
+        result.total_eval_ns += eval_timer.elapsed_nanoseconds();
+    }
+
+    // No compile time for native
+    result.avg_compile_ns = 0;
+    result.total_compile_ns = 0;
+
+    if (result.expressions_evaluated > 0) {
+        result.avg_eval_ns = (uint64_t)((double)result.total_eval_ns /
+            ((double)result.expressions_evaluated * (double)iterations) + 0.5);
+    }
+
+    progress_out << " done (" << result.expressions_evaluated << "/" << native_count << " available)\n";
+    return result;
+}
+
 static int run_comprehensive_benchmark(const benchmark_config& config)
 {
     const std::string line(78, '=');
@@ -496,8 +581,12 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     };
 
     std::vector<config_result> results;
-    results.reserve(configs.size());
+    results.reserve(configs.size() + 1);  // +1 for native
 
+    // Run native benchmark first (as baseline)
+    results.push_back(run_native_benchmark(config.iterations, std::cout));
+
+    // Run mexce configurations
     for (const auto& cfg : configs) {
         results.push_back(run_config_benchmark(cfg, config.iterations, std::cout));
     }
@@ -644,8 +733,9 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
 
     std::cout << "\n" << line << "\n";
     std::cout << "Notes:\n";
-    std::cout << "  SSE2: Uses SSE2 for basic arithmetic, libm for transcendentals\n";
-    std::cout << "  x87:  Uses x87 FPU for all operations (80-bit internal precision)\n";
+    std::cout << "  Native:    Compiler-generated code (baseline for comparison)\n";
+    std::cout << "  SSE2:      Uses SSE2 for basic arithmetic, libm for transcendentals\n";
+    std::cout << "  x87:       Uses x87 FPU for all operations (80-bit internal precision)\n";
     std::cout << "  fast-math: Enables algebraic simplifications (x-x=0, x/x=1, etc.)\n";
     std::cout << line << "\n";
 
