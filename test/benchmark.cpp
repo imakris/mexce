@@ -239,19 +239,21 @@ static std::string to_decimal_u128(uint64_t hi, uint64_t lo)
 static void print_usage(const char* prog) {
     std::cerr << "Usage: " << prog << " [options] [iterations] [output_file]\n\n";
     std::cerr << "Options:\n";
-    std::cerr << "  --comprehensive, -c   Run comprehensive comparison across configurations\n";
-    std::cerr << "  --x87                 Force x87 backend (disable SSE2)\n";
-    std::cerr << "  --sse2                Force SSE2 backend (default)\n";
-    std::cerr << "  --fast-math           Enable fast-math optimizations\n";
+    std::cerr << "  --comprehensive, -c   Run comprehensive comparison (default)\n";
+    std::cerr << "  --single              Run single-configuration benchmark\n";
+    std::cerr << "  --x87                 Force x87 backend (with --single)\n";
+    std::cerr << "  --sse2                Force SSE2 backend (with --single, default)\n";
+    std::cerr << "  --fast-math           Enable fast-math optimizations (with --single)\n";
     std::cerr << "  --help, -h            Show this help message\n";
     std::cerr << "\n";
-    std::cerr << "You may also pass an output file as the first positional argument.\n";
+    std::cerr << "By default, runs comprehensive comparison across all configurations.\n";
+    std::cerr << "Use --single to run a single-configuration benchmark with detailed output.\n";
 }
 
 struct benchmark_config {
     int iterations = 100000;
     std::string output_path = "benchmark_results.txt";
-    bool comprehensive = false;
+    bool comprehensive = true;  // Default to comprehensive mode
     bool force_x87 = false;
     bool force_sse2 = false;
     bool fast_math = false;
@@ -261,6 +263,8 @@ static bool parse_args(int argc, char* argv[], benchmark_config& config)
 {
     bool iterations_set = false;
     bool output_set = false;
+    bool explicit_comprehensive = false;
+    bool explicit_single = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -270,19 +274,28 @@ static bool parse_args(int argc, char* argv[], benchmark_config& config)
             return false;
         }
         if (arg == "--comprehensive" || arg == "-c") {
+            explicit_comprehensive = true;
             config.comprehensive = true;
+            continue;
+        }
+        if (arg == "--single") {
+            explicit_single = true;
+            config.comprehensive = false;
             continue;
         }
         if (arg == "--x87") {
             config.force_x87 = true;
+            config.comprehensive = false;  // Backend options imply single mode
             continue;
         }
         if (arg == "--sse2") {
             config.force_sse2 = true;
+            config.comprehensive = false;  // Backend options imply single mode
             continue;
         }
         if (arg == "--fast-math") {
             config.fast_math = true;
+            config.comprehensive = false;  // fast-math implies single mode
             continue;
         }
 
@@ -316,34 +329,83 @@ static bool parse_args(int argc, char* argv[], benchmark_config& config)
         return false;
     }
 
+    if (explicit_comprehensive && explicit_single) {
+        std::cerr << "Cannot specify both --comprehensive and --single." << std::endl;
+        return false;
+    }
+
+    // If explicit comprehensive requested but backend options given, warn and use comprehensive
+    if (explicit_comprehensive && (config.force_x87 || config.force_sse2 || config.fast_math)) {
+        std::cerr << "Note: --x87, --sse2, --fast-math are ignored in comprehensive mode." << std::endl;
+        config.comprehensive = true;
+    }
+
     return true;
 }
 
-// Run a quick timing benchmark for a single configuration
-struct config_timing_result {
-    std::string config_name;
-    size_t expressions_tested;
-    size_t expressions_compiled;
-    long long total_compile_ns;
-    long long total_eval_ns;
-    uint64_t avg_compile_ns;
-    uint64_t avg_eval_ns;
+// ULP bin thresholds for precision analysis
+static constexpr uint64_t k_ulp_bin_thresholds[] = {
+    16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536
+};
+static constexpr size_t k_ulp_num_bins = sizeof(k_ulp_bin_thresholds) / sizeof(k_ulp_bin_thresholds[0]);
+static constexpr long double k_zero_abs_tol = 1e-12L;
+
+// Configuration definition for comprehensive benchmark
+struct mexce_config {
+    std::string name;
+    bool prefer_x87;
+    bool fast_math;
 };
 
-static config_timing_result run_config_timing(
-    const std::string& config_name,
-    mexce::evaluator& eval,
+// Results for a single configuration
+struct config_result {
+    std::string config_name;
+    size_t expressions_tested = 0;
+    size_t expressions_compiled = 0;
+    size_t expressions_evaluated = 0;
+    long long total_compile_ns = 0;
+    long long total_eval_ns = 0;
+    uint64_t avg_compile_ns = 0;
+    uint64_t avg_eval_ns = 0;
+
+    // Precision stats
+    size_t exact_zero_count = 0;
+    std::vector<size_t> ulp_bins;
+    ulp_sum_t ulp_sum;
+
+    config_result() : ulp_bins(k_ulp_num_bins + 1, 0) {}
+};
+
+static void update_ulp_bins(uint64_t ulp, size_t& exact_zero_count, std::vector<size_t>& bins) {
+    if (ulp == UINT64_MAX) {
+        return;
+    }
+    if (ulp == 0) {
+        ++exact_zero_count;
+        return;
+    }
+    size_t bin_idx = k_ulp_num_bins;
+    for (size_t bin_i = 0; bin_i < k_ulp_num_bins; ++bin_i) {
+        if (ulp <= k_ulp_bin_thresholds[bin_i]) {
+            bin_idx = bin_i;
+            break;
+        }
+    }
+    ++bins[bin_idx];
+}
+
+// Run benchmark for a single configuration with timing and precision
+static config_result run_config_benchmark(
+    const mexce_config& cfg,
     int iterations,
     std::ostream& progress_out)
 {
-    config_timing_result result;
-    result.config_name = config_name;
-    result.expressions_tested = 0;
-    result.expressions_compiled = 0;
-    result.total_compile_ns = 0;
-    result.total_eval_ns = 0;
-    result.avg_compile_ns = 0;
-    result.avg_eval_ns = 0;
+    config_result result;
+    result.config_name = cfg.name;
+
+    mexce::evaluator eval;
+    eval.opts().prefer_x87 = cfg.prefer_x87;
+    eval.opts().fast_math = cfg.fast_math;
 
     double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
     eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
@@ -351,14 +413,17 @@ static config_timing_result run_config_timing(
     const size_t total = mexce::benchmark_data::kExpressionCount;
     const size_t iterations_u = static_cast<size_t>(iterations);
 
-    progress_out << "  Testing " << config_name << "..." << std::flush;
+    progress_out << "  Testing " << cfg.name << "..." << std::flush;
 
     for (size_t idx = 0; idx < total; ++idx) {
         const std::string expr = mexce::benchmark_data::kExpressions[idx];
-        a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
+        const long double golden = mexce::benchmark_data::kGoldenResults[idx];
+        const double golden_d = static_cast<double>(golden);
 
+        a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
         result.expressions_tested++;
 
+        // Compile
         mexce::stopwatch compile_timer;
         try {
             eval.set_expression(expr);
@@ -369,6 +434,29 @@ static config_timing_result run_config_timing(
             continue;
         }
 
+        // Evaluate once for precision
+        double mexce_result;
+        try {
+            mexce_result = eval.evaluate();
+            result.expressions_evaluated++;
+        }
+        catch (...) {
+            continue;
+        }
+
+        // Compute ULP distance vs reference
+        const bool mexce_zero = std::fabs(mexce_result) <= (double)k_zero_abs_tol;
+        const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
+        uint64_t ulp;
+        if (mexce_zero && golden_zero) {
+            ulp = 0;
+        } else {
+            ulp = ulp_distance(mexce_result, golden_d);
+        }
+        result.ulp_sum.add(ulp);
+        update_ulp_bins(ulp, result.exact_zero_count, result.ulp_bins);
+
+        // Timing benchmark
         mexce::stopwatch eval_timer;
         for (size_t i = 0; i < iterations_u; ++i) {
             (void)eval.evaluate();
@@ -379,8 +467,10 @@ static config_timing_result run_config_timing(
     if (result.expressions_compiled > 0) {
         result.avg_compile_ns = (uint64_t)((double)result.total_compile_ns /
             (double)result.expressions_compiled + 0.5);
+    }
+    if (result.expressions_evaluated > 0) {
         result.avg_eval_ns = (uint64_t)((double)result.total_eval_ns /
-            ((double)result.expressions_compiled * (double)iterations) + 0.5);
+            ((double)result.expressions_evaluated * (double)iterations) + 0.5);
     }
 
     progress_out << " done (" << result.expressions_compiled << "/" << total << " compiled)\n";
@@ -389,48 +479,32 @@ static config_timing_result run_config_timing(
 
 static int run_comprehensive_benchmark(const benchmark_config& config)
 {
-    std::cout << "\n=== COMPREHENSIVE CONFIGURATION COMPARISON ===\n\n";
-    std::cout << "Running " << config.iterations << " iterations per expression.\n\n";
+    const std::string line(78, '=');
 
-    std::vector<config_timing_result> results;
+    std::cout << "\n" << line << "\n";
+    std::cout << "COMPREHENSIVE CONFIGURATION COMPARISON\n";
+    std::cout << line << "\n\n";
+    std::cout << "Iterations per expression: " << config.iterations << "\n";
+    std::cout << "Total expressions: " << mexce::benchmark_data::kExpressionCount << "\n\n";
 
-    // Test SSE2 configuration (default libm-backed transcendentals)
-    {
-        mexce::evaluator eval;
-        eval.opts().prefer_x87 = false;
-        eval.opts().fast_math = false;
-        results.push_back(run_config_timing("SSE2 (libm)", eval, config.iterations, std::cout));
+    // Define configurations to test
+    std::vector<mexce_config> configs = {
+        {"SSE2",            false, false},
+        {"SSE2+fast-math",  false, true},
+        {"x87",             true,  false},
+        {"x87+fast-math",   true,  true}
+    };
+
+    std::vector<config_result> results;
+    results.reserve(configs.size());
+
+    for (const auto& cfg : configs) {
+        results.push_back(run_config_benchmark(cfg, config.iterations, std::cout));
     }
 
-    // Test x87 configuration
-    {
-        mexce::evaluator eval;
-        eval.opts().prefer_x87 = true;
-        eval.opts().fast_math = false;
-        results.push_back(run_config_timing("x87", eval, config.iterations, std::cout));
-    }
-
-    // Test SSE2 with fast-math
-    {
-        mexce::evaluator eval;
-        eval.opts().prefer_x87 = false;
-        eval.opts().fast_math = true;
-        results.push_back(run_config_timing("SSE2 (fast-math)", eval, config.iterations, std::cout));
-    }
-
-    // Test x87 with fast-math
-    {
-        mexce::evaluator eval;
-        eval.opts().prefer_x87 = true;
-        eval.opts().fast_math = true;
-        results.push_back(run_config_timing("x87 (fast-math)", eval, config.iterations, std::cout));
-    }
-
-    // Print comparison table
-    std::cout << "\n";
-    const std::string line(70, '=');
-    std::cout << line << "\n";
-    std::cout << "CONFIGURATION COMPARISON SUMMARY\n";
+    // ========== TIMING COMPARISON ==========
+    std::cout << "\n" << line << "\n";
+    std::cout << "TIMING COMPARISON\n";
     std::cout << line << "\n\n";
 
     // Find column widths
@@ -439,42 +513,141 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
         name_width = std::max(name_width, r.config_name.size());
     }
 
-    const size_t compile_width = 15;
-    const size_t eval_width = 15;
-    const size_t total_width = 15;
+    const size_t col_width = 15;
 
     std::cout << std::left << std::setw((int)name_width) << "Configuration" << "  "
-              << std::setw((int)compile_width) << "Avg Compile" << "  "
-              << std::setw((int)eval_width) << "Avg Eval" << "  "
-              << std::setw((int)total_width) << "Total Eval" << "\n";
+              << std::setw((int)col_width) << "Avg Compile" << "  "
+              << std::setw((int)col_width) << "Avg Eval" << "  "
+              << std::setw((int)col_width) << "Total Eval" << "\n";
 
     std::cout << std::string(name_width, '-') << "  "
-              << std::string(compile_width, '-') << "  "
-              << std::string(eval_width, '-') << "  "
-              << std::string(total_width, '-') << "\n";
+              << std::string(col_width, '-') << "  "
+              << std::string(col_width, '-') << "  "
+              << std::string(col_width, '-') << "\n";
 
     for (const auto& r : results) {
         std::cout << std::left << std::setw((int)name_width) << r.config_name << "  "
-                  << std::setw((int)compile_width) << format_ns(r.avg_compile_ns) << "  "
-                  << std::setw((int)eval_width) << format_ns(r.avg_eval_ns) << "  "
-                  << std::setw((int)total_width) << format_ns((uint64_t)r.total_eval_ns) << "\n";
+                  << std::setw((int)col_width) << format_ns(r.avg_compile_ns) << "  "
+                  << std::setw((int)col_width) << format_ns(r.avg_eval_ns) << "  "
+                  << std::setw((int)col_width) << format_ns((uint64_t)r.total_eval_ns) << "\n";
     }
 
-    std::cout << "\n" << line << "\n";
-
-    // Find fastest configuration
+    // Find fastest
     if (!results.empty()) {
         auto fastest_it = std::min_element(results.begin(), results.end(),
-            [](const config_timing_result& a, const config_timing_result& b) {
+            [](const config_result& a, const config_result& b) {
                 return a.avg_eval_ns < b.avg_eval_ns;
             });
-        std::cout << "Fastest evaluation: " << fastest_it->config_name
+        std::cout << "\nFastest: " << fastest_it->config_name
                   << " (" << format_ns(fastest_it->avg_eval_ns) << " per call)\n";
     }
 
-    std::cout << "\nNote: SSE2 uses libm for transcendentals (sin, cos, exp, etc.).\n";
-    std::cout << "      x87 uses native FPU instructions for all operations.\n";
-    std::cout << "      fast-math enables algebraic simplifications (x-x=0, x/x=1).\n";
+    // ========== PRECISION COMPARISON ==========
+    std::cout << "\n" << line << "\n";
+    std::cout << "PRECISION COMPARISON (ULP vs Reference)\n";
+    std::cout << line << "\n\n";
+
+    // Build row labels
+    std::vector<std::string> row_labels;
+    row_labels.reserve(k_ulp_num_bins + 2);
+    row_labels.emplace_back("0 (exact)");
+    for (size_t bin_idx = 0; bin_idx < k_ulp_num_bins; ++bin_idx) {
+        char buf[32];
+        uint64_t lo = (bin_idx == 0 ? 1 : (k_ulp_bin_thresholds[bin_idx - 1] + 1));
+        uint64_t hi = k_ulp_bin_thresholds[bin_idx];
+        std::snprintf(buf, sizeof(buf), "%llu-%llu", (unsigned long long)lo, (unsigned long long)hi);
+        row_labels.emplace_back(buf);
+    }
+    row_labels.emplace_back(">65536");
+
+    // Find label width
+    size_t label_width = std::string("ULP Range").size();
+    for (const auto& label : row_labels) {
+        label_width = std::max(label_width, label.size());
+    }
+
+    // Build column values
+    std::vector<std::vector<std::string>> column_values(results.size());
+    std::vector<size_t> column_widths(results.size());
+
+    for (size_t col = 0; col < results.size(); ++col) {
+        const config_result& r = results[col];
+        std::vector<std::string>& values = column_values[col];
+        values.reserve(row_labels.size());
+
+        values.emplace_back(std::to_string(r.exact_zero_count));
+        for (size_t bin_idx = 0; bin_idx < k_ulp_num_bins; ++bin_idx) {
+            values.emplace_back(std::to_string(r.ulp_bins[bin_idx]));
+        }
+        values.emplace_back(std::to_string(r.ulp_bins[k_ulp_num_bins]));
+
+        // Column width
+        column_widths[col] = r.config_name.size();
+        for (const std::string& value : values) {
+            column_widths[col] = std::max(column_widths[col], value.size());
+        }
+    }
+
+    // Print header
+    std::cout << std::left << std::setw((int)label_width) << "ULP Range" << "  ";
+    for (size_t col = 0; col < results.size(); ++col) {
+        std::cout << std::setw((int)column_widths[col]) << results[col].config_name;
+        if (col + 1 != results.size()) std::cout << "  ";
+    }
+    std::cout << "\n";
+
+    // Print separator
+    std::cout << std::string(label_width, '-') << "  ";
+    for (size_t col = 0; col < results.size(); ++col) {
+        std::cout << std::string(column_widths[col], '-');
+        if (col + 1 != results.size()) std::cout << "  ";
+    }
+    std::cout << "\n";
+
+    // Print rows
+    for (size_t row = 0; row < row_labels.size(); ++row) {
+        std::cout << std::left << std::setw((int)label_width) << row_labels[row] << "  ";
+        for (size_t col = 0; col < results.size(); ++col) {
+            std::cout << std::setw((int)column_widths[col]) << column_values[col][row];
+            if (col + 1 != results.size()) std::cout << "  ";
+        }
+        std::cout << "\n";
+    }
+
+    // Print totals
+    std::cout << "\n";
+    std::cout << std::left << std::setw((int)label_width) << "Total ULP sum" << "  ";
+    for (size_t col = 0; col < results.size(); ++col) {
+        std::string sum_str = to_decimal_u128(results[col].ulp_sum.hi, results[col].ulp_sum.lo);
+        std::cout << std::setw((int)column_widths[col]) << sum_str;
+        if (col + 1 != results.size()) std::cout << "  ";
+    }
+    std::cout << "\n";
+
+    std::cout << std::left << std::setw((int)label_width) << "Evaluated" << "  ";
+    for (size_t col = 0; col < results.size(); ++col) {
+        std::cout << std::setw((int)column_widths[col]) << results[col].expressions_evaluated;
+        if (col + 1 != results.size()) std::cout << "  ";
+    }
+    std::cout << "\n";
+
+    // Find most precise (lowest total ULP)
+    if (!results.empty()) {
+        auto most_precise_it = std::min_element(results.begin(), results.end(),
+            [](const config_result& a, const config_result& b) {
+                if (a.ulp_sum.hi != b.ulp_sum.hi) return a.ulp_sum.hi < b.ulp_sum.hi;
+                return a.ulp_sum.lo < b.ulp_sum.lo;
+            });
+        std::cout << "\nMost precise: " << most_precise_it->config_name
+                  << " (total ULP: " << to_decimal_u128(most_precise_it->ulp_sum.hi, most_precise_it->ulp_sum.lo) << ")\n";
+    }
+
+    std::cout << "\n" << line << "\n";
+    std::cout << "Notes:\n";
+    std::cout << "  SSE2: Uses SSE2 for basic arithmetic, libm for transcendentals\n";
+    std::cout << "  x87:  Uses x87 FPU for all operations (80-bit internal precision)\n";
+    std::cout << "  fast-math: Enables algebraic simplifications (x-x=0, x/x=1, etc.)\n";
+    std::cout << line << "\n";
 
     return 0;
 }
@@ -510,16 +683,19 @@ int main(int argc, char* argv[])
     // Apply configuration options
     if (config.force_x87) {
         eval.opts().prefer_x87 = true;
-        std::cout << "Backend: x87 (forced)" << std::endl;
     }
     else if (config.force_sse2) {
         eval.opts().prefer_x87 = false;
-        std::cout << "Backend: SSE2 (forced)" << std::endl;
     }
     if (config.fast_math) {
         eval.opts().fast_math = true;
-        std::cout << "Fast-math: enabled" << std::endl;
     }
+
+    // Always show configuration
+    std::cout << "Configuration:" << std::endl;
+    std::cout << "  Backend: " << (eval.opts().prefer_x87 ? "x87" : "SSE2") << std::endl;
+    std::cout << "  Fast-math: " << (eval.opts().fast_math ? "enabled" : "disabled") << std::endl;
+
     double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
     eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
     mexce::benchmark_data::NativeContext native_ctx{};
