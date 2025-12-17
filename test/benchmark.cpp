@@ -591,12 +591,7 @@ static void generate_detailed_report(
     out << "DETAILED PER-EXPRESSION REPORT (" << cfg.name << ")\n";
     out << line << "\n\n";
 
-    mexce::evaluator eval;
-    eval.opts().prefer_x87 = cfg.prefer_x87;
-    eval.opts().fast_math = cfg.fast_math;
-
     double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
-    eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
     mexce::benchmark_data::NativeContext native_ctx{};
 
     const size_t total_expressions = mexce::benchmark_data::kExpressionCount;
@@ -609,6 +604,11 @@ static void generate_detailed_report(
 
     std::vector<detail_record_t> detail_records;
     detail_records.reserve(total_expressions);
+
+    // Store compiled evaluators to avoid recompilation in timing passes
+    // Each evaluator is bound to the same variables (by reference)
+    std::vector<std::unique_ptr<mexce::evaluator>> compiled_evals;
+    compiled_evals.reserve(total_expressions);
 
     // ========== Pass 1: Compile, evaluate, and collect metadata ==========
     progress_out << "  Compiling " << cfg.name << "..." << std::flush;
@@ -643,28 +643,36 @@ static void generate_detailed_report(
             } catch (...) {}
         }
 
+        // Create a new evaluator for this expression
+        auto expr_eval = std::make_unique<mexce::evaluator>();
+        expr_eval->opts().prefer_x87 = cfg.prefer_x87;
+        expr_eval->opts().fast_math = cfg.fast_math;
+        expr_eval->bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
+
         // Mexce compilation
         mexce::stopwatch compile_timer;
         try {
-            eval.set_expression(expr);
+            expr_eval->set_expression(expr);
             rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
-            rec.optimized_expr = eval.get_optimized_expression();
-            rec.bytes_expr = eval.get_byte_representation();
+            rec.optimized_expr = expr_eval->get_optimized_expression();
+            rec.bytes_expr = expr_eval->get_byte_representation();
             rec.compiled = true;
         } catch (const std::exception& e) {
             rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
             rec.error = std::string("compile: ") + e.what();
             detail_records.push_back(rec);
+            compiled_evals.push_back(nullptr);
             continue;
         }
 
         // Mexce evaluation
         try {
-            rec.mexce_result = eval.evaluate();
+            rec.mexce_result = expr_eval->evaluate();
             rec.eval_ok = true;
         } catch (const std::exception& e) {
             rec.error = std::string("evaluate: ") + e.what();
             detail_records.push_back(rec);
+            compiled_evals.push_back(nullptr);
             continue;
         }
 
@@ -678,12 +686,14 @@ static void generate_detailed_report(
         }
 
         detail_records.push_back(rec);
+        compiled_evals.push_back(std::move(expr_eval));
     }
     progress_out << " done\n";
 
     // ========== Timing passes: spread trials apart to reduce OS scheduling noise ==========
     // Running multiple complete passes through all expressions spreads the timing trials
     // far apart in time, so a scheduling hiccup in one pass won't affect all trials.
+    // Uses pre-compiled evaluators to avoid recompilation overhead.
     progress_out << "  Timing " << cfg.name << " (" << k_timing_passes << " passes)..." << std::flush;
 
     for (int pass = 0; pass < k_timing_passes; ++pass) {
@@ -694,19 +704,12 @@ static void generate_detailed_report(
 
         for (size_t idx = 0; idx < detail_records.size(); ++idx) {
             detail_record_t& rec = detail_records[idx];
-            if (!rec.eval_ok) continue;
+            if (!rec.eval_ok || !compiled_evals[idx]) continue;
 
-            // Recompile expression for this timing pass
-            try {
-                eval.set_expression(rec.expr);
-            } catch (...) {
-                continue;
-            }
-
-            // Time mexce
+            // Time mexce using pre-compiled evaluator
             mexce::stopwatch eval_timer;
             for (size_t i = 0; i < iterations_u; ++i) {
-                (void)eval.evaluate();
+                (void)compiled_evals[idx]->evaluate();
             }
             uint64_t trial_ns = (uint64_t)((double)eval_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
             if (trial_ns < rec.avg_ns) rec.avg_ns = trial_ns;
