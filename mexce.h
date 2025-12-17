@@ -3418,6 +3418,19 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
     int depth = 0;  // Current stack depth (number of values on simulated stack)
     const auto& masks = get_sse2_masks();
 
+    // RAX address cache: track what address is currently in RAX to skip redundant loads
+    // This optimization eliminates repeated 'mov rax, addr' instructions when the same
+    // address is loaded multiple times. Set to nullptr when RAX is clobbered (e.g., by calls).
+    const void* rax_cached = nullptr;
+
+    // Helper lambda: emit 'mov rax, addr' only if RAX doesn't already contain this address
+    auto emit_load_rax_if_needed = [&](const void* addr) {
+        if (rax_cached != addr) {
+            emit_load_address_rax(code_buffer, addr);
+            rax_cached = addr;
+        }
+    };
+
     for (auto it = first; it != last; ++it) {
         // Peephole: if the same leaf is loaded twice in a row, duplicate the register
         if (it != first && (it->type == Element_type::CVAR || it->type == Element_type::CCONST)) {
@@ -3442,12 +3455,12 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 // For non-double types, we need to convert. For simplicity, use x87 for conversion
                 // and then transfer to XMM. Actually, let's handle M64FP directly and fall back for others.
                 if (tn->numeric_data_type == M64FP) {
-                    emit_load_address_rax(code_buffer, (void*)tn->address);
+                    emit_load_rax_if_needed((void*)tn->address);
                     emit_sse2_load_from_rax(code_buffer, depth);
                 }
                 else if (tn->numeric_data_type == M32FP) {
                     // cvtss2sd xmm[depth], [rax] - convert single to double
-                    emit_load_address_rax(code_buffer, (void*)tn->address);
+                    emit_load_rax_if_needed((void*)tn->address);
                     // F3 0F 5A ModRM (cvtss2sd)
                     int reg = depth;
                     if (reg >= 8) {
@@ -3459,7 +3472,7 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 else {
                     // Integer types: load to x87, convert, store to stack, load to XMM
                     // This is a fallback path; for full SSE2 we'd need separate int->double conversion
-                    emit_load_address_rax(code_buffer, (void*)tn->address);
+                    emit_load_rax_if_needed((void*)tn->address);
                     switch (tn->numeric_data_type) {
                         case M16INT:  code_buffer < 0xdf < 0x00; break;  // fild word ptr [rax]
                         case M32INT:  code_buffer < 0xdb < 0x00; break;  // fild dword ptr [rax]
@@ -3489,7 +3502,7 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 }
                 else {
                     // Load constant from memory
-                    emit_load_address_rax(code_buffer, (void*)tn->address);
+                    emit_load_rax_if_needed((void*)tn->address);
                     emit_sse2_load_from_rax(code_buffer, depth);
                 }
                 ++depth;
@@ -3521,33 +3534,58 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 }
                 else if (fn == "neg") {
                     // xmm[depth-1] = -xmm[depth-1] via XOR with sign mask
-                    emit_sse2_xorpd_mem(code_buffer, depth - 1, (void*)masks.sign_mask);
+                    // Inline xorpd_mem to use RAX cache
+                    emit_load_rax_if_needed((void*)masks.sign_mask);
+                    // 66 [REX] 0F 57 ModRM for xorpd xmm[reg], [rax]
+                    int reg = depth - 1;
+                    uint8_t rex = 0;
+                    if (reg >= 8) rex |= 0x44;
+                    int reg_enc = reg & 7;
+                    code_buffer < 0x66;
+                    if (rex) code_buffer < rex;
+                    code_buffer < 0x0F < 0x57 < (uint8_t)(reg_enc * 8);
                 }
                 else if (fn == "abs") {
                     // xmm[depth-1] = |xmm[depth-1]| via AND with abs mask
-                    emit_sse2_andpd_mem(code_buffer, depth - 1, (void*)masks.abs_mask);
+                    // Inline andpd_mem to use RAX cache
+                    emit_load_rax_if_needed((void*)masks.abs_mask);
+                    // 66 [REX] 0F 54 ModRM for andpd xmm[reg], [rax]
+                    int reg = depth - 1;
+                    uint8_t rex = 0;
+                    if (reg >= 8) rex |= 0x44;
+                    int reg_enc = reg & 7;
+                    code_buffer < 0x66;
+                    if (rex) code_buffer < rex;
+                    code_buffer < 0x0F < 0x54 < (uint8_t)(reg_enc * 8);
                 }
                 // --- libm unary functions ---
                 else if (fn == "sin") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::sin), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
                 }
                 else if (fn == "cos") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::cos), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
                 }
                 else if (fn == "tan") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::tan), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
                 }
                 else if (fn == "exp") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::exp), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
                 }
                 else if (fn == "ln" || fn == "log") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
                 }
                 else if (fn == "log10") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log10), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
                 }
                 else if (fn == "log2") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log2), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
                 }
                 else if (fn == "sqrt") {
                     // sqrt has a direct SSE2 instruction
@@ -3556,6 +3594,7 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 // --- libm binary functions ---
                 else if (fn == "logb") {
                     emit_sse2_libm_binary_call(code_buffer, (void*)&mexce_libm_logb, depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
                     --depth;
                 }
                 // Note: CSE store suffix is not emitted in SSE2 path as CSE uses x87 instructions
