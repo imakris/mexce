@@ -8,7 +8,7 @@ A single-header, dependency-free JIT compiler for mathematical expressions.
 
 ## Overview
 
-`mexce` is a runtime compiler for scalar mathematical expressions written in C++. It parses standard C-like expressions and compiles them directly into x86-64 machine code. By default, it uses **SSE2 instructions** for basic arithmetic operations and calls **libm** for transcendental functions, with an optional **x87 FPU** backend available for compatibility or when higher internal precision is desired.
+`mexce` is a runtime compiler for scalar mathematical expressions written in C++. It parses standard C-like expressions and compiles them directly into x86 or x86-64 machine code. On 64-bit systems, it uses **SSE2 instructions** for basic arithmetic and calls **C standard library** math functions for transcendentals. On 32-bit systems, or when higher internal precision is desired, the **x87 FPU** backend is used.
 
 Once an expression is compiled, subsequent evaluations are direct function calls, which avoids parsing and interpretation overhead. This makes `mexce` well-suited for applications that repeatedly evaluate the same formula with different inputs, such as numerical simulations, data processing kernels, or graphics.
 
@@ -116,17 +116,17 @@ Options can be configured before calling `set_expression()` to control code gene
 
 ```cpp
 mexce::evaluator eval;
-eval.opts().fast_math = true;      // Enable algebraic simplifications
-eval.opts().prefer_x87 = true;     // Use x87 FPU instead of SSE2
-eval.opts().enable_cse = true;     // Enable common subexpression elimination
+eval.enable_fast_math();           // Enable algebraic simplifications
+eval.use_x87_backend();            // Use x87 FPU instead of SSE2
+eval.enable_cse();                 // Enable common subexpression elimination
 eval.set_expression("x + y");      // Options take effect here
 ```
 
-| Option | Default | Description |
-| :--- | :--- | :--- |
-| `fast_math` | `false` | Enables algebraic simplifications that may change results for special values (NaN, Inf). Examples: `x-x → 0`, `x/x → 1`, `0*x → 0`. |
-| `prefer_x87` | `false` | Forces the x87 FPU backend instead of SSE2. The x87 backend uses 80-bit internal precision. |
-| `enable_cse` | `false` | Enables Common Subexpression Elimination. Repeated identical subexpressions are computed once and reused. Only works with the x87 backend. |
+| Method | Description |
+| :--- | :--- |
+| `enable_fast_math()` | Enables algebraic simplifications that may change results for special values (NaN, Inf). Examples: `x-x → 0`, `x/x → 1`, `0*x → 0`. |
+| `use_x87_backend()` | Forces the x87 FPU backend instead of SSE2. The x87 backend uses 80-bit internal precision. On 32-bit x86, this backend is always used. |
+| `enable_cse()` | Enables Common Subexpression Elimination. Repeated identical subexpressions are computed once and reused. Only works with the x87 backend. |
 
 ## Expression Syntax
 
@@ -177,23 +177,23 @@ eval.set_expression("x + y");      // Options take effect here
 
 `mexce` provides two code generation backends:
 
-### SSE2 Backend (Default)
+### SSE2 Backend (Default on x86-64)
 *   Uses SSE2 scalar instructions (`addsd`, `mulsd`, etc.) for basic arithmetic
 *   Uses SSE4.1 `roundsd` instruction for rounding functions (`floor`, `ceil`, `round`, `trunc`)
-*   Calls libm for transcendental functions (`sin`, `cos`, `exp`, `log`, etc.)
+*   Calls C standard library math functions for transcendentals (`sin`, `cos`, `exp`, `log`, etc.)
 *   Faster on modern CPUs due to better pipelining and avoiding x87 state transitions
 *   Results in XMM0 register (standard x64 ABI return convention)
 
-### x87 Backend
+### x87 Backend (Default on 32-bit x86)
 *   Uses x87 FPU instructions with 80-bit internal precision
-*   All operations (including transcendentals) use x87 instructions
+*   All operations (including transcendentals) use native x87 instructions
 *   Stack-based architecture can be more compact for certain expression patterns
 *   Required for Common Subexpression Elimination (CSE) feature
-*   Enable with `eval.opts().prefer_x87 = true;`
+*   On x86-64, enable with `eval.use_x87_backend();`
 
 ## Performance Analysis
 
-`mexce` is designed to produce code with performance comparable to a statically optimizing compiler. Its efficiency was measured using a benchmark suite of 44,229 expressions.
+`mexce` is designed to produce code with performance comparable to a statically optimizing compiler. Its efficiency was measured using a benchmark suite of 44,229 expressions on GitHub Actions CI (Ubuntu runner).
 
 ### Benchmark Results
 
@@ -206,8 +206,8 @@ eval.set_expression("x + y");      // Options take effect here
 | **x87 + fast-math** | 138 μs | 8.0 ns | 34.7 ms |
 
 **Key observations:**
-*   The SSE2 backend is **~14% faster** than native compiler-generated code
-*   The SSE2 backend is **~25% faster** than the x87 backend
+*   The SSE2 backend performs on par with or faster than native compiler-generated code
+*   The SSE2 backend is faster than the x87 backend due to better pipelining on modern CPUs
 *   The `fast_math` option provides modest improvement through algebraic simplification
 *   Compilation time is in the microsecond range, negligible for most use cases
 

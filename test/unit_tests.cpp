@@ -739,7 +739,7 @@ void test_fpu_stack_overflow(TestSuite& suite) {
 void test_sse2_rounding_functions(TestSuite& suite) {
 #ifdef MEXCE_64
     mexce::evaluator eval;
-    eval.opts().prefer_x87 = false;  // Force SSE2 backend
+    eval.use_sse2_backend();  // Force SSE2 backend
 
     double value = 3.75;
     eval.bind(value, "v");
@@ -784,8 +784,8 @@ void test_sse2_rounding_functions(TestSuite& suite) {
 void test_sse2_expression_simplification(TestSuite& suite) {
 #ifdef MEXCE_64
     mexce::evaluator eval;
-    eval.opts().prefer_x87 = false;  // Force SSE2 backend
-    eval.opts().fast_math = true;    // Enable simplifications
+    eval.use_sse2_backend();     // Force SSE2 backend
+    eval.enable_fast_math();     // Enable simplifications
 
     double x = -1.5, y = 4.0, z = 2.0;
     eval.bind(x, "x", y, "y", z, "z");
@@ -890,7 +890,7 @@ void test_options_api(TestSuite& suite) {
     mexce::evaluator eval2;
     double x = 2.0;
     eval2.bind(x, "x");
-    eval2.opts().prefer_x87 = true;
+    eval2.use_x87_backend();
     eval2.set_expression("x + 1");
     suite.expect_near("options_affect_compilation", eval2.evaluate(), 3.0);
 }
@@ -899,8 +899,8 @@ void test_options_api(TestSuite& suite) {
 // Note: CSE uses x87 store instructions, so must use x87 backend
 void test_cse_coverage(TestSuite& suite) {
     mexce::evaluator eval;
-    eval.opts().enable_cse = true;
-    eval.opts().prefer_x87 = true;  // CSE requires x87 backend
+    eval.enable_cse();
+    eval.use_x87_backend();  // CSE requires x87 backend
 
     double a = 2.0, b = 3.0, c = 4.0;
     eval.bind(a, "a", b, "b", c, "c");
@@ -925,7 +925,7 @@ void test_cse_coverage(TestSuite& suite) {
 void test_sse2_neg_abs(TestSuite& suite) {
 #ifdef MEXCE_64
     mexce::evaluator eval;
-    eval.opts().prefer_x87 = false;  // Force SSE2
+    eval.use_sse2_backend();  // Force SSE2
 
     double x = 5.0;
     eval.bind(x, "x");
@@ -959,7 +959,7 @@ void test_sse2_neg_abs(TestSuite& suite) {
 void test_sse2_log_functions(TestSuite& suite) {
 #ifdef MEXCE_64
     mexce::evaluator eval;
-    eval.opts().prefer_x87 = false;  // Force SSE2
+    eval.use_sse2_backend();  // Force SSE2
 
     double x = 100.0;
     eval.bind(x, "x");
@@ -987,7 +987,7 @@ void test_sse2_log_functions(TestSuite& suite) {
 // Test different numeric data types for x87 load instructions
 void test_numeric_data_types(TestSuite& suite) {
     mexce::evaluator eval;
-    eval.opts().prefer_x87 = true;  // Force x87 to test type-specific loads
+    eval.use_x87_backend();  // Force x87 to test type-specific loads
 
     // Test all supported numeric types
     double d_val = 3.14159;
