@@ -3062,6 +3062,74 @@ inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::e
 }
 
 
+// Structure to track a pending RIP-relative constant load that needs patching
+struct PendingRipConstant {
+    size_t patch_offset;    // Offset in code buffer where the displacement needs to be written
+    double value;           // The constant value to embed
+};
+
+// Emit movsd xmm[reg], [rip+disp32] with placeholder displacement (returns patch offset)
+// The displacement will be patched later when we know where the constant is located
+inline size_t emit_sse2_load_rip_relative_placeholder(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // movsd xmm[reg], [rip+disp32]
+    // F2 [REX] 0F 10 ModRM disp32
+    // ModRM for [rip+disp32] = 0x05 + (reg & 7) * 8
+    s < 0xF2;
+    if (reg >= 8) {
+        s < 0x44;  // REX.R
+    }
+    s < 0x0F < 0x10;
+    s < (uint8_t)(0x05 + (reg & 7) * 8);  // ModRM: mod=00, reg=reg&7, r/m=101
+    size_t patch_offset = s.buf.size();
+    s << (int32_t)0;  // Placeholder displacement
+    return patch_offset;
+#else
+    (void)s; (void)reg;
+    return 0;
+#endif
+}
+
+// Finalize RIP-relative constants: append constant data and patch displacements
+inline void finalize_rip_constants(impl::mexce_charstream& s, std::vector<PendingRipConstant>& pending)
+{
+#ifdef MEXCE_64
+    if (pending.empty()) return;
+
+    // Align to 8 bytes for double alignment
+    while (s.buf.size() % 8 != 0) {
+        s < 0x90;  // NOP for padding (won't be executed)
+    }
+
+    // Build a map of unique constant values to their offsets
+    std::map<double, size_t> const_offsets;
+
+    // First pass: identify unique constants and allocate space
+    for (const auto& pc : pending) {
+        if (const_offsets.find(pc.value) == const_offsets.end()) {
+            const_offsets[pc.value] = s.buf.size();
+            // Append the constant value (8 bytes for double)
+            s << pc.value;
+        }
+    }
+
+    // Second pass: patch all displacements
+    for (const auto& pc : pending) {
+        size_t const_offset = const_offsets[pc.value];
+        // Displacement = target - (rip after instruction)
+        // RIP after instruction = patch_offset + 4 (size of disp32)
+        int32_t disp = (int32_t)(const_offset - (pc.patch_offset + 4));
+        std::memcpy(s.buf.data() + pc.patch_offset, &disp, sizeof(disp));
+    }
+
+    pending.clear();
+#else
+    (void)s; (void)pending;
+#endif
+}
+
+
 // Emit code to load a 64-bit address into RAX (x64 only)
 inline void emit_load_address_rax(impl::mexce_charstream& s, const void* addr)
 {
@@ -3410,8 +3478,10 @@ inline void emit_sse2_libm_binary_call(impl::mexce_charstream& s, void* fn_ptr, 
 
 // Compile an expression list using SSE2 instructions (x64 only)
 // Uses XMM registers as a simulated stack: XMM0 = bottom, XMM7 = top
+// pending_constants: output vector for RIP-relative constant loads that need patching
 #ifdef MEXCE_64
-inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last)
+inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last,
+                               std::vector<PendingRipConstant>& pending_constants)
 {
     using namespace impl;
 
@@ -3501,9 +3571,10 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                     emit_sse2_xorpd_self(code_buffer, depth);
                 }
                 else {
-                    // Load constant from memory
-                    emit_load_rax_if_needed((void*)tn->address);
-                    emit_sse2_load_from_rax(code_buffer, depth);
+                    // Use RIP-relative addressing for constants (embedded at end of code)
+                    // This saves 6 bytes per load vs absolute addressing (8 vs 14 bytes)
+                    size_t patch_pos = emit_sse2_load_rip_relative_placeholder(code_buffer, depth);
+                    pending_constants.push_back({patch_pos, v});
                 }
                 ++depth;
                 break;
@@ -5124,6 +5195,7 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     if (use_sse2) {
         // SSE2 backend: simpler prologue/epilogue since result is already in xmm0
         mexce_charstream code_buffer;
+        std::vector<PendingRipConstant> pending_constants;
         bool needs_libm = sse2_needs_libm_calls(first, last);
 
         // Reserve buffer space (more if libm calls are present)
@@ -5146,7 +5218,7 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
         }
 
         // Generate SSE2 code
-        compile_elist_sse2(code_buffer, first, last);
+        compile_elist_sse2(code_buffer, first, last, pending_constants);
 
         // SSE2 return: result is already in xmm0, just restore stack and return
         if (needs_libm) {
@@ -5155,6 +5227,9 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
             code_buffer < 0x48 < 0x83 < 0xc4 < 0x08;    // add  rsp, 8
         }
         code_buffer < 0xc3;                          // ret
+
+        // Finalize RIP-relative constants: append constant data after ret and patch displacements
+        finalize_rip_constants(code_buffer, pending_constants);
 
         m_buffer_size = code_buffer.buf.size();
         auto buffer = get_executable_buffer(m_buffer_size);
