@@ -644,7 +644,7 @@ static void generate_detailed_report(
         }
 
         // Create a new evaluator for this expression
-        auto expr_eval = std::make_unique<mexce::evaluator>();
+        std::unique_ptr<mexce::evaluator> expr_eval(new mexce::evaluator());
         expr_eval->opts().prefer_x87 = cfg.prefer_x87;
         expr_eval->opts().fast_math = cfg.fast_math;
         expr_eval->bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
