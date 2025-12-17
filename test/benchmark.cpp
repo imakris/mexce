@@ -378,6 +378,7 @@ struct config_result {
 
 // Detailed per-expression record for comprehensive output
 struct detail_record_t {
+    size_t original_idx = 0;  // Index into benchmark_data arrays
     std::string expr;
     std::string optimized_expr;
     std::string bytes_expr;
@@ -601,10 +602,16 @@ static void generate_detailed_report(
     const size_t total_expressions = mexce::benchmark_data::kExpressionCount;
     const size_t iterations_u = static_cast<size_t>(iterations);
 
+    // Number of timing passes - spread trials apart to avoid sustained OS scheduling effects
+    // Use fewer trials when iterations is high (timing is more stable)
+    const int k_timing_passes = (iterations >= 10000) ? 5 :
+                                (iterations >= 1000)  ? 7 : 10;
+
     std::vector<detail_record_t> detail_records;
     detail_records.reserve(total_expressions);
 
-    progress_out << "  Collecting detailed data for " << cfg.name << "..." << std::flush;
+    // ========== Pass 1: Compile, evaluate, and collect metadata ==========
+    progress_out << "  Compiling " << cfg.name << "..." << std::flush;
 
     for (size_t idx = 0; idx < total_expressions; ++idx) {
         const std::string expr = mexce::benchmark_data::kExpressions[idx];
@@ -614,11 +621,14 @@ static void generate_detailed_report(
         a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
 
         detail_record_t rec;
+        rec.original_idx = idx;
         rec.expr = expr;
         rec.expected = golden;
         rec.native_available = idx < mexce::benchmark_data::kNativeExpressionsCount;
         rec.mexce_result = std::numeric_limits<double>::quiet_NaN();
         rec.native_result = std::numeric_limits<double>::quiet_NaN();
+        rec.avg_ns = std::numeric_limits<uint64_t>::max();
+        rec.native_avg_ns = std::numeric_limits<uint64_t>::max();
 
         // Native evaluation
         if (rec.native_available) {
@@ -667,46 +677,50 @@ static void generate_detailed_report(
             rec.ulp_mexce_vs_compiler = (mexce_zero && native_zero) ? 0 : ulp_distance(rec.mexce_result, rec.native_result);
         }
 
-        // Timing: run multiple trials and take the minimum to reduce OS scheduling noise
-        // The minimum represents the "true" speed without interruption
-        // Use more trials for better chance of catching a quiet moment
-        constexpr int k_timing_trials = 10;
+        detail_records.push_back(rec);
+    }
+    progress_out << " done\n";
 
-        // Warmup: run a few iterations to warm up instruction cache
-        for (size_t i = 0; i < std::min(iterations_u, (size_t)1000); ++i) {
-            (void)eval.evaluate();
-        }
+    // ========== Timing passes: spread trials apart to reduce OS scheduling noise ==========
+    // Running multiple complete passes through all expressions spreads the timing trials
+    // far apart in time, so a scheduling hiccup in one pass won't affect all trials.
+    progress_out << "  Timing " << cfg.name << " (" << k_timing_passes << " passes)..." << std::flush;
 
-        uint64_t best_ns = std::numeric_limits<uint64_t>::max();
-        for (int trial = 0; trial < k_timing_trials; ++trial) {
+    for (int pass = 0; pass < k_timing_passes; ++pass) {
+        // Reset variables for consistent state
+        a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
+        native_ctx.a = a; native_ctx.b = b; native_ctx.c = c;
+        native_ctx.x = x; native_ctx.y = y; native_ctx.z = z; native_ctx.w = w;
+
+        for (size_t idx = 0; idx < detail_records.size(); ++idx) {
+            detail_record_t& rec = detail_records[idx];
+            if (!rec.eval_ok) continue;
+
+            // Recompile expression for this timing pass
+            try {
+                eval.set_expression(rec.expr);
+            } catch (...) {
+                continue;
+            }
+
+            // Time mexce
             mexce::stopwatch eval_timer;
             for (size_t i = 0; i < iterations_u; ++i) {
                 (void)eval.evaluate();
             }
             uint64_t trial_ns = (uint64_t)((double)eval_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
-            if (trial_ns < best_ns) best_ns = trial_ns;
-        }
-        rec.avg_ns = best_ns;
+            if (trial_ns < rec.avg_ns) rec.avg_ns = trial_ns;
 
-        if (rec.native_eval_ok) {
-            // Warmup for native too
-            for (size_t i = 0; i < std::min(iterations_u, (size_t)1000); ++i) {
-                (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
-            }
-
-            uint64_t best_native_ns = std::numeric_limits<uint64_t>::max();
-            for (int trial = 0; trial < k_timing_trials; ++trial) {
+            // Time native
+            if (rec.native_eval_ok && rec.original_idx < mexce::benchmark_data::kNativeExpressionsCount) {
                 mexce::stopwatch native_timer;
                 for (size_t i = 0; i < iterations_u; ++i) {
-                    (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+                    (void)mexce::benchmark_data::kNativeExpressions[rec.original_idx](native_ctx);
                 }
-                uint64_t trial_ns = (uint64_t)((double)native_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
-                if (trial_ns < best_native_ns) best_native_ns = trial_ns;
+                uint64_t native_trial_ns = (uint64_t)((double)native_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
+                if (native_trial_ns < rec.native_avg_ns) rec.native_avg_ns = native_trial_ns;
             }
-            rec.native_avg_ns = best_native_ns;
         }
-
-        detail_records.push_back(rec);
     }
     progress_out << " done\n";
 
