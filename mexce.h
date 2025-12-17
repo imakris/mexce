@@ -4912,8 +4912,69 @@ void evaluator::set_expression(std::string e)
     }
 
     // Check if the expression is SSE2-compatible BEFORE running optimizers.
-    // If so, we skip the asmd_optimizer which would generate x87 code.
+    // Note: asmd_optimizer generates x87 FPU code directly, so it must be skipped
+    // for SSE2-compatible expressions. The SSE2 backend handles add/sub/mul/div directly.
     bool skip_asmd_optimizer = is_sse2_compatible(m_elist.begin(), m_elist.end(), m_options.prefer_x87);
+
+    // Fast-math algebraic simplifications - run in a SEPARATE PASS before any optimizer
+    // modifies the expression structure. This must happen before asmd_optimizer which
+    // transforms the elist in ways that would confuse the chunk comparison.
+    if (m_options.fast_math) {
+        // Need to re-link arguments after any modifications
+        bool modified = false;
+        for (auto y = m_elist.begin(); y != m_elist.end(); ) {
+            auto y_next = next(y);
+            if (y->type == Element_type::CFUNC) {
+                auto f = y->f;
+                if (f->num_args == 2) {
+                    // Check for self-canceling patterns: x - x → 0, x / x → 1
+                    if (f->name == "sub" || f->name == "div") {
+                        auto arg0_chunk = get_dependent_chunk(f->args[0]);
+                        auto arg1_chunk = get_dependent_chunk(f->args[1]);
+                        elist_t chunk0(arg0_chunk.first, arg0_chunk.second);
+                        elist_t chunk1(arg1_chunk.first, arg1_chunk.second);
+                        elist_comparison comp;
+                        // Two chunks are equal if neither is less than the other
+                        if (!comp(chunk0, chunk1) && !comp(chunk1, chunk0)) {
+                            // x - x → 0, x / x → 1
+                            double result = (f->name == "sub") ? 0.0 : 1.0;
+                            // Erase both argument subtrees and replace function with constant
+                            m_elist.erase(arg1_chunk.first, arg1_chunk.second);
+                            // Re-get arg0 chunk after erasing arg1 (iterators may have shifted)
+                            arg0_chunk = get_dependent_chunk(f->args[0]);
+                            m_elist.erase(arg0_chunk.first, arg0_chunk.second);
+                            *y = Element(make_intermediate_constant(this, result));
+                            modified = true;
+                            y = y_next;
+                            continue;
+                        }
+                    }
+                    // Check for multiplication by zero: 0 * x → 0, x * 0 → 0
+                    if (f->name == "mul") {
+                        bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
+                        bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
+                        if (arg0_is_zero || arg1_is_zero) {
+                            // Erase both argument subtrees and replace function with 0
+                            auto arg0_chunk = get_dependent_chunk(f->args[0]);
+                            auto arg1_chunk = get_dependent_chunk(f->args[1]);
+                            m_elist.erase(arg1_chunk.first, arg1_chunk.second);
+                            arg0_chunk = get_dependent_chunk(f->args[0]);
+                            m_elist.erase(arg0_chunk.first, arg0_chunk.second);
+                            *y = Element(make_intermediate_constant(this, 0.0));
+                            modified = true;
+                            y = y_next;
+                            continue;
+                        }
+                    }
+                }
+            }
+            y = y_next;
+        }
+        // Re-link arguments after fast-math modifications
+        if (modified) {
+            link_arguments(m_elist);
+        }
+    }
 
     // choose more suitable functions, where applicable
     for (auto y = m_elist.begin(); y != m_elist.end(); ) {
@@ -4954,49 +5015,6 @@ void evaluator::set_expression(std::string e)
                     *y = Element(make_intermediate_constant(this, res));
                     y = y_next;
                     continue;
-                }
-            }
-
-            // Fast-math algebraic simplifications
-            // When fast_math is enabled, we apply aggressive simplifications
-            // that may not preserve IEEE semantics for special values (NaN, Inf, -0.0)
-            if (m_options.fast_math && f->num_args == 2) {
-                // Check for self-canceling patterns: x - x → 0, x / x → 1
-                if (f->name == "sub" || f->name == "div") {
-                    auto arg0_chunk = get_dependent_chunk(f->args[0]);
-                    auto arg1_chunk = get_dependent_chunk(f->args[1]);
-                    elist_t chunk0(arg0_chunk.first, arg0_chunk.second);
-                    elist_t chunk1(arg1_chunk.first, arg1_chunk.second);
-                    elist_comparison comp;
-                    // Two chunks are equal if neither is less than the other
-                    if (!comp(chunk0, chunk1) && !comp(chunk1, chunk0)) {
-                        // x - x → 0, x / x → 1
-                        double result = (f->name == "sub") ? 0.0 : 1.0;
-                        // Erase both argument subtrees and replace function with constant
-                        m_elist.erase(arg1_chunk.first, arg1_chunk.second);
-                        // Re-get arg0 chunk after erasing arg1 (iterators may have shifted)
-                        arg0_chunk = get_dependent_chunk(f->args[0]);
-                        m_elist.erase(arg0_chunk.first, arg0_chunk.second);
-                        *y = Element(make_intermediate_constant(this, result));
-                        y = y_next;
-                        continue;
-                    }
-                }
-                // Check for multiplication by zero: 0 * x → 0, x * 0 → 0
-                if (f->name == "mul") {
-                    bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
-                    bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
-                    if (arg0_is_zero || arg1_is_zero) {
-                        // Erase both argument subtrees and replace function with 0
-                        auto arg0_chunk = get_dependent_chunk(f->args[0]);
-                        auto arg1_chunk = get_dependent_chunk(f->args[1]);
-                        m_elist.erase(arg1_chunk.first, arg1_chunk.second);
-                        arg0_chunk = get_dependent_chunk(f->args[0]);
-                        m_elist.erase(arg0_chunk.first, arg0_chunk.second);
-                        *y = Element(make_intermediate_constant(this, 0.0));
-                        y = y_next;
-                        continue;
-                    }
                 }
             }
 
