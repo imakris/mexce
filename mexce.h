@@ -157,7 +157,51 @@
 namespace mexce {
 
 
+// Forward declarations
 class evaluator;
+
+// --- Runtime-configurable options ---
+//
+// These options can be set at runtime before calling set_expression().
+// Changes take effect on the next expression compilation.
+struct options {
+    // Algebraic simplifications (x-x→0, x/x→1, 0*x→0) ignoring IEEE corner cases
+    // Note: In strict IEEE mode, x-x is NaN when x is NaN; enable fast_math to simplify to 0
+    bool fast_math = false;
+
+    // Common subexpression elimination
+    bool enable_cse = false;
+
+    // Force x87 backend even when SSE2 is available
+    bool prefer_x87 = false;
+
+    // Use libm functions instead of inline x87 assembly (currently compile-time only)
+    // These are included for completeness; runtime switching requires recompilation
+    bool use_libm_sin = true;
+    bool use_libm_cos = true;
+    bool use_libm_tan = true;
+    bool use_libm_exp = true;
+    bool use_libm_log = true;
+    bool use_libm_log10 = true;
+    bool use_libm_log2 = true;
+    bool use_libm_logb = true;
+    bool use_libm_ylog2 = true;
+    bool use_libm_generic_pow = true;
+
+    // Convenience: set all libm options at once
+    void set_use_libm(bool value) {
+        use_libm_sin = value;
+        use_libm_cos = value;
+        use_libm_tan = value;
+        use_libm_exp = value;
+        use_libm_log = value;
+        use_libm_log10 = value;
+        use_libm_log2 = value;
+        use_libm_logb = value;
+        use_libm_ylog2 = value;
+        use_libm_generic_pow = value;
+    }
+};
 
 
 namespace impl {
@@ -240,10 +284,29 @@ public:
      */
     std::string get_byte_representation() const;
 
+    /**
+     * @brief Get the current options.
+     * Options affect expression compilation; changes take effect on next set_expression().
+     */
+    const options& get_options() const { return m_options; }
+
+    /**
+     * @brief Set options. Must be called before set_expression() to take effect.
+     */
+    void set_options(const options& opts) { m_options = opts; }
+
+    /**
+     * @brief Get mutable reference to options for direct modification.
+     * Example: eval.opts().fast_math = true;
+     */
+    options& opts() { return m_options; }
+
 private:
+    options                 m_options;
 
     bool                    is_constant_expression      = false;
     double                  constant_expression_value   = 0.0;
+    bool                    m_sse2_simplify_mode        = false;  // When true, asmd_optimizer reconstructs elist instead of x87 code
     size_t                  m_buffer_size               = 0;
     std::string             m_expression;
     impl::elist_t           m_elist;
@@ -561,7 +624,6 @@ shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v)
 }
 
 
-
 inline
 uint8_t* push_intermediate_code(evaluator* ev, const string& s)
 {
@@ -676,6 +738,51 @@ Token_type get_infix_rank(char infix_op)
 #ifndef MEXCE_ENABLE_CSE
 #   define MEXCE_ENABLE_CSE 0
 #endif
+
+// --- Codegen backend selection ---
+//
+// By default, mexce uses SSE2 scalar instructions for expressions that only contain
+// basic arithmetic (add, sub, mul, div, neg, abs) with constants/variables. This
+// generates faster code on modern CPUs and matches the x64 ABI's use of XMM registers.
+// For expressions with transcendentals or other unsupported operations, the x87 backend
+// is used automatically.
+//
+// Define MEXCE_PREFER_X87 to always use the x87 backend (compatibility mode).
+#ifndef MEXCE_PREFER_X87
+#   define MEXCE_PREFER_X87 0
+#endif
+
+// --- Fast-math mode ---
+//
+// When MEXCE_FAST_MATH is enabled, algebraic simplifications are applied more
+// aggressively, potentially ignoring IEEE floating-point corner cases:
+// - x - x → 0 (even when x is NaN)
+// - a * x / x → a (even when x is 0)
+// - 0 * x → 0 (even when x is inf or NaN)
+// - x / x → 1 (even when x is 0, inf, or NaN)
+//
+// This can speed up expression evaluation by eliminating redundant operations,
+// but may produce different results for special values (NaN, Inf, -0.0).
+#ifndef MEXCE_FAST_MATH
+#   define MEXCE_FAST_MATH 0
+#endif
+
+// --- SSE2 helper constants for neg/abs ---
+// These are 128-bit aligned constants used by xorpd/andpd for sign manipulation.
+// sign_mask: flip sign bit (for negate)
+// abs_mask: clear sign bit (for absolute value)
+struct alignas(16) sse2_masks {
+    // sign_mask = -0.0 (0x8000000000000000) replicated
+    uint64_t sign_mask[2] = { 0x8000000000000000ULL, 0x8000000000000000ULL };
+    // abs_mask = ~sign_bit (0x7FFFFFFFFFFFFFFF) replicated
+    uint64_t abs_mask[2]  = { 0x7FFFFFFFFFFFFFFFULL, 0x7FFFFFFFFFFFFFFFULL };
+};
+
+// Global instance for SSE2 mask constants
+inline const sse2_masks& get_sse2_masks() {
+    static const sse2_masks masks;
+    return masks;
+}
 
 // Small wrappers so we always have a concrete function pointer to patch into JIT code.
 inline double mexce_libm_pow(double base, double exp) { return std::pow(base, exp); }
@@ -2524,6 +2631,20 @@ inline Function Int()
 }
 
 
+inline Function Trunc()
+{
+    // Round toward zero (truncate) - control word bits [11:10] = 11
+    uint8_t code[] = {
+        0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x0e,   // mov         word ptr [esp-4], e7fh
+        0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]
+        0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]
+        0xd9, 0xfc,                                 // frndint
+        0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
+    };
+    return Function(0, "trunc", 1, 0, sizeof(code), code);
+}
+
+
 inline Function Mod()
 {
     uint8_t code[] = {
@@ -2843,6 +2964,919 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
 }
 
 
+// --- SSE2 backend ---
+//
+// The SSE2 backend uses XMM registers to simulate a stack similar to the x87 FPU.
+// XMM0 is the bottom of the stack.
+//
+// Platform-specific register limits:
+// - Linux/macOS (System V ABI): XMM0-XMM15 are all volatile, we use XMM0-XMM7 (8 registers)
+// - Windows x64 ABI: XMM0-XMM5 are volatile, XMM6-XMM15 must be preserved
+//   So on Windows we limit to XMM0-XMM5 (6 registers) to avoid corrupting caller state
+//
+// XMM0 is used for return values on both platforms.
+
+#ifdef _WIN32
+constexpr int k_sse2_max_registers = 6;   // XMM0-XMM5 (XMM6+ must be preserved on Windows)
+#else
+constexpr int k_sse2_max_registers = 8;   // XMM0-XMM7 (all volatile on System V ABI)
+#endif
+
+// Check if a function is a direct SSE2 arithmetic operation
+inline bool is_sse2_direct_function(const string& fn_name)
+{
+    // Basic arithmetic operations that SSE2 can handle directly,
+    // plus SSE4.1 rounding instructions (roundsd)
+    static const std::set<string> supported = {
+        "add", "sub", "mul", "div", "neg", "abs",
+        "floor", "ceil", "round", "trunc", "int"
+    };
+    return supported.find(fn_name) != supported.end();
+}
+
+// Check if a function can be called via libm in SSE2 mode
+// Note: pow is NOT included because pow_optimizer handles special cases
+// (negative bases, nested powers, integer exponents) that std::pow doesn't
+inline bool is_sse2_libm_function(const string& fn_name)
+{
+    // Transcendental and other functions that we call via libm
+    static const std::set<string> libm_funcs = {
+        "sin", "cos", "tan",
+        "exp", "ln", "log", "log10", "log2",
+        "sqrt", "logb"
+    };
+    return libm_funcs.find(fn_name) != libm_funcs.end();
+}
+
+// Check if a function name is supported by the SSE2 backend (either direct or via libm)
+inline bool is_sse2_supported_function(const string& fn_name)
+{
+    return is_sse2_direct_function(fn_name) || is_sse2_libm_function(fn_name);
+}
+
+
+// Check if an expression list contains any libm-callable functions
+inline bool sse2_needs_libm_calls(const impl::elist_const_it_t first, const impl::elist_const_it_t last)
+{
+    using namespace impl;
+    for (auto it = first; it != last; ++it) {
+        if (it->type == Element_type::CFUNC && is_sse2_libm_function(it->f->name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Check if an expression list can be fully compiled with the SSE2 backend
+inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::elist_const_it_t last, bool prefer_x87 = false)
+{
+    using namespace impl;
+
+#ifndef MEXCE_64
+    // SSE2 backend is only available on x64
+    (void)first; (void)last; (void)prefer_x87;
+    return false;
+#else
+    // Runtime check for x87 preference
+    if (prefer_x87) {
+        (void)first; (void)last;
+        return false;
+    }
+    // Estimate stack depth required - limited by platform ABI (see k_sse2_max_registers)
+    int max_depth = 0;
+    int current_depth = 0;
+
+    for (auto it = first; it != last; ++it) {
+        if (it->type == Element_type::CFUNC) {
+            // Optimized functions (from pow_optimizer etc.) have embedded x87 code
+            // and a non-empty debug_desc. These cannot be handled by SSE2.
+            if (!it->f->debug_desc.empty()) {
+                return false;
+            }
+            if (!is_sse2_supported_function(it->f->name)) {
+                return false;
+            }
+            // Function consumes args and produces 1 result
+            current_depth = current_depth - static_cast<int>(it->f->num_args) + 1;
+        } else {
+            // CVAR or CCONST pushes one value
+            ++current_depth;
+        }
+        if (current_depth > max_depth) {
+            max_depth = current_depth;
+        }
+    }
+
+    // If max depth exceeds register limit, use x87 with optimizer instead
+    // The x87 asmd_optimizer can reduce stack depth for chains of operations
+    if (max_depth > k_sse2_max_registers) {
+        return false;
+    }
+
+    return true;
+#endif
+}
+
+
+// Structure to track a pending RIP-relative constant load that needs patching
+struct PendingRipConstant {
+    size_t patch_offset;    // Offset in code buffer where the displacement needs to be written
+    double value;           // The constant value to embed
+};
+
+// Emit movsd xmm[reg], [rip+disp32] with placeholder displacement (returns patch offset)
+// The displacement will be patched later when we know where the constant is located
+inline size_t emit_sse2_load_rip_relative_placeholder(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // movsd xmm[reg], [rip+disp32]
+    // F2 [REX] 0F 10 ModRM disp32
+    // ModRM for [rip+disp32] = 0x05 + (reg & 7) * 8
+    s < 0xF2;
+    if (reg >= 8) {
+        s < 0x44;  // REX.R
+    }
+    s < 0x0F < 0x10;
+    s < (uint8_t)(0x05 + (reg & 7) * 8);  // ModRM: mod=00, reg=reg&7, r/m=101
+    size_t patch_offset = s.buf.size();
+    s << (int32_t)0;  // Placeholder displacement
+    return patch_offset;
+#else
+    (void)s; (void)reg;
+    return 0;
+#endif
+}
+
+// Finalize RIP-relative constants: append constant data and patch displacements
+inline void finalize_rip_constants(impl::mexce_charstream& s, std::vector<PendingRipConstant>& pending)
+{
+#ifdef MEXCE_64
+    if (pending.empty()) return;
+
+    // Align to 8 bytes for double alignment
+    while (s.buf.size() % 8 != 0) {
+        s < 0x90;  // NOP for padding (won't be executed)
+    }
+
+    // Build a map of unique constant values to their offsets
+    std::map<double, size_t> const_offsets;
+
+    // First pass: identify unique constants and allocate space
+    for (const auto& pc : pending) {
+        if (const_offsets.find(pc.value) == const_offsets.end()) {
+            const_offsets[pc.value] = s.buf.size();
+            // Append the constant value (8 bytes for double)
+            s << pc.value;
+        }
+    }
+
+    // Second pass: patch all displacements
+    for (const auto& pc : pending) {
+        size_t const_offset = const_offsets[pc.value];
+        // Displacement = target - (rip after instruction)
+        // RIP after instruction = patch_offset + 4 (size of disp32)
+        int32_t disp = (int32_t)(const_offset - (pc.patch_offset + 4));
+        std::memcpy(s.buf.data() + pc.patch_offset, &disp, sizeof(disp));
+    }
+
+    pending.clear();
+#else
+    (void)s; (void)pending;
+#endif
+}
+
+
+// Emit code to load a 64-bit address into RAX (x64 only)
+inline void emit_load_address_rax(impl::mexce_charstream& s, const void* addr)
+{
+#ifdef MEXCE_64
+    s << (uint16_t)0xb848;    // mov rax, imm64
+    s << addr;
+#else
+    (void)s; (void)addr;
+#endif
+}
+
+
+// Emit movsd xmm[reg], [rax] - load double from memory pointed by RAX
+inline void emit_sse2_load_from_rax(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // movsd xmm[reg], [rax]
+    // F2 [REX] 0F 10 ModRM
+    // ModRM = (00 << 6) | (reg << 3) | 0 = reg * 8
+    if (reg >= 8) {
+        s < 0xF2 < 0x44 < 0x0F < 0x10 < (uint8_t)((reg - 8) * 8);
+    } else {
+        s < 0xF2 < 0x0F < 0x10 < (uint8_t)(reg * 8);
+    }
+#else
+    (void)s; (void)reg;
+#endif
+}
+
+
+// Emit movsd xmm[dst], xmm[src] - copy between XMM registers
+inline void emit_sse2_mov_reg_reg(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // movsd xmm[dst], xmm[src]
+    // F2 [REX] 0F 10 ModRM
+    // ModRM = (11 << 6) | (dst << 3) | src = 0xC0 + dst*8 + src
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;  // REX.R
+    if (src >= 8) rex |= 0x41;  // REX.B
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x10 < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+
+// Emit addsd xmm[dst], xmm[src]
+inline void emit_sse2_addsd(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // F2 [REX] 0F 58 ModRM
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;
+    if (src >= 8) rex |= 0x41;
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x58 < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+
+// Emit subsd xmm[dst], xmm[src]
+inline void emit_sse2_subsd(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // F2 [REX] 0F 5C ModRM
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;
+    if (src >= 8) rex |= 0x41;
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x5C < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+
+// Emit mulsd xmm[dst], xmm[src]
+inline void emit_sse2_mulsd(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // F2 [REX] 0F 59 ModRM
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;
+    if (src >= 8) rex |= 0x41;
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x59 < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+
+// Emit divsd xmm[dst], xmm[src]
+inline void emit_sse2_divsd(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // F2 [REX] 0F 5E ModRM
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;
+    if (src >= 8) rex |= 0x41;
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x5E < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+
+// --- RIP-relative memory operand variants for arithmetic ---
+// These emit instructions like "addsd xmm, [rip+disp32]" with placeholder displacement
+// Returns the patch offset for the displacement
+
+inline size_t emit_sse2_addsd_rip_placeholder(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // addsd xmm[reg], [rip+disp32]: F2 [REX] 0F 58 ModRM disp32
+    s < 0xF2;
+    if (reg >= 8) s < 0x44;
+    s < 0x0F < 0x58;
+    s < (uint8_t)(0x05 + (reg & 7) * 8);  // ModRM: mod=00, reg=reg&7, r/m=101
+    size_t patch_offset = s.buf.size();
+    s << (int32_t)0;
+    return patch_offset;
+#else
+    (void)s; (void)reg;
+    return 0;
+#endif
+}
+
+inline size_t emit_sse2_subsd_rip_placeholder(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // subsd xmm[reg], [rip+disp32]: F2 [REX] 0F 5C ModRM disp32
+    s < 0xF2;
+    if (reg >= 8) s < 0x44;
+    s < 0x0F < 0x5C;
+    s < (uint8_t)(0x05 + (reg & 7) * 8);
+    size_t patch_offset = s.buf.size();
+    s << (int32_t)0;
+    return patch_offset;
+#else
+    (void)s; (void)reg;
+    return 0;
+#endif
+}
+
+inline size_t emit_sse2_mulsd_rip_placeholder(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // mulsd xmm[reg], [rip+disp32]: F2 [REX] 0F 59 ModRM disp32
+    s < 0xF2;
+    if (reg >= 8) s < 0x44;
+    s < 0x0F < 0x59;
+    s < (uint8_t)(0x05 + (reg & 7) * 8);
+    size_t patch_offset = s.buf.size();
+    s << (int32_t)0;
+    return patch_offset;
+#else
+    (void)s; (void)reg;
+    return 0;
+#endif
+}
+
+inline size_t emit_sse2_divsd_rip_placeholder(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // divsd xmm[reg], [rip+disp32]: F2 [REX] 0F 5E ModRM disp32
+    s < 0xF2;
+    if (reg >= 8) s < 0x44;
+    s < 0x0F < 0x5E;
+    s < (uint8_t)(0x05 + (reg & 7) * 8);
+    size_t patch_offset = s.buf.size();
+    s << (int32_t)0;
+    return patch_offset;
+#else
+    (void)s; (void)reg;
+    return 0;
+#endif
+}
+
+
+// Emit xorpd xmm[reg], [addr] - XOR with 128-bit memory (for negate)
+inline void emit_sse2_xorpd_mem(impl::mexce_charstream& s, int reg, const void* addr)
+{
+#ifdef MEXCE_64
+    // Load address into RAX first, then xorpd xmm[reg], [rax]
+    emit_load_address_rax(s, addr);
+    // 66 [REX] 0F 57 ModRM
+    uint8_t rex = 0;
+    if (reg >= 8) rex |= 0x44;
+    int reg_enc = reg & 7;
+    s < 0x66;
+    if (rex) s < rex;
+    s < 0x0F < 0x57 < (uint8_t)(reg_enc * 8);  // ModRM for [rax]
+#else
+    (void)s; (void)reg; (void)addr;
+#endif
+}
+
+
+// Emit andpd xmm[reg], [addr] - AND with 128-bit memory (for abs)
+inline void emit_sse2_andpd_mem(impl::mexce_charstream& s, int reg, const void* addr)
+{
+#ifdef MEXCE_64
+    // Load address into RAX first, then andpd xmm[reg], [rax]
+    emit_load_address_rax(s, addr);
+    // 66 [REX] 0F 54 ModRM
+    uint8_t rex = 0;
+    if (reg >= 8) rex |= 0x44;
+    int reg_enc = reg & 7;
+    s < 0x66;
+    if (rex) s < rex;
+    s < 0x0F < 0x54 < (uint8_t)(reg_enc * 8);  // ModRM for [rax]
+#else
+    (void)s; (void)reg; (void)addr;
+#endif
+}
+
+
+// Emit xorpd xmm[reg], xmm[reg] - zero a register
+inline void emit_sse2_xorpd_self(impl::mexce_charstream& s, int reg)
+{
+#ifdef MEXCE_64
+    // 66 [REX] 0F 57 ModRM
+    uint8_t rex = 0;
+    if (reg >= 8) rex |= 0x44 | 0x01;  // REX.R and REX.B
+    int reg_enc = reg & 7;
+    s < 0x66;
+    if (rex) s < rex;
+    s < 0x0F < 0x57 < (uint8_t)(0xC0 + reg_enc * 8 + reg_enc);
+#else
+    (void)s; (void)reg;
+#endif
+}
+
+
+// Emit movsd [rsp+offset], xmm[reg] - save XMM register to stack
+inline void emit_sse2_save_to_stack(impl::mexce_charstream& s, int reg, int offset)
+{
+#ifdef MEXCE_64
+    // movsd [rsp+offset], xmm[reg]
+    // F2 [REX] 0F 11 ModRM SIB disp8/disp32
+    uint8_t rex = 0;
+    if (reg >= 8) rex |= 0x44;  // REX.R
+    int reg_enc = reg & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x11;
+    if (offset == 0) {
+        s < (uint8_t)(0x04 + reg_enc * 8) < 0x24;  // [rsp]
+    } else if (offset <= 127) {
+        s < (uint8_t)(0x44 + reg_enc * 8) < 0x24 < (uint8_t)offset;  // [rsp+disp8]
+    } else {
+        s < (uint8_t)(0x84 + reg_enc * 8) < 0x24;  // [rsp+disp32]
+        s << (uint32_t)offset;
+    }
+#else
+    (void)s; (void)reg; (void)offset;
+#endif
+}
+
+
+// Emit movsd xmm[reg], [rsp+offset] - restore XMM register from stack
+inline void emit_sse2_load_from_stack(impl::mexce_charstream& s, int reg, int offset)
+{
+#ifdef MEXCE_64
+    // movsd xmm[reg], [rsp+offset]
+    // F2 [REX] 0F 10 ModRM SIB disp8/disp32
+    uint8_t rex = 0;
+    if (reg >= 8) rex |= 0x44;  // REX.R
+    int reg_enc = reg & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x10;
+    if (offset == 0) {
+        s < (uint8_t)(0x04 + reg_enc * 8) < 0x24;  // [rsp]
+    } else if (offset <= 127) {
+        s < (uint8_t)(0x44 + reg_enc * 8) < 0x24 < (uint8_t)offset;  // [rsp+disp8]
+    } else {
+        s < (uint8_t)(0x84 + reg_enc * 8) < 0x24;  // [rsp+disp32]
+        s << (uint32_t)offset;
+    }
+#else
+    (void)s; (void)reg; (void)offset;
+#endif
+}
+
+
+// Emit sqrtsd xmm[dst], xmm[src] - square root
+inline void emit_sse2_sqrtsd(impl::mexce_charstream& s, int dst, int src)
+{
+#ifdef MEXCE_64
+    // F2 [REX] 0F 51 ModRM
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;
+    if (src >= 8) rex |= 0x41;
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0xF2;
+    if (rex) s < rex;
+    s < 0x0F < 0x51 < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+#else
+    (void)s; (void)dst; (void)src;
+#endif
+}
+
+// SSE4.1 rounding mode constants for roundsd
+constexpr uint8_t k_roundsd_nearest = 0x08;  // Round to nearest (ties to even)
+constexpr uint8_t k_roundsd_floor   = 0x09;  // Round toward -infinity
+constexpr uint8_t k_roundsd_ceil    = 0x0A;  // Round toward +infinity
+constexpr uint8_t k_roundsd_trunc   = 0x0B;  // Round toward zero (truncate)
+
+// Emit roundsd xmm[dst], xmm[src], imm8 - SSE4.1 rounding instruction
+inline void emit_sse41_roundsd(impl::mexce_charstream& s, int dst, int src, uint8_t mode)
+{
+#ifdef MEXCE_64
+    // 66 [REX] 0F 3A 0B ModRM imm8
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;  // REX.R
+    if (src >= 8) rex |= 0x41;  // REX.B
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0x66;
+    if (rex) s < rex;
+    s < 0x0F < 0x3A < 0x0B < (uint8_t)(0xC0 + dst_enc * 8 + src_enc) < mode;
+#else
+    (void)s; (void)dst; (void)src; (void)mode;
+#endif
+}
+
+
+// Emit a unary libm call in SSE2 mode
+// Argument is at xmm[depth-1], result will be at xmm[depth-1]
+// Saves and restores xmm registers 0 to depth-2 around the call
+inline void emit_sse2_libm_unary_call(impl::mexce_charstream& s, void* fn_ptr, int depth)
+{
+#ifdef MEXCE_64
+    const int arg_reg = depth - 1;
+    const int save_start_offset = 48;  // [rsp+48] onwards for XMM saves
+
+    // Save XMM0 to XMM[arg_reg-1] to stack
+    for (int i = 0; i < arg_reg; ++i) {
+        emit_sse2_save_to_stack(s, i, save_start_offset + i * 8);
+    }
+
+    // Move argument to XMM0 if not already there
+    if (arg_reg != 0) {
+        emit_sse2_mov_reg_reg(s, 0, arg_reg);
+    }
+
+    // Call the function
+    s < 0x48 < 0xB8;  // mov rax, imm64
+    s << fn_ptr;
+    s < 0xFF < 0xD0;  // call rax
+
+    // Move result from XMM0 to target register
+    if (arg_reg != 0) {
+        emit_sse2_mov_reg_reg(s, arg_reg, 0);
+    }
+
+    // Restore XMM0 to XMM[arg_reg-1] from stack
+    for (int i = 0; i < arg_reg; ++i) {
+        emit_sse2_load_from_stack(s, i, save_start_offset + i * 8);
+    }
+#else
+    (void)s; (void)fn_ptr; (void)depth;
+#endif
+}
+
+
+// Emit a binary libm call in SSE2 mode
+// Arguments are at xmm[depth-2] (first arg) and xmm[depth-1] (second arg)
+// Result will be at xmm[depth-2], depth becomes depth-1
+// Saves and restores xmm registers 0 to depth-3 around the call
+inline void emit_sse2_libm_binary_call(impl::mexce_charstream& s, void* fn_ptr, int depth)
+{
+#ifdef MEXCE_64
+    const int arg1_reg = depth - 2;  // First argument (goes to XMM0)
+    const int arg2_reg = depth - 1;  // Second argument (goes to XMM1)
+    const int save_start_offset = 48;  // [rsp+48] onwards for XMM saves
+
+    // Save XMM0 to XMM[arg1_reg-1] to stack (registers below arguments)
+    for (int i = 0; i < arg1_reg; ++i) {
+        emit_sse2_save_to_stack(s, i, save_start_offset + i * 8);
+    }
+
+    // Move arguments to XMM0 and XMM1
+    // Be careful about order to avoid clobbering
+    if (arg1_reg == 1) {
+        // arg1 is in XMM1, arg2 is in XMM2
+        // Move XMM2 to XMM1 first, then XMM1 to XMM0
+        emit_sse2_mov_reg_reg(s, 1, arg2_reg);
+        emit_sse2_mov_reg_reg(s, 0, arg1_reg);  // arg1_reg is still 1, but we already saved it
+    } else if (arg1_reg == 0) {
+        // arg1 is in XMM0 (already correct), arg2 is in XMM1 (already correct or not)
+        if (arg2_reg != 1) {
+            emit_sse2_mov_reg_reg(s, 1, arg2_reg);
+        }
+    } else {
+        // arg1_reg >= 2, both need to move
+        emit_sse2_mov_reg_reg(s, 0, arg1_reg);
+        emit_sse2_mov_reg_reg(s, 1, arg2_reg);
+    }
+
+    // Call the function
+    s < 0x48 < 0xB8;  // mov rax, imm64
+    s << fn_ptr;
+    s < 0xFF < 0xD0;  // call rax
+
+    // Move result from XMM0 to target register (arg1_reg position)
+    if (arg1_reg != 0) {
+        emit_sse2_mov_reg_reg(s, arg1_reg, 0);
+    }
+
+    // Restore XMM0 to XMM[arg1_reg-1] from stack
+    for (int i = 0; i < arg1_reg; ++i) {
+        emit_sse2_load_from_stack(s, i, save_start_offset + i * 8);
+    }
+#else
+    (void)s; (void)fn_ptr; (void)depth;
+#endif
+}
+
+
+// Compile an expression list using SSE2 instructions (x64 only)
+// Uses XMM registers as a simulated stack: XMM0 = bottom, XMM7 = top
+// pending_constants: output vector for RIP-relative constant loads that need patching
+#ifdef MEXCE_64
+inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last,
+                               std::vector<PendingRipConstant>& pending_constants)
+{
+    using namespace impl;
+
+    int depth = 0;  // Current stack depth (number of values on simulated stack)
+    const auto& masks = get_sse2_masks();
+
+    // RAX address cache: track what address is currently in RAX to skip redundant loads
+    // This optimization eliminates repeated 'mov rax, addr' instructions when the same
+    // address is loaded multiple times. Set to nullptr when RAX is clobbered (e.g., by calls).
+    const void* rax_cached = nullptr;
+
+    // Helper lambda: emit 'mov rax, addr' only if RAX doesn't already contain this address
+    auto emit_load_rax_if_needed = [&](const void* addr) {
+        if (rax_cached != addr) {
+            emit_load_address_rax(code_buffer, addr);
+            rax_cached = addr;
+        }
+    };
+
+    // Memory operand fusion: track pending constant for binary operations
+    // When we see CCONST followed by add/sub/mul/div, we can skip the load
+    // and use a memory operand directly in the arithmetic instruction
+    bool has_pending_mem_operand = false;
+    double pending_mem_value = 0.0;
+
+    for (auto it = first; it != last; ++it) {
+        // Peephole: if the same leaf is loaded twice in a row, duplicate the register
+        if (it != first && (it->type == Element_type::CVAR || it->type == Element_type::CCONST)) {
+            auto prev = it;
+            --prev;
+            if (prev->type == it->type && prev->id == it->id) {
+                // Copy xmm[depth-1] to xmm[depth]
+                emit_sse2_mov_reg_reg(code_buffer, depth, depth - 1);
+                ++depth;
+                if (depth > k_sse2_max_registers) {
+                    throw std::overflow_error("Expression too complex for SSE2 backend (register overflow)");
+                }
+                continue;
+            }
+        }
+
+        switch (it->type) {
+            case Element_type::CVAR: {
+                auto tn = it->v;
+                // Load variable into xmm[depth]
+
+                // For non-double types, we need to convert. For simplicity, use x87 for conversion
+                // and then transfer to XMM. Actually, let's handle M64FP directly and fall back for others.
+                if (tn->numeric_data_type == M64FP) {
+                    emit_load_rax_if_needed((void*)tn->address);
+                    emit_sse2_load_from_rax(code_buffer, depth);
+                }
+                else if (tn->numeric_data_type == M32FP) {
+                    // cvtss2sd xmm[depth], [rax] - convert single to double
+                    emit_load_rax_if_needed((void*)tn->address);
+                    // F3 0F 5A ModRM (cvtss2sd)
+                    int reg = depth;
+                    if (reg >= 8) {
+                        code_buffer < 0xF3 < 0x44 < 0x0F < 0x5A < (uint8_t)((reg - 8) * 8);
+                    } else {
+                        code_buffer < 0xF3 < 0x0F < 0x5A < (uint8_t)(reg * 8);
+                    }
+                }
+                else {
+                    // Integer types: load to x87, convert, store to stack, load to XMM
+                    // This is a fallback path; for full SSE2 we'd need separate int->double conversion
+                    emit_load_rax_if_needed((void*)tn->address);
+                    switch (tn->numeric_data_type) {
+                        case M16INT:  code_buffer < 0xdf < 0x00; break;  // fild word ptr [rax]
+                        case M32INT:  code_buffer < 0xdb < 0x00; break;  // fild dword ptr [rax]
+                        case M64INT:  code_buffer < 0xdf < 0x28; break;  // fild qword ptr [rax]
+                        default: break;
+                    }
+                    // fstp qword ptr [rsp]
+                    code_buffer < 0xDD < 0x1C < 0x24;
+                    // movsd xmm[depth], [rsp]
+                    int reg = depth;
+                    if (reg >= 8) {
+                        code_buffer < 0xF2 < 0x44 < 0x0F < 0x10 < (uint8_t)(0x04 + (reg - 8) * 8) < 0x24;
+                    } else {
+                        code_buffer < 0xF2 < 0x0F < 0x10 < (uint8_t)(0x04 + reg * 8) < 0x24;
+                    }
+                }
+                ++depth;
+                break;
+            }
+            case Element_type::CCONST: {
+                auto tn = it->c;
+                double v = tn->value;
+
+                // Fast path for zero
+                if (v == 0.0 && !std::signbit(v)) {
+                    emit_sse2_xorpd_self(code_buffer, depth);
+                    ++depth;
+                }
+                else {
+                    // Check if we can fuse this constant load with the next binary operation
+                    // Look ahead: if next element is add/sub/mul/div and depth > 0, we can skip
+                    // the load and use memory operand directly in the arithmetic instruction
+                    auto next_it = it;
+                    ++next_it;
+                    bool can_fuse = false;
+                    if (depth > 0 && next_it != last && next_it->type == Element_type::CFUNC) {
+                        const string& next_fn = next_it->f->name;
+                        if (next_fn == "add" || next_fn == "sub" || next_fn == "mul" || next_fn == "div") {
+                            can_fuse = true;
+                        }
+                    }
+
+                    if (can_fuse) {
+                        // Don't emit load; store pending constant for the next binary op
+                        has_pending_mem_operand = true;
+                        pending_mem_value = v;
+                        // Note: depth does NOT increase (we're not pushing to register stack)
+                    }
+                    else {
+                        // Use RIP-relative addressing for constants (embedded at end of code)
+                        // This saves 6 bytes per load vs absolute addressing (8 vs 14 bytes)
+                        size_t patch_pos = emit_sse2_load_rip_relative_placeholder(code_buffer, depth);
+                        pending_constants.push_back({patch_pos, v});
+                        ++depth;
+                    }
+                }
+                break;
+            }
+            case Element_type::CFUNC: {
+                auto tf = it->f;
+                const string& fn = tf->name;
+
+                if (fn == "add") {
+                    if (has_pending_mem_operand) {
+                        // Fused: addsd xmm[depth-1], [rip+const]
+                        size_t patch_pos = emit_sse2_addsd_rip_placeholder(code_buffer, depth - 1);
+                        pending_constants.push_back({patch_pos, pending_mem_value});
+                        has_pending_mem_operand = false;
+                        // depth stays the same (we didn't push the constant)
+                    } else {
+                        // xmm[depth-2] = xmm[depth-2] + xmm[depth-1]
+                        emit_sse2_addsd(code_buffer, depth - 2, depth - 1);
+                        --depth;
+                    }
+                }
+                else if (fn == "sub") {
+                    if (has_pending_mem_operand) {
+                        // Fused: subsd xmm[depth-1], [rip+const]
+                        size_t patch_pos = emit_sse2_subsd_rip_placeholder(code_buffer, depth - 1);
+                        pending_constants.push_back({patch_pos, pending_mem_value});
+                        has_pending_mem_operand = false;
+                    } else {
+                        // xmm[depth-2] = xmm[depth-2] - xmm[depth-1]
+                        emit_sse2_subsd(code_buffer, depth - 2, depth - 1);
+                        --depth;
+                    }
+                }
+                else if (fn == "mul") {
+                    if (has_pending_mem_operand) {
+                        // Fused: mulsd xmm[depth-1], [rip+const]
+                        size_t patch_pos = emit_sse2_mulsd_rip_placeholder(code_buffer, depth - 1);
+                        pending_constants.push_back({patch_pos, pending_mem_value});
+                        has_pending_mem_operand = false;
+                    } else {
+                        // xmm[depth-2] = xmm[depth-2] * xmm[depth-1]
+                        emit_sse2_mulsd(code_buffer, depth - 2, depth - 1);
+                        --depth;
+                    }
+                }
+                else if (fn == "div") {
+                    if (has_pending_mem_operand) {
+                        // Fused: divsd xmm[depth-1], [rip+const]
+                        size_t patch_pos = emit_sse2_divsd_rip_placeholder(code_buffer, depth - 1);
+                        pending_constants.push_back({patch_pos, pending_mem_value});
+                        has_pending_mem_operand = false;
+                    } else {
+                        // xmm[depth-2] = xmm[depth-2] / xmm[depth-1]
+                        emit_sse2_divsd(code_buffer, depth - 2, depth - 1);
+                        --depth;
+                    }
+                }
+                else if (fn == "neg") {
+                    // xmm[depth-1] = -xmm[depth-1] via XOR with sign mask
+                    // Inline xorpd_mem to use RAX cache
+                    emit_load_rax_if_needed((void*)masks.sign_mask);
+                    // 66 [REX] 0F 57 ModRM for xorpd xmm[reg], [rax]
+                    int reg = depth - 1;
+                    uint8_t rex = 0;
+                    if (reg >= 8) rex |= 0x44;
+                    int reg_enc = reg & 7;
+                    code_buffer < 0x66;
+                    if (rex) code_buffer < rex;
+                    code_buffer < 0x0F < 0x57 < (uint8_t)(reg_enc * 8);
+                }
+                else if (fn == "abs") {
+                    // xmm[depth-1] = |xmm[depth-1]| via AND with abs mask
+                    // Inline andpd_mem to use RAX cache
+                    emit_load_rax_if_needed((void*)masks.abs_mask);
+                    // 66 [REX] 0F 54 ModRM for andpd xmm[reg], [rax]
+                    int reg = depth - 1;
+                    uint8_t rex = 0;
+                    if (reg >= 8) rex |= 0x44;
+                    int reg_enc = reg & 7;
+                    code_buffer < 0x66;
+                    if (rex) code_buffer < rex;
+                    code_buffer < 0x0F < 0x54 < (uint8_t)(reg_enc * 8);
+                }
+                // --- libm unary functions ---
+                else if (fn == "sin") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::sin), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
+                }
+                else if (fn == "cos") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::cos), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
+                }
+                else if (fn == "tan") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::tan), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
+                }
+                else if (fn == "exp") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::exp), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
+                }
+                else if (fn == "ln" || fn == "log") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
+                }
+                else if (fn == "log10") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log10), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
+                }
+                else if (fn == "log2") {
+                    emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log2), depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
+                }
+                else if (fn == "sqrt") {
+                    // sqrt has a direct SSE2 instruction
+                    emit_sse2_sqrtsd(code_buffer, depth - 1, depth - 1);
+                }
+                // --- SSE4.1 rounding functions ---
+                else if (fn == "floor") {
+                    emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_floor);
+                }
+                else if (fn == "ceil") {
+                    emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_ceil);
+                }
+                else if (fn == "round") {
+                    emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_nearest);
+                }
+                else if (fn == "trunc") {
+                    emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_trunc);
+                }
+                else if (fn == "int") {
+                    // int uses current rounding mode (default: nearest even), like frndint
+                    emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_nearest);
+                }
+                // --- libm binary functions ---
+                else if (fn == "logb") {
+                    emit_sse2_libm_binary_call(code_buffer, (void*)&mexce_libm_logb, depth);
+                    rax_cached = nullptr;  // RAX clobbered by call
+                    --depth;
+                }
+                // Note: CSE store suffix is not emitted in SSE2 path as CSE uses x87 instructions
+                break;
+            }
+        }
+
+        if (depth > k_sse2_max_registers) {
+            throw std::overflow_error("Expression too complex for SSE2 backend (register overflow)");
+        }
+    }
+
+    // After processing, result should be in xmm[depth-1].
+    // For return, we need it in xmm0.
+    if (depth == 1) {
+        // Result is in xmm0, perfect
+    }
+    else if (depth > 1) {
+        // Move result to xmm0
+        emit_sse2_mov_reg_reg(code_buffer, 0, depth - 1);
+    }
+    // depth == 0 means empty expression, xmm0 will be undefined
+}
+#endif
 
 
 inline string infix_operator_to_function_name(const string& op)
@@ -3082,12 +4116,163 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 merged.pop_back();
             }
         }
-        else 
+        else
         if (term.factor != 0) {
             merged.push_back({std::move(term.chunk), term.factor});
         }
     }
 
+    // === SSE2 simplification: reconstruct simplified elist ===
+    // Instead of generating x87 code, build a new elist from the simplified terms.
+    if (ev->m_sse2_simplify_mode) {
+        // Build debug string for get_optimized_expression()
+        stringstream debug_ss;
+        bool debug_first = true;
+        if (fclass == 1) {
+            if (ac_final != neutral) { debug_ss << double_to_pretty_string(ac_final); debug_first = false; }
+            for (auto &term : merged) {
+                string term_str = "(" + elist_to_string(term.chunk) + ")";
+                if (term.factor > 0) {
+                    if (!debug_first) debug_ss << "+";
+                    if (term.factor != 1) debug_ss << term.factor << "*";
+                    debug_ss << term_str;
+                } else {
+                    debug_ss << "-";
+                    if (term.factor != -1) debug_ss << abs(term.factor) << "*";
+                    debug_ss << term_str;
+                }
+                debug_first = false;
+            }
+        } else {
+            if (ac_final != neutral) { debug_ss << double_to_pretty_string(ac_final); debug_first = false; }
+            for (auto &term : merged) {
+                string term_str = "(" + elist_to_string(term.chunk) + ")";
+                if (term.factor > 0) {
+                    if (!debug_first) debug_ss << "*";
+                    debug_ss << term_str;
+                    if (term.factor != 1) debug_ss << "^" << term.factor;
+                } else {
+                    if (debug_first) debug_ss << "1";
+                    debug_ss << "/";
+                    debug_ss << term_str;
+                    if (term.factor != -1) debug_ss << "^" << abs(term.factor);
+                }
+                debug_first = false;
+            }
+        }
+        if (debug_first) debug_ss << double_to_pretty_string(ac_final);
+
+        // Reconstruct elist in postfix order
+        elist_t result;
+
+        if (merged.empty()) {
+            // Pure constant result
+            result.push_back(Element(make_intermediate_constant(ev, ac_final)));
+        }
+        else if (fclass == 1) {
+            // Additive: ac_final + factor1*term1 + factor2*term2 + ...
+            // Build postfix: [ac_final] [term1] [*factor1 if needed] [neg if negative] [add if not first] ...
+            bool have_value = false;
+
+            if (ac_final != neutral) {
+                result.push_back(Element(make_intermediate_constant(ev, ac_final)));
+                have_value = true;
+            }
+
+            for (auto &term : merged) {
+                // Insert the term's chunk
+                for (auto &elem : term.chunk) {
+                    result.push_back(elem);
+                }
+
+                // Apply factor magnitude if |factor| > 1
+                int abs_factor = abs(term.factor);
+                if (abs_factor > 1) {
+                    result.push_back(Element(make_intermediate_constant(ev, static_cast<double>(abs_factor))));
+                    result.push_back(Element(make_function(ev, "mul")));
+                }
+
+                // Combine with running total
+                if (have_value) {
+                    if (term.factor > 0) {
+                        result.push_back(Element(make_function(ev, "add")));
+                    } else {
+                        result.push_back(Element(make_function(ev, "sub")));
+                    }
+                } else {
+                    // First term - negate if negative factor
+                    if (term.factor < 0) {
+                        result.push_back(Element(make_function(ev, "neg")));
+                    }
+                    have_value = true;
+                }
+            }
+        }
+        else {
+            // Multiplicative: ac_final * term1^factor1 / term2^|factor2| * ...
+            bool have_value = false;
+
+            if (ac_final != neutral) {
+                result.push_back(Element(make_intermediate_constant(ev, ac_final)));
+                have_value = true;
+            }
+
+            for (auto &term : merged) {
+                // Insert the term's chunk
+                for (auto &elem : term.chunk) {
+                    result.push_back(elem);
+                }
+
+                // Apply power if |factor| > 1
+                int abs_factor = abs(term.factor);
+                if (abs_factor == 2) {
+                    // x^2 = x * x: duplicate chunk and multiply
+                    for (auto &elem : term.chunk) {
+                        result.push_back(elem);
+                    }
+                    result.push_back(Element(make_function(ev, "mul")));
+                } else if (abs_factor > 2) {
+                    // Use pow for higher powers
+                    result.push_back(Element(make_intermediate_constant(ev, static_cast<double>(abs_factor))));
+                    result.push_back(Element(make_function(ev, "pow")));
+                }
+
+                // Combine with running total
+                if (have_value) {
+                    if (term.factor > 0) {
+                        result.push_back(Element(make_function(ev, "mul")));
+                    } else {
+                        result.push_back(Element(make_function(ev, "div")));
+                    }
+                } else {
+                    // First term with negative factor means 1/term
+                    if (term.factor < 0) {
+                        // Insert 1.0 at the beginning, then div
+                        result.insert(result.begin(), Element(make_intermediate_constant(ev, 1.0)));
+                        result.push_back(Element(make_function(ev, "div")));
+                    }
+                    have_value = true;
+                }
+            }
+        }
+
+        // Replace current function node with the simplified elist
+        // First, erase the current node, then insert result elements
+        auto insert_pos = elist->erase(it);
+        for (auto &elem : result) {
+            insert_pos = elist->insert(insert_pos, elem);
+            ++insert_pos;
+        }
+
+        // Re-link arguments after modifying the elist. This is critical because
+        // other functions (later in the iteration) have args pointers that may
+        // now be invalid after our erase/insert operations.
+        link_arguments(*elist);
+
+        return;
+    }
+
+    // === x87 code generation (original path) ===
     mexce_charstream s;
     stringstream debug_ss;
     bool debug_first = true;
@@ -3366,7 +4551,7 @@ inline const map<string, Function>& make_function_map()
     if (ret.empty()) { // Initialize only once
         Function f[] = {
             Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(), Lt(), Gt(), Le(), Ge(), Eq(), Ne(),
-            Log(), Log2(), Ln(), Log10(), Logb(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
+            Log(), Log2(), Ln(), Log10(), Logb(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Trunc(), Mod(),
             Bnd(), Add(), Sub(), Neg(), Mul(), Div(), Bias(), Gain()
         };
         for (auto& e : f) {
@@ -4179,12 +5364,93 @@ void evaluator::set_expression(std::string e)
     // link functions to their arguments (1)
     link_arguments(m_elist);
 
-#if MEXCE_ENABLE_CSE
     // Run Common Subexpression Elimination (CSE)
-    // This must run before destructive optimizers (asmd, pow) to catch 
+    // This must run before destructive optimizers (asmd, pow) to catch
     // identical subtrees like div(2.2, y).
-    run_cse(this, m_elist);
-#endif
+    if (m_options.enable_cse) {
+        run_cse(this, m_elist);
+    }
+
+    // Check if the expression is SSE2-compatible BEFORE running optimizers.
+    // For SSE2, we still want the algebraic simplifications from asmd_optimizer,
+    // but we want it to output a simplified elist instead of x87 code.
+    m_sse2_simplify_mode = is_sse2_compatible(m_elist.begin(), m_elist.end(), m_options.prefer_x87);
+
+    // Fast-math algebraic simplifications - run in a SEPARATE PASS before any optimizer
+    // modifies the expression structure. This must happen before asmd_optimizer which
+    // transforms the elist in ways that would confuse the chunk comparison.
+    if (m_options.fast_math) {
+        // Helper lambda to check if two chunks are structurally equal
+        // Avoids creating copies for the common case of simple single-element comparisons
+        auto chunks_equal = [](elist_it_t first0, elist_it_t last0,
+                               elist_it_t first1, elist_it_t last1) -> bool {
+            // Quick size comparison using distance
+            auto size0 = std::distance(first0, last0);
+            auto size1 = std::distance(first1, last1);
+            if (size0 != size1) return false;
+
+            // Element-by-element comparison (in-place, no copies)
+            auto it0 = first0;
+            auto it1 = first1;
+            for (; it0 != last0; ++it0, ++it1) {
+                if (it0->type != it1->type) return false;
+                if (it0->id != it1->id) return false;
+            }
+            return true;
+        };
+
+        // Need to re-link arguments after any modifications
+        bool modified = false;
+        for (auto y = m_elist.begin(); y != m_elist.end(); ) {
+            auto y_next = next(y);
+            if (y->type == Element_type::CFUNC) {
+                auto f = y->f;
+                if (f->num_args == 2) {
+                    // Check for self-canceling patterns: x - x → 0, x / x → 1
+                    if (f->name == "sub" || f->name == "div") {
+                        auto arg0_chunk = get_dependent_chunk(f->args[0]);
+                        auto arg1_chunk = get_dependent_chunk(f->args[1]);
+                        if (chunks_equal(arg0_chunk.first, arg0_chunk.second,
+                                         arg1_chunk.first, arg1_chunk.second)) {
+                            // x - x → 0, x / x → 1
+                            double result = (f->name == "sub") ? 0.0 : 1.0;
+                            // Erase both argument subtrees and replace function with constant
+                            m_elist.erase(arg1_chunk.first, arg1_chunk.second);
+                            // Re-get arg0 chunk after erasing arg1 (iterators may have shifted)
+                            arg0_chunk = get_dependent_chunk(f->args[0]);
+                            m_elist.erase(arg0_chunk.first, arg0_chunk.second);
+                            *y = Element(make_intermediate_constant(this, result));
+                            modified = true;
+                            y = y_next;
+                            continue;
+                        }
+                    }
+                    // Check for multiplication by zero: 0 * x → 0, x * 0 → 0
+                    if (f->name == "mul") {
+                        bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
+                        bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
+                        if (arg0_is_zero || arg1_is_zero) {
+                            // Erase both argument subtrees and replace function with 0
+                            auto arg0_chunk = get_dependent_chunk(f->args[0]);
+                            auto arg1_chunk = get_dependent_chunk(f->args[1]);
+                            m_elist.erase(arg1_chunk.first, arg1_chunk.second);
+                            arg0_chunk = get_dependent_chunk(f->args[0]);
+                            m_elist.erase(arg0_chunk.first, arg0_chunk.second);
+                            *y = Element(make_intermediate_constant(this, 0.0));
+                            modified = true;
+                            y = y_next;
+                            continue;
+                        }
+                    }
+                }
+            }
+            y = y_next;
+        }
+        // Re-link arguments after fast-math modifications
+        if (modified) {
+            link_arguments(m_elist);
+        }
+    }
 
     // choose more suitable functions, where applicable
     for (auto y = m_elist.begin(); y != m_elist.end(); ) {
@@ -4228,6 +5494,10 @@ void evaluator::set_expression(std::string e)
                 }
             }
 
+            // Run optimizers. asmd_optimizer checks m_sse2_simplify_mode to decide
+            // whether to output x87 code (for x87 backend) or a simplified elist (for SSE2).
+            // pow_optimizer always runs because it handles special cases
+            // (negative bases, nested powers) that std::pow() doesn't handle correctly.
             if (f->optimizer != 0) {
                 f->optimizer(y, this, &m_elist);
             }
@@ -4252,8 +5522,68 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     using namespace impl;
 
 #ifdef MEXCE_64
-    // If the expression contains any external calls (libm-backed transcendentals), we must reserve
-    // Win64 shadow space and keep 16-byte stack alignment at the call site.
+    // Check if we can use the faster SSE2 backend
+    bool use_sse2 = is_sse2_compatible(first, last, m_options.prefer_x87);
+
+    if (use_sse2) {
+        // SSE2 backend: simpler prologue/epilogue since result is already in xmm0
+        mexce_charstream code_buffer;
+        std::vector<PendingRipConstant> pending_constants;
+        bool needs_libm = sse2_needs_libm_calls(first, last);
+
+        // Reserve buffer space (more if libm calls are present)
+        {
+            size_t n = 0;
+            for (auto it = first; it != last; ++it) {
+                ++n;
+            }
+            code_buffer.buf.reserve((needs_libm ? 128 : 64) + n * 24);
+        }
+
+        if (needs_libm) {
+            // Prologue for SSE2 with libm calls:
+            // 104 bytes = 8 scratch + 32 shadow space + 56 XMM save area + 8 alignment
+            code_buffer < 0x48 < 0x83 < 0xec < 0x68;    // sub  rsp, 104
+        } else {
+            // Minimal prologue: reserve 8 bytes for scratch space (int->double conversion)
+            // and keep 16-byte stack alignment.
+            code_buffer < 0x48 < 0x83 < 0xec < 0x08;    // sub  rsp, 8
+        }
+
+        // Generate SSE2 code
+        compile_elist_sse2(code_buffer, first, last, pending_constants);
+
+        // SSE2 return: result is already in xmm0, just restore stack and return
+        if (needs_libm) {
+            code_buffer < 0x48 < 0x83 < 0xc4 < 0x68;    // add  rsp, 104
+        } else {
+            code_buffer < 0x48 < 0x83 < 0xc4 < 0x08;    // add  rsp, 8
+        }
+        code_buffer < 0xc3;                          // ret
+
+        // Finalize RIP-relative constants: append constant data after ret and patch displacements
+        finalize_rip_constants(code_buffer, pending_constants);
+
+        m_buffer_size = code_buffer.buf.size();
+        auto buffer = get_executable_buffer(m_buffer_size);
+
+#ifdef _WIN32
+        if (!buffer) {
+            throw std::bad_alloc();
+        }
+#elif defined(__linux__)
+        if (buffer == MAP_FAILED) {
+            throw std::bad_alloc();
+        }
+#endif
+
+        memcpy(buffer, code_buffer.buf.data(), m_buffer_size);
+        evaluate_fptr = lock_executable_buffer(buffer, m_buffer_size);
+        return;
+    }
+
+    // x87 backend: If the expression contains any external calls (libm-backed transcendentals),
+    // we must reserve Win64 shadow space and keep 16-byte stack alignment at the call site.
     bool needs_call_shadow = false;
     for (auto it = first; it != last && !needs_call_shadow; ++it) {
         if (it->type != Element_type::CFUNC) {
