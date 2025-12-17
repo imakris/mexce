@@ -340,12 +340,6 @@ static bool parse_args(int argc, char* argv[], benchmark_config& config)
         config.comprehensive = true;
     }
 
-    // If output file is explicitly specified (not default), use single mode by default
-    // This preserves backward compatibility with CI that expects benchmark_results.txt
-    if (output_set && !explicit_comprehensive) {
-        config.comprehensive = false;
-    }
-
     return true;
 }
 
@@ -564,13 +558,27 @@ static config_result run_native_benchmark(
 
 static int run_comprehensive_benchmark(const benchmark_config& config)
 {
+    // Set up output stream (file or stdout)
+    std::ofstream file_output;
+    std::ostream* output_stream = &std::cout;
+    if (!config.output_path.empty()) {
+        file_output.open(config.output_path.c_str());
+        if (!file_output) {
+            std::cerr << "Failed to open output file: " << config.output_path << std::endl;
+            return 1;
+        }
+        output_stream = &file_output;
+        std::cout << "Results will be written to " << resolve_full_path(config.output_path) << std::endl;
+    }
+    std::ostream& out = *output_stream;
+
     const std::string line(78, '=');
 
-    std::cout << "\n" << line << "\n";
-    std::cout << "COMPREHENSIVE CONFIGURATION COMPARISON\n";
-    std::cout << line << "\n\n";
-    std::cout << "Iterations per expression: " << config.iterations << "\n";
-    std::cout << "Total expressions: " << mexce::benchmark_data::kExpressionCount << "\n\n";
+    out << "\n" << line << "\n";
+    out << "COMPREHENSIVE CONFIGURATION COMPARISON\n";
+    out << line << "\n\n";
+    out << "Iterations per expression: " << config.iterations << "\n";
+    out << "Total expressions: " << mexce::benchmark_data::kExpressionCount << "\n\n";
 
     // Define configurations to test
     std::vector<mexce_config> configs = {
@@ -592,9 +600,9 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     }
 
     // ========== TIMING COMPARISON ==========
-    std::cout << "\n" << line << "\n";
-    std::cout << "TIMING COMPARISON\n";
-    std::cout << line << "\n\n";
+    out << "\n" << line << "\n";
+    out << "TIMING COMPARISON\n";
+    out << line << "\n\n";
 
     // Find column widths
     size_t name_width = std::string("Configuration").size();
@@ -604,21 +612,21 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
 
     const size_t col_width = 15;
 
-    std::cout << std::left << std::setw((int)name_width) << "Configuration" << "  "
-              << std::setw((int)col_width) << "Avg Compile" << "  "
-              << std::setw((int)col_width) << "Avg Eval" << "  "
-              << std::setw((int)col_width) << "Total Eval" << "\n";
+    out << std::left << std::setw((int)name_width) << "Configuration" << "  "
+        << std::setw((int)col_width) << "Avg Compile" << "  "
+        << std::setw((int)col_width) << "Avg Eval" << "  "
+        << std::setw((int)col_width) << "Total Eval" << "\n";
 
-    std::cout << std::string(name_width, '-') << "  "
-              << std::string(col_width, '-') << "  "
-              << std::string(col_width, '-') << "  "
-              << std::string(col_width, '-') << "\n";
+    out << std::string(name_width, '-') << "  "
+        << std::string(col_width, '-') << "  "
+        << std::string(col_width, '-') << "  "
+        << std::string(col_width, '-') << "\n";
 
     for (const auto& r : results) {
-        std::cout << std::left << std::setw((int)name_width) << r.config_name << "  "
-                  << std::setw((int)col_width) << format_ns(r.avg_compile_ns) << "  "
-                  << std::setw((int)col_width) << format_ns(r.avg_eval_ns) << "  "
-                  << std::setw((int)col_width) << format_ns((uint64_t)r.total_eval_ns) << "\n";
+        out << std::left << std::setw((int)name_width) << r.config_name << "  "
+            << std::setw((int)col_width) << format_ns(r.avg_compile_ns) << "  "
+            << std::setw((int)col_width) << format_ns(r.avg_eval_ns) << "  "
+            << std::setw((int)col_width) << format_ns((uint64_t)r.total_eval_ns) << "\n";
     }
 
     // Find fastest
@@ -627,14 +635,14 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
             [](const config_result& a, const config_result& b) {
                 return a.avg_eval_ns < b.avg_eval_ns;
             });
-        std::cout << "\nFastest: " << fastest_it->config_name
-                  << " (" << format_ns(fastest_it->avg_eval_ns) << " per call)\n";
+        out << "\nFastest: " << fastest_it->config_name
+            << " (" << format_ns(fastest_it->avg_eval_ns) << " per call)\n";
     }
 
     // ========== PRECISION COMPARISON ==========
-    std::cout << "\n" << line << "\n";
-    std::cout << "PRECISION COMPARISON (ULP vs Reference)\n";
-    std::cout << line << "\n\n";
+    out << "\n" << line << "\n";
+    out << "PRECISION COMPARISON (ULP vs Reference)\n";
+    out << line << "\n\n";
 
     // Build row labels
     std::vector<std::string> row_labels;
@@ -678,47 +686,47 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     }
 
     // Print header
-    std::cout << std::left << std::setw((int)label_width) << "ULP Range" << "  ";
+    out << std::left << std::setw((int)label_width) << "ULP Range" << "  ";
     for (size_t col = 0; col < results.size(); ++col) {
-        std::cout << std::setw((int)column_widths[col]) << results[col].config_name;
-        if (col + 1 != results.size()) std::cout << "  ";
+        out << std::setw((int)column_widths[col]) << results[col].config_name;
+        if (col + 1 != results.size()) out << "  ";
     }
-    std::cout << "\n";
+    out << "\n";
 
     // Print separator
-    std::cout << std::string(label_width, '-') << "  ";
+    out << std::string(label_width, '-') << "  ";
     for (size_t col = 0; col < results.size(); ++col) {
-        std::cout << std::string(column_widths[col], '-');
-        if (col + 1 != results.size()) std::cout << "  ";
+        out << std::string(column_widths[col], '-');
+        if (col + 1 != results.size()) out << "  ";
     }
-    std::cout << "\n";
+    out << "\n";
 
     // Print rows
     for (size_t row = 0; row < row_labels.size(); ++row) {
-        std::cout << std::left << std::setw((int)label_width) << row_labels[row] << "  ";
+        out << std::left << std::setw((int)label_width) << row_labels[row] << "  ";
         for (size_t col = 0; col < results.size(); ++col) {
-            std::cout << std::setw((int)column_widths[col]) << column_values[col][row];
-            if (col + 1 != results.size()) std::cout << "  ";
+            out << std::setw((int)column_widths[col]) << column_values[col][row];
+            if (col + 1 != results.size()) out << "  ";
         }
-        std::cout << "\n";
+        out << "\n";
     }
 
     // Print totals
-    std::cout << "\n";
-    std::cout << std::left << std::setw((int)label_width) << "Total ULP sum" << "  ";
+    out << "\n";
+    out << std::left << std::setw((int)label_width) << "Total ULP sum" << "  ";
     for (size_t col = 0; col < results.size(); ++col) {
         std::string sum_str = to_decimal_u128(results[col].ulp_sum.hi, results[col].ulp_sum.lo);
-        std::cout << std::setw((int)column_widths[col]) << sum_str;
-        if (col + 1 != results.size()) std::cout << "  ";
+        out << std::setw((int)column_widths[col]) << sum_str;
+        if (col + 1 != results.size()) out << "  ";
     }
-    std::cout << "\n";
+    out << "\n";
 
-    std::cout << std::left << std::setw((int)label_width) << "Evaluated" << "  ";
+    out << std::left << std::setw((int)label_width) << "Evaluated" << "  ";
     for (size_t col = 0; col < results.size(); ++col) {
-        std::cout << std::setw((int)column_widths[col]) << results[col].expressions_evaluated;
-        if (col + 1 != results.size()) std::cout << "  ";
+        out << std::setw((int)column_widths[col]) << results[col].expressions_evaluated;
+        if (col + 1 != results.size()) out << "  ";
     }
-    std::cout << "\n";
+    out << "\n";
 
     // Find most precise (lowest total ULP)
     if (!results.empty()) {
@@ -727,17 +735,17 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
                 if (a.ulp_sum.hi != b.ulp_sum.hi) return a.ulp_sum.hi < b.ulp_sum.hi;
                 return a.ulp_sum.lo < b.ulp_sum.lo;
             });
-        std::cout << "\nMost precise: " << most_precise_it->config_name
-                  << " (total ULP: " << to_decimal_u128(most_precise_it->ulp_sum.hi, most_precise_it->ulp_sum.lo) << ")\n";
+        out << "\nMost precise: " << most_precise_it->config_name
+            << " (total ULP: " << to_decimal_u128(most_precise_it->ulp_sum.hi, most_precise_it->ulp_sum.lo) << ")\n";
     }
 
-    std::cout << "\n" << line << "\n";
-    std::cout << "Notes:\n";
-    std::cout << "  Native:    Compiler-generated code (baseline for comparison)\n";
-    std::cout << "  SSE2:      Uses SSE2 for basic arithmetic, libm for transcendentals\n";
-    std::cout << "  x87:       Uses x87 FPU for all operations (80-bit internal precision)\n";
-    std::cout << "  fast-math: Enables algebraic simplifications (x-x=0, x/x=1, etc.)\n";
-    std::cout << line << "\n";
+    out << "\n" << line << "\n";
+    out << "Notes:\n";
+    out << "  Native:    Compiler-generated code (baseline for comparison)\n";
+    out << "  SSE2:      Uses SSE2 for basic arithmetic, libm for transcendentals\n";
+    out << "  x87:       Uses x87 FPU for all operations (80-bit internal precision)\n";
+    out << "  fast-math: Enables algebraic simplifications (x-x=0, x/x=1, etc.)\n";
+    out << line << "\n";
 
     return 0;
 }
