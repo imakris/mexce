@@ -4920,6 +4920,25 @@ void evaluator::set_expression(std::string e)
     // modifies the expression structure. This must happen before asmd_optimizer which
     // transforms the elist in ways that would confuse the chunk comparison.
     if (m_options.fast_math) {
+        // Helper lambda to check if two chunks are structurally equal
+        // Avoids creating copies for the common case of simple single-element comparisons
+        auto chunks_equal = [](elist_it_t first0, elist_it_t last0,
+                               elist_it_t first1, elist_it_t last1) -> bool {
+            // Quick size comparison using distance
+            auto size0 = std::distance(first0, last0);
+            auto size1 = std::distance(first1, last1);
+            if (size0 != size1) return false;
+
+            // Element-by-element comparison (in-place, no copies)
+            auto it0 = first0;
+            auto it1 = first1;
+            for (; it0 != last0; ++it0, ++it1) {
+                if (it0->type != it1->type) return false;
+                if (it0->id != it1->id) return false;
+            }
+            return true;
+        };
+
         // Need to re-link arguments after any modifications
         bool modified = false;
         for (auto y = m_elist.begin(); y != m_elist.end(); ) {
@@ -4931,11 +4950,8 @@ void evaluator::set_expression(std::string e)
                     if (f->name == "sub" || f->name == "div") {
                         auto arg0_chunk = get_dependent_chunk(f->args[0]);
                         auto arg1_chunk = get_dependent_chunk(f->args[1]);
-                        elist_t chunk0(arg0_chunk.first, arg0_chunk.second);
-                        elist_t chunk1(arg1_chunk.first, arg1_chunk.second);
-                        elist_comparison comp;
-                        // Two chunks are equal if neither is less than the other
-                        if (!comp(chunk0, chunk1) && !comp(chunk1, chunk0)) {
+                        if (chunks_equal(arg0_chunk.first, arg0_chunk.second,
+                                         arg1_chunk.first, arg1_chunk.second)) {
                             // x - x → 0, x / x → 1
                             double result = (f->name == "sub") ? 0.0 : 1.0;
                             // Erase both argument subtrees and replace function with constant
