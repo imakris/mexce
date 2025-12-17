@@ -3956,14 +3956,6 @@ string elist_to_string(const elist_t& elist)
 inline
 void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
-    // In SSE2 mode, skip the optimizer - SSE2 backend handles add/sub/mul/div directly.
-    // The optimizer generates x87 code and modifies elist in ways incompatible with SSE2.
-    // Note: fast_math algebraic simplifications (x-x→0, x/x→1) are handled separately
-    // in a pre-optimizer pass in set_expression(), so SSE2 still benefits from those.
-    if (ev->m_sse2_simplify_mode) {
-        return;
-    }
-
     auto f = it->f;
     auto fname = f->name;
     int fclass = (fname == "add" || fname == "sub") ? 1 : (fname == "mul" || fname == "div") ? 2 : 0;
@@ -4073,6 +4065,157 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         }
     }
 
+    // === SSE2 simplification: reconstruct simplified elist ===
+    // Instead of generating x87 code, build a new elist from the simplified terms.
+    if (ev->m_sse2_simplify_mode) {
+        // Build debug string for get_optimized_expression()
+        stringstream debug_ss;
+        bool debug_first = true;
+        if (fclass == 1) {
+            if (ac_final != neutral) { debug_ss << double_to_pretty_string(ac_final); debug_first = false; }
+            for (auto &term : merged) {
+                string term_str = "(" + elist_to_string(term.chunk) + ")";
+                if (term.factor > 0) {
+                    if (!debug_first) debug_ss << "+";
+                    if (term.factor != 1) debug_ss << term.factor << "*";
+                    debug_ss << term_str;
+                } else {
+                    debug_ss << "-";
+                    if (term.factor != -1) debug_ss << abs(term.factor) << "*";
+                    debug_ss << term_str;
+                }
+                debug_first = false;
+            }
+        } else {
+            if (ac_final != neutral) { debug_ss << double_to_pretty_string(ac_final); debug_first = false; }
+            for (auto &term : merged) {
+                string term_str = "(" + elist_to_string(term.chunk) + ")";
+                if (term.factor > 0) {
+                    if (!debug_first) debug_ss << "*";
+                    debug_ss << term_str;
+                    if (term.factor != 1) debug_ss << "^" << term.factor;
+                } else {
+                    if (debug_first) debug_ss << "1";
+                    debug_ss << "/";
+                    debug_ss << term_str;
+                    if (term.factor != -1) debug_ss << "^" << abs(term.factor);
+                }
+                debug_first = false;
+            }
+        }
+        if (debug_first) debug_ss << double_to_pretty_string(ac_final);
+
+        // Reconstruct elist in postfix order
+        elist_t result;
+
+        if (merged.empty()) {
+            // Pure constant result
+            result.push_back(Element(make_intermediate_constant(ev, ac_final)));
+        }
+        else if (fclass == 1) {
+            // Additive: ac_final + factor1*term1 + factor2*term2 + ...
+            // Build postfix: [ac_final] [term1] [*factor1 if needed] [neg if negative] [add if not first] ...
+            bool have_value = false;
+
+            if (ac_final != neutral) {
+                result.push_back(Element(make_intermediate_constant(ev, ac_final)));
+                have_value = true;
+            }
+
+            for (auto &term : merged) {
+                // Insert the term's chunk
+                for (auto &elem : term.chunk) {
+                    result.push_back(elem);
+                }
+
+                // Apply factor magnitude if |factor| > 1
+                int abs_factor = abs(term.factor);
+                if (abs_factor > 1) {
+                    result.push_back(Element(make_intermediate_constant(ev, static_cast<double>(abs_factor))));
+                    result.push_back(Element(make_function(ev, "mul")));
+                }
+
+                // Combine with running total
+                if (have_value) {
+                    if (term.factor > 0) {
+                        result.push_back(Element(make_function(ev, "add")));
+                    } else {
+                        result.push_back(Element(make_function(ev, "sub")));
+                    }
+                } else {
+                    // First term - negate if negative factor
+                    if (term.factor < 0) {
+                        result.push_back(Element(make_function(ev, "neg")));
+                    }
+                    have_value = true;
+                }
+            }
+        }
+        else {
+            // Multiplicative: ac_final * term1^factor1 / term2^|factor2| * ...
+            bool have_value = false;
+
+            if (ac_final != neutral) {
+                result.push_back(Element(make_intermediate_constant(ev, ac_final)));
+                have_value = true;
+            }
+
+            for (auto &term : merged) {
+                // Insert the term's chunk
+                for (auto &elem : term.chunk) {
+                    result.push_back(elem);
+                }
+
+                // Apply power if |factor| > 1
+                int abs_factor = abs(term.factor);
+                if (abs_factor == 2) {
+                    // x^2 = x * x: duplicate chunk and multiply
+                    for (auto &elem : term.chunk) {
+                        result.push_back(elem);
+                    }
+                    result.push_back(Element(make_function(ev, "mul")));
+                } else if (abs_factor > 2) {
+                    // Use pow for higher powers
+                    result.push_back(Element(make_intermediate_constant(ev, static_cast<double>(abs_factor))));
+                    result.push_back(Element(make_function(ev, "pow")));
+                }
+
+                // Combine with running total
+                if (have_value) {
+                    if (term.factor > 0) {
+                        result.push_back(Element(make_function(ev, "mul")));
+                    } else {
+                        result.push_back(Element(make_function(ev, "div")));
+                    }
+                } else {
+                    // First term with negative factor means 1/term
+                    if (term.factor < 0) {
+                        // Insert 1.0 at the beginning, then div
+                        result.insert(result.begin(), Element(make_intermediate_constant(ev, 1.0)));
+                        result.push_back(Element(make_function(ev, "div")));
+                    }
+                    have_value = true;
+                }
+            }
+        }
+
+        // Replace current function node with the simplified elist
+        // First, erase the current node, then insert result elements
+        auto insert_pos = elist->erase(it);
+        for (auto &elem : result) {
+            insert_pos = elist->insert(insert_pos, elem);
+            ++insert_pos;
+        }
+
+        // Re-link arguments after modifying the elist. This is critical because
+        // other functions (later in the iteration) have args pointers that may
+        // now be invalid after our erase/insert operations.
+        link_arguments(*elist);
+
+        return;
+    }
+
+    // === x87 code generation (original path) ===
     mexce_charstream s;
     stringstream debug_ss;
     bool debug_first = true;
