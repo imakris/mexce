@@ -801,6 +801,14 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     out << "\n" << line << "\n";
     out << "COMPREHENSIVE CONFIGURATION COMPARISON\n";
     out << line << "\n\n";
+
+#ifdef BENCHMARK_COMPILER
+    out << "Compiler: " << BENCHMARK_COMPILER << "\n";
+#endif
+#ifdef BENCHMARK_COMPILER_FLAGS
+    out << "Compiler flags: " << BENCHMARK_COMPILER_FLAGS << "\n";
+#endif
+
     out << "Iterations per expression: " << config.iterations << "\n";
     out << "Total expressions: " << mexce::benchmark_data::kExpressionCount << "\n\n";
 
