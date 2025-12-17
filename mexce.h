@@ -3647,7 +3647,8 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                     emit_load_rax_if_needed((void*)tn->address);
                     emit_sse2_load_from_rax(code_buffer, depth);
                 }
-                else if (tn->numeric_data_type == M32FP) {
+                else
+                if (tn->numeric_data_type == M32FP) {
                     // cvtss2sd xmm[depth], [rax] - convert single to double
                     emit_load_rax_if_needed((void*)tn->address);
                     // F3 0F 5A ModRM (cvtss2sd)
@@ -3674,7 +3675,8 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                     int reg = depth;
                     if (reg >= 8) {
                         code_buffer < 0xF2 < 0x44 < 0x0F < 0x10 < (uint8_t)(0x04 + (reg - 8) * 8) < 0x24;
-                    } else {
+                    }
+                    else {
                         code_buffer < 0xF2 < 0x0F < 0x10 < (uint8_t)(0x04 + reg * 8) < 0x24;
                     }
                 }
@@ -3731,49 +3733,57 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                         pending_constants.push_back({patch_pos, pending_mem_value});
                         has_pending_mem_operand = false;
                         // depth stays the same (we didn't push the constant)
-                    } else {
+                    }
+                    else {
                         // xmm[depth-2] = xmm[depth-2] + xmm[depth-1]
                         emit_sse2_addsd(code_buffer, depth - 2, depth - 1);
                         --depth;
                     }
                 }
-                else if (fn == "sub") {
+                else
+                if (fn == "sub") {
                     if (has_pending_mem_operand) {
                         // Fused: subsd xmm[depth-1], [rip+const]
                         size_t patch_pos = emit_sse2_subsd_rip_placeholder(code_buffer, depth - 1);
                         pending_constants.push_back({patch_pos, pending_mem_value});
                         has_pending_mem_operand = false;
-                    } else {
+                    }
+                    else {
                         // xmm[depth-2] = xmm[depth-2] - xmm[depth-1]
                         emit_sse2_subsd(code_buffer, depth - 2, depth - 1);
                         --depth;
                     }
                 }
-                else if (fn == "mul") {
+                else
+                if (fn == "mul") {
                     if (has_pending_mem_operand) {
                         // Fused: mulsd xmm[depth-1], [rip+const]
                         size_t patch_pos = emit_sse2_mulsd_rip_placeholder(code_buffer, depth - 1);
                         pending_constants.push_back({patch_pos, pending_mem_value});
                         has_pending_mem_operand = false;
-                    } else {
+                    }
+                    else {
                         // xmm[depth-2] = xmm[depth-2] * xmm[depth-1]
                         emit_sse2_mulsd(code_buffer, depth - 2, depth - 1);
                         --depth;
                     }
                 }
-                else if (fn == "div") {
+                else
+                if (fn == "div") {
                     if (has_pending_mem_operand) {
                         // Fused: divsd xmm[depth-1], [rip+const]
                         size_t patch_pos = emit_sse2_divsd_rip_placeholder(code_buffer, depth - 1);
                         pending_constants.push_back({patch_pos, pending_mem_value});
                         has_pending_mem_operand = false;
-                    } else {
+                    }
+                    else {
                         // xmm[depth-2] = xmm[depth-2] / xmm[depth-1]
                         emit_sse2_divsd(code_buffer, depth - 2, depth - 1);
                         --depth;
                     }
                 }
-                else if (fn == "neg") {
+                else
+                if (fn == "neg") {
                     // xmm[depth-1] = -xmm[depth-1] via XOR with sign mask
                     // Inline xorpd_mem to use RAX cache
                     emit_load_rax_if_needed((void*)masks.sign_mask);
@@ -3786,7 +3796,8 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                     if (rex) code_buffer < rex;
                     code_buffer < 0x0F < 0x57 < (uint8_t)(reg_enc * 8);
                 }
-                else if (fn == "abs") {
+                else
+                if (fn == "abs") {
                     // xmm[depth-1] = |xmm[depth-1]| via AND with abs mask
                     // Inline andpd_mem to use RAX cache
                     emit_load_rax_if_needed((void*)masks.abs_mask);
@@ -3800,57 +3811,71 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                     code_buffer < 0x0F < 0x54 < (uint8_t)(reg_enc * 8);
                 }
                 // --- libm unary functions ---
-                else if (fn == "sin") {
+                else
+                if (fn == "sin") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::sin), depth);
                     rax_cached = nullptr;  // RAX clobbered by call
                 }
-                else if (fn == "cos") {
+                else
+                if (fn == "cos") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::cos), depth);
                     rax_cached = nullptr;  // RAX clobbered by call
                 }
-                else if (fn == "tan") {
+                else
+                if (fn == "tan") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::tan), depth);
                     rax_cached = nullptr;  // RAX clobbered by call
                 }
-                else if (fn == "exp") {
+                else
+                if (fn == "exp") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::exp), depth);
                     rax_cached = nullptr;  // RAX clobbered by call
                 }
-                else if (fn == "ln" || fn == "log") {
+                else
+                if (fn == "ln" || fn == "log") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log), depth);
                     rax_cached = nullptr;  // RAX clobbered by call
                 }
-                else if (fn == "log10") {
+                else
+                if (fn == "log10") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log10), depth);
                     rax_cached = nullptr;  // RAX clobbered by call
                 }
-                else if (fn == "log2") {
+                else
+                if (fn == "log2") {
                     emit_sse2_libm_unary_call(code_buffer, (void*)static_cast<double(*)(double)>(std::log2), depth);
                     rax_cached = nullptr;  // RAX clobbered by call
                 }
-                else if (fn == "sqrt") {
+                else
+                if (fn == "sqrt") {
                     // sqrt has a direct SSE2 instruction
                     emit_sse2_sqrtsd(code_buffer, depth - 1, depth - 1);
                 }
                 // --- SSE4.1 rounding functions ---
-                else if (fn == "floor") {
+                else
+                if (fn == "floor") {
                     emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_floor);
                 }
-                else if (fn == "ceil") {
+                else
+                if (fn == "ceil") {
                     emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_ceil);
                 }
-                else if (fn == "round") {
+                else
+                if (fn == "round") {
                     emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_nearest);
                 }
-                else if (fn == "trunc") {
+                else
+                if (fn == "trunc") {
                     emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_trunc);
                 }
-                else if (fn == "int") {
+                else
+                if (fn == "int") {
                     // int uses current rounding mode (default: nearest even), like frndint
                     emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_nearest);
                 }
                 // --- libm binary functions ---
-                else if (fn == "logb") {
+                else
+                if (fn == "logb") {
                     emit_sse2_libm_binary_call(code_buffer, (void*)&mexce_libm_logb, depth);
                     rax_cached = nullptr;  // RAX clobbered by call
                     --depth;
@@ -3870,7 +3895,8 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
     if (depth == 1) {
         // Result is in xmm0, perfect
     }
-    else if (depth > 1) {
+    else
+    if (depth > 1) {
         // Move result to xmm0
         emit_sse2_mov_reg_reg(code_buffer, 0, depth - 1);
     }
@@ -4143,7 +4169,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 }
                 debug_first = false;
             }
-        } else {
+        }
+        else {
             if (ac_final != neutral) { debug_ss << double_to_pretty_string(ac_final); debug_first = false; }
             for (auto &term : merged) {
                 string term_str = "(" + elist_to_string(term.chunk) + ")";
@@ -4151,7 +4178,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                     if (!debug_first) debug_ss << "*";
                     debug_ss << term_str;
                     if (term.factor != 1) debug_ss << "^" << term.factor;
-                } else {
+                }
+                else {
                     if (debug_first) debug_ss << "1";
                     debug_ss << "/";
                     debug_ss << term_str;
@@ -4169,7 +4197,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             // Pure constant result
             result.push_back(Element(make_intermediate_constant(ev, ac_final)));
         }
-        else if (fclass == 1) {
+        else
+        if (fclass == 1) {
             // Additive: ac_final + factor1*term1 + factor2*term2 + ...
             // Build postfix: [ac_final] [term1] [*factor1 if needed] [neg if negative] [add if not first] ...
             bool have_value = false;
@@ -4199,7 +4228,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                     } else {
                         result.push_back(Element(make_function(ev, "sub")));
                     }
-                } else {
+                }
+                else {
                     // First term - negate if negative factor
                     if (term.factor < 0) {
                         result.push_back(Element(make_function(ev, "neg")));
@@ -4231,7 +4261,9 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                         result.push_back(elem);
                     }
                     result.push_back(Element(make_function(ev, "mul")));
-                } else if (abs_factor > 2) {
+                }
+                else
+                if (abs_factor > 2) {
                     // Use pow for higher powers
                     result.push_back(Element(make_intermediate_constant(ev, static_cast<double>(abs_factor))));
                     result.push_back(Element(make_function(ev, "pow")));
@@ -4244,7 +4276,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                     } else {
                         result.push_back(Element(make_function(ev, "div")));
                     }
-                } else {
+                }
+                else {
                     // First term with negative factor means 1/term
                     if (term.factor < 0) {
                         // Insert 1.0 at the beginning, then div
@@ -5544,7 +5577,8 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
             // Prologue for SSE2 with libm calls:
             // 104 bytes = 8 scratch + 32 shadow space + 56 XMM save area + 8 alignment
             code_buffer < 0x48 < 0x83 < 0xec < 0x68;    // sub  rsp, 104
-        } else {
+        }
+        else {
             // Minimal prologue: reserve 8 bytes for scratch space (int->double conversion)
             // and keep 16-byte stack alignment.
             code_buffer < 0x48 < 0x83 < 0xec < 0x08;    // sub  rsp, 8
@@ -5556,10 +5590,11 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
         // SSE2 return: result is already in xmm0, just restore stack and return
         if (needs_libm) {
             code_buffer < 0x48 < 0x83 < 0xc4 < 0x68;    // add  rsp, 104
-        } else {
+        }
+        else {
             code_buffer < 0x48 < 0x83 < 0xc4 < 0x08;    // add  rsp, 8
         }
-        code_buffer < 0xc3;                          // ret
+        code_buffer < 0xc3;                             // ret
 
         // Finalize RIP-relative constants: append constant data after ret and patch displacements
         finalize_rip_constants(code_buffer, pending_constants);
