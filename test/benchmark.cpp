@@ -376,6 +376,27 @@ struct config_result {
     config_result() : ulp_bins(k_ulp_num_bins + 1, 0) {}
 };
 
+// Detailed per-expression record for comprehensive output
+struct detail_record_t {
+    std::string expr;
+    std::string optimized_expr;
+    std::string bytes_expr;
+    bool compiled = false;
+    bool eval_ok = false;
+    bool native_available = false;
+    bool native_eval_ok = false;
+    long double expected = 0;
+    double mexce_result = 0;
+    double native_result = 0;
+    uint64_t ulp_mexce_vs_compiler = UINT64_MAX;
+    uint64_t ulp_mexce_vs_reference = UINT64_MAX;
+    uint64_t ulp_compiler_vs_reference = UINT64_MAX;
+    uint64_t compile_ns = 0;
+    uint64_t avg_ns = 0;
+    uint64_t native_avg_ns = 0;
+    std::string error;
+};
+
 static void update_ulp_bins(uint64_t ulp, size_t& exact_zero_count, std::vector<size_t>& bins) {
     if (ulp == UINT64_MAX) {
         return;
@@ -554,6 +575,168 @@ static config_result run_native_benchmark(
 
     progress_out << " done (" << result.expressions_evaluated << "/" << native_count << " available)\n";
     return result;
+}
+
+// Generate detailed per-expression report for a single configuration
+static void generate_detailed_report(
+    const mexce_config& cfg,
+    int iterations,
+    std::ostream& out,
+    std::ostream& progress_out)
+{
+    const std::string line(78, '=');
+
+    out << "\n" << line << "\n";
+    out << "DETAILED PER-EXPRESSION REPORT (" << cfg.name << ")\n";
+    out << line << "\n\n";
+
+    mexce::evaluator eval;
+    eval.opts().prefer_x87 = cfg.prefer_x87;
+    eval.opts().fast_math = cfg.fast_math;
+
+    double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
+    eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
+    mexce::benchmark_data::NativeContext native_ctx{};
+
+    const size_t total_expressions = mexce::benchmark_data::kExpressionCount;
+    const size_t iterations_u = static_cast<size_t>(iterations);
+
+    std::vector<detail_record_t> detail_records;
+    detail_records.reserve(total_expressions);
+
+    progress_out << "  Collecting detailed data for " << cfg.name << "..." << std::flush;
+
+    for (size_t idx = 0; idx < total_expressions; ++idx) {
+        const std::string expr = mexce::benchmark_data::kExpressions[idx];
+        const long double golden = mexce::benchmark_data::kGoldenResults[idx];
+        const double golden_d = static_cast<double>(golden);
+
+        a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
+
+        detail_record_t rec;
+        rec.expr = expr;
+        rec.expected = golden;
+        rec.native_available = idx < mexce::benchmark_data::kNativeExpressionsCount;
+        rec.mexce_result = std::numeric_limits<double>::quiet_NaN();
+        rec.native_result = std::numeric_limits<double>::quiet_NaN();
+
+        // Native evaluation
+        if (rec.native_available) {
+            native_ctx.a = a; native_ctx.b = b; native_ctx.c = c;
+            native_ctx.x = x; native_ctx.y = y; native_ctx.z = z; native_ctx.w = w;
+            try {
+                rec.native_result = mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+                rec.native_eval_ok = true;
+                const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
+                const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
+                rec.ulp_compiler_vs_reference = (native_zero && golden_zero) ? 0 : ulp_distance(rec.native_result, golden_d);
+            } catch (...) {}
+        }
+
+        // Mexce compilation
+        mexce::stopwatch compile_timer;
+        try {
+            eval.set_expression(expr);
+            rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
+            rec.optimized_expr = eval.get_optimized_expression();
+            rec.bytes_expr = eval.get_byte_representation();
+            rec.compiled = true;
+        } catch (const std::exception& e) {
+            rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
+            rec.error = std::string("compile: ") + e.what();
+            detail_records.push_back(rec);
+            continue;
+        }
+
+        // Mexce evaluation
+        try {
+            rec.mexce_result = eval.evaluate();
+            rec.eval_ok = true;
+        } catch (const std::exception& e) {
+            rec.error = std::string("evaluate: ") + e.what();
+            detail_records.push_back(rec);
+            continue;
+        }
+
+        // ULP calculations
+        const bool mexce_zero = std::fabs(rec.mexce_result) <= (double)k_zero_abs_tol;
+        const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
+        rec.ulp_mexce_vs_reference = (mexce_zero && golden_zero) ? 0 : ulp_distance(rec.mexce_result, golden_d);
+        if (rec.native_eval_ok) {
+            const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
+            rec.ulp_mexce_vs_compiler = (mexce_zero && native_zero) ? 0 : ulp_distance(rec.mexce_result, rec.native_result);
+        }
+
+        // Timing
+        mexce::stopwatch eval_timer;
+        for (size_t i = 0; i < iterations_u; ++i) {
+            (void)eval.evaluate();
+        }
+        rec.avg_ns = (uint64_t)((double)eval_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
+
+        if (rec.native_eval_ok) {
+            mexce::stopwatch native_timer;
+            for (size_t i = 0; i < iterations_u; ++i) {
+                (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+            }
+            rec.native_avg_ns = (uint64_t)((double)native_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
+        }
+
+        detail_records.push_back(rec);
+    }
+    progress_out << " done\n";
+
+    // Sort by speedup (problematic regressions first)
+    std::vector<const detail_record_t*> sorted_records;
+    sorted_records.reserve(detail_records.size());
+    for (const auto& rec : detail_records) {
+        sorted_records.push_back(&rec);
+    }
+    std::sort(sorted_records.begin(), sorted_records.end(), [](const detail_record_t* a, const detail_record_t* b) {
+        if (!a->eval_ok && b->eval_ok) return true;
+        if (a->eval_ok && !b->eval_ok) return false;
+        if (!a->compiled && b->compiled) return true;
+        if (a->compiled && !b->compiled) return false;
+        if (!a->native_eval_ok && b->native_eval_ok) return false;
+        if (a->native_eval_ok && !b->native_eval_ok) return true;
+        if (!a->native_eval_ok && !b->native_eval_ok) return a->expr < b->expr;
+        double speedup_a = (double)a->native_avg_ns / std::max(1.0, (double)a->avg_ns);
+        double speedup_b = (double)b->native_avg_ns / std::max(1.0, (double)b->avg_ns);
+        if (std::abs(speedup_a - speedup_b) > 1e-6) return speedup_a < speedup_b;
+        return a->expr < b->expr;
+    });
+
+    auto format_ulp = [](uint64_t v) -> std::string { return v == UINT64_MAX ? "-" : std::to_string(v); };
+    auto format_speedup = [](uint64_t native_ns, uint64_t mexce_ns) -> std::string {
+        if (native_ns == 0) return "-";
+        double sp = (double)native_ns / std::max(1.0, (double)mexce_ns);
+        std::stringstream ss;
+        ss << std::fixed << std::setprecision(2) << sp << "x";
+        return ss.str();
+    };
+
+    out << "Status      ULP(Mx-Cp)  ULP(Mx-Ref)  ULP(Cp-Ref)  Compile       Avg(Mx)       Avg(Cp)       Speedup   Expression : Optimized : Bytes\n";
+    out << "----------  ----------  -----------  -----------  ------------  ------------  ------------  --------  ----------------------------------------\n";
+
+    for (const auto* rec : sorted_records) {
+        std::string status = rec->compiled ? (rec->eval_ok ? "ok" : "eval") : "compile";
+        out << std::left << std::setw(10) << status << "  "
+            << std::setw(10) << format_ulp(rec->ulp_mexce_vs_compiler) << "  "
+            << std::setw(11) << format_ulp(rec->ulp_mexce_vs_reference) << "  "
+            << std::setw(11) << format_ulp(rec->ulp_compiler_vs_reference) << "  "
+            << std::setw(12) << format_ns(rec->compile_ns) << "  "
+            << std::setw(12) << (rec->eval_ok ? format_ns(rec->avg_ns) : "-") << "  "
+            << std::setw(12) << (rec->native_eval_ok ? format_ns(rec->native_avg_ns) : "-") << "  "
+            << std::setw(8) << (rec->native_eval_ok && rec->eval_ok ? format_speedup(rec->native_avg_ns, rec->avg_ns) : "-") << "  "
+            << rec->expr;
+        if (rec->compiled) {
+            out << " : " << rec->optimized_expr << " : " << rec->bytes_expr;
+        }
+        out << "\n";
+        if (!rec->error.empty()) {
+            out << "    note: " << rec->error << "\n";
+        }
+    }
 }
 
 static int run_comprehensive_benchmark(const benchmark_config& config)
@@ -747,181 +930,15 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     out << "  fast-math: Enables algebraic simplifications (x-x=0, x/x=1, etc.)\n";
     out << line << "\n";
 
-    // ========== DETAILED PER-EXPRESSION REPORT ==========
-    // Run SSE2 configuration again to collect detailed per-expression data
-    out << "\n" << line << "\n";
-    out << "DETAILED PER-EXPRESSION REPORT (SSE2 configuration)\n";
-    out << line << "\n\n";
-
-    mexce::evaluator eval;
-    eval.opts().prefer_x87 = false;
-    eval.opts().fast_math = false;
-
-    double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
-    eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
-    mexce::benchmark_data::NativeContext native_ctx{};
-
-    const size_t total_expressions = mexce::benchmark_data::kExpressionCount;
-    const size_t iterations_u = static_cast<size_t>(config.iterations);
-
-    struct detail_record_t {
-        std::string expr;
-        std::string optimized_expr;
-        std::string bytes_expr;
-        bool compiled = false;
-        bool eval_ok = false;
-        bool native_available = false;
-        bool native_eval_ok = false;
-        long double expected = 0;
-        double mexce_result = 0;
-        double native_result = 0;
-        uint64_t ulp_mexce_vs_compiler = UINT64_MAX;
-        uint64_t ulp_mexce_vs_reference = UINT64_MAX;
-        uint64_t ulp_compiler_vs_reference = UINT64_MAX;
-        uint64_t compile_ns = 0;
-        uint64_t avg_ns = 0;
-        uint64_t native_avg_ns = 0;
-        std::string error;
-    };
-
-    std::vector<detail_record_t> detail_records;
-    detail_records.reserve(total_expressions);
-
-    std::cout << "  Collecting detailed data..." << std::flush;
-
-    for (size_t idx = 0; idx < total_expressions; ++idx) {
-        const std::string expr = mexce::benchmark_data::kExpressions[idx];
-        const long double golden = mexce::benchmark_data::kGoldenResults[idx];
-        const double golden_d = static_cast<double>(golden);
-
-        a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
-
-        detail_record_t rec;
-        rec.expr = expr;
-        rec.expected = golden;
-        rec.native_available = idx < mexce::benchmark_data::kNativeExpressionsCount;
-        rec.mexce_result = std::numeric_limits<double>::quiet_NaN();
-        rec.native_result = std::numeric_limits<double>::quiet_NaN();
-
-        // Native evaluation
-        if (rec.native_available) {
-            native_ctx.a = a; native_ctx.b = b; native_ctx.c = c;
-            native_ctx.x = x; native_ctx.y = y; native_ctx.z = z; native_ctx.w = w;
-            try {
-                rec.native_result = mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
-                rec.native_eval_ok = true;
-                const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
-                const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
-                rec.ulp_compiler_vs_reference = (native_zero && golden_zero) ? 0 : ulp_distance(rec.native_result, golden_d);
-            } catch (...) {}
-        }
-
-        // Mexce compilation
-        mexce::stopwatch compile_timer;
-        try {
-            eval.set_expression(expr);
-            rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
-            rec.optimized_expr = eval.get_optimized_expression();
-            rec.bytes_expr = eval.get_byte_representation();
-            rec.compiled = true;
-        } catch (const std::exception& e) {
-            rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
-            rec.error = std::string("compile: ") + e.what();
-            detail_records.push_back(rec);
-            continue;
-        }
-
-        // Mexce evaluation
-        try {
-            rec.mexce_result = eval.evaluate();
-            rec.eval_ok = true;
-        } catch (const std::exception& e) {
-            rec.error = std::string("evaluate: ") + e.what();
-            detail_records.push_back(rec);
-            continue;
-        }
-
-        // ULP calculations
-        const bool mexce_zero = std::fabs(rec.mexce_result) <= (double)k_zero_abs_tol;
-        const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
-        rec.ulp_mexce_vs_reference = (mexce_zero && golden_zero) ? 0 : ulp_distance(rec.mexce_result, golden_d);
-        if (rec.native_eval_ok) {
-            const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
-            rec.ulp_mexce_vs_compiler = (mexce_zero && native_zero) ? 0 : ulp_distance(rec.mexce_result, rec.native_result);
-        }
-
-        // Timing
-        mexce::stopwatch eval_timer;
-        for (size_t i = 0; i < iterations_u; ++i) {
-            (void)eval.evaluate();
-        }
-        rec.avg_ns = (uint64_t)((double)eval_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
-
-        if (rec.native_eval_ok) {
-            mexce::stopwatch native_timer;
-            for (size_t i = 0; i < iterations_u; ++i) {
-                (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
-            }
-            rec.native_avg_ns = (uint64_t)((double)native_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
-        }
-
-        detail_records.push_back(rec);
-    }
-    std::cout << " done\n";
-
-    // Sort by speedup (problematic regressions first)
-    std::vector<const detail_record_t*> sorted_records;
-    sorted_records.reserve(detail_records.size());
-    for (const auto& rec : detail_records) {
-        sorted_records.push_back(&rec);
-    }
-    std::sort(sorted_records.begin(), sorted_records.end(), [](const detail_record_t* a, const detail_record_t* b) {
-        if (!a->eval_ok && b->eval_ok) return true;
-        if (a->eval_ok && !b->eval_ok) return false;
-        if (!a->compiled && b->compiled) return true;
-        if (a->compiled && !b->compiled) return false;
-        if (!a->native_eval_ok && b->native_eval_ok) return false;
-        if (a->native_eval_ok && !b->native_eval_ok) return true;
-        if (!a->native_eval_ok && !b->native_eval_ok) return a->expr < b->expr;
-        double speedup_a = (double)a->native_avg_ns / std::max(1.0, (double)a->avg_ns);
-        double speedup_b = (double)b->native_avg_ns / std::max(1.0, (double)b->avg_ns);
-        if (std::abs(speedup_a - speedup_b) > 1e-6) return speedup_a < speedup_b;
-        return a->expr < b->expr;
-    });
-
-    auto format_ulp = [](uint64_t v) -> std::string { return v == UINT64_MAX ? "-" : std::to_string(v); };
-    auto format_speedup = [](uint64_t native_ns, uint64_t mexce_ns) -> std::string {
-        if (native_ns == 0) return "-";
-        double sp = (double)native_ns / std::max(1.0, (double)mexce_ns);
-        std::stringstream ss;
-        ss << std::fixed << std::setprecision(2) << sp << "x";
-        return ss.str();
-    };
-
-    out << "Status      ULP(Mx-Cp)  ULP(Mx-Ref)  ULP(Cp-Ref)  Compile       Avg(Mx)       Avg(Cp)       Speedup   Expression : Optimized : Bytes\n";
-    out << "----------  ----------  -----------  -----------  ------------  ------------  ------------  --------  ----------------------------------------\n";
-
-    for (const auto* rec : sorted_records) {
-        std::string status = rec->compiled ? (rec->eval_ok ? "ok" : "eval") : "compile";
-        out << std::left << std::setw(10) << status << "  "
-            << std::setw(10) << format_ulp(rec->ulp_mexce_vs_compiler) << "  "
-            << std::setw(11) << format_ulp(rec->ulp_mexce_vs_reference) << "  "
-            << std::setw(11) << format_ulp(rec->ulp_compiler_vs_reference) << "  "
-            << std::setw(12) << format_ns(rec->compile_ns) << "  "
-            << std::setw(12) << (rec->eval_ok ? format_ns(rec->avg_ns) : "-") << "  "
-            << std::setw(12) << (rec->native_eval_ok ? format_ns(rec->native_avg_ns) : "-") << "  "
-            << std::setw(8) << (rec->native_eval_ok && rec->eval_ok ? format_speedup(rec->native_avg_ns, rec->avg_ns) : "-") << "  "
-            << rec->expr;
-        if (rec->compiled) {
-            out << " : " << rec->optimized_expr << " : " << rec->bytes_expr;
-        }
-        out << "\n";
-        if (!rec->error.empty()) {
-            out << "    note: " << rec->error << "\n";
-        }
+    // ========== DETAILED PER-EXPRESSION REPORTS FOR ALL CONFIGURATIONS ==========
+    // Generate detailed reports for all 4 mexce configurations
+    for (const auto& cfg : configs) {
+        generate_detailed_report(cfg, config.iterations, out, std::cout);
     }
 
     out << "\n" << line << "\n";
+    out << "END OF COMPREHENSIVE BENCHMARK REPORT\n";
+    out << line << "\n";
 
     return 0;
 }
