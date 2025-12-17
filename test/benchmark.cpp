@@ -236,57 +236,262 @@ static std::string to_decimal_u128(uint64_t hi, uint64_t lo)
 
 // ------------------------------ Main ---------------------------------
 
-int main(int argc, char* argv[])
-{
-    if (argc > 3) {
-        std::cerr << "Usage: " << argv[0] << " [iterations] [output_file]\n";
-        std::cerr << "You may also pass an output file as the first argument." << std::endl;
-        return 1;
-    }
+static void print_usage(const char* prog) {
+    std::cerr << "Usage: " << prog << " [options] [iterations] [output_file]\n\n";
+    std::cerr << "Options:\n";
+    std::cerr << "  --comprehensive, -c   Run comprehensive comparison across configurations\n";
+    std::cerr << "  --x87                 Force x87 backend (disable SSE2)\n";
+    std::cerr << "  --sse2                Force SSE2 backend (default)\n";
+    std::cerr << "  --fast-math           Enable fast-math optimizations\n";
+    std::cerr << "  --help, -h            Show this help message\n";
+    std::cerr << "\n";
+    std::cerr << "You may also pass an output file as the first positional argument.\n";
+}
 
+struct benchmark_config {
     int iterations = 100000;
     std::string output_path = "benchmark_results.txt";
-    bool iterations_set = false;
+    bool comprehensive = false;
+    bool force_x87 = false;
+    bool force_sse2 = false;
+    bool fast_math = false;
+};
 
-    if (argc >= 2) {
+static bool parse_args(int argc, char* argv[], benchmark_config& config)
+{
+    bool iterations_set = false;
+    bool output_set = false;
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            return false;
+        }
+        if (arg == "--comprehensive" || arg == "-c") {
+            config.comprehensive = true;
+            continue;
+        }
+        if (arg == "--x87") {
+            config.force_x87 = true;
+            continue;
+        }
+        if (arg == "--sse2") {
+            config.force_sse2 = true;
+            continue;
+        }
+        if (arg == "--fast-math") {
+            config.fast_math = true;
+            continue;
+        }
+
+        // Try to parse as iteration count
         int parsed = 0;
-        Iteration_parse_result pr = parse_iterations(argv[1], &parsed);
+        Iteration_parse_result pr = parse_iterations(argv[i], &parsed);
         if (pr == success) {
-            iterations = parsed;
+            if (iterations_set) {
+                std::cerr << "Iteration count specified twice." << std::endl;
+                return false;
+            }
+            config.iterations = parsed;
             iterations_set = true;
         }
-        else
-        if (pr == not_numeric) {
-            output_path = argv[1];
+        else if (pr == not_numeric) {
+            if (output_set) {
+                std::cerr << "Unknown option or extra argument: " << arg << std::endl;
+                return false;
+            }
+            config.output_path = arg;
+            output_set = true;
         }
         else {
             std::cerr << "Iteration count must be a positive integer." << std::endl;
-            return 1;
+            return false;
         }
     }
 
-    if (argc == 3) {
-        if (iterations_set) {
-            output_path = argv[2];
-        }
-        else {
-            int parsed = 0;
-            Iteration_parse_result pr = parse_iterations(argv[2], &parsed);
-            if (pr == success) {
-                iterations = parsed;
-                iterations_set = true;
-            }
-            else
-            if (pr == not_numeric) {
-                std::cerr << "Invalid iteration count: " << argv[2] << std::endl;
-                return 1;
-            }
-            else {
-                std::cerr << "Iteration count must be a positive integer." << std::endl;
-                return 1;
-            }
-        }
+    if (config.force_x87 && config.force_sse2) {
+        std::cerr << "Cannot specify both --x87 and --sse2." << std::endl;
+        return false;
     }
+
+    return true;
+}
+
+// Run a quick timing benchmark for a single configuration
+struct config_timing_result {
+    std::string config_name;
+    size_t expressions_tested;
+    size_t expressions_compiled;
+    long long total_compile_ns;
+    long long total_eval_ns;
+    uint64_t avg_compile_ns;
+    uint64_t avg_eval_ns;
+};
+
+static config_timing_result run_config_timing(
+    const std::string& config_name,
+    mexce::evaluator& eval,
+    int iterations,
+    std::ostream& progress_out)
+{
+    config_timing_result result;
+    result.config_name = config_name;
+    result.expressions_tested = 0;
+    result.expressions_compiled = 0;
+    result.total_compile_ns = 0;
+    result.total_eval_ns = 0;
+    result.avg_compile_ns = 0;
+    result.avg_eval_ns = 0;
+
+    double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
+    eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
+
+    const size_t total = mexce::benchmark_data::kExpressionCount;
+    const size_t iterations_u = static_cast<size_t>(iterations);
+
+    progress_out << "  Testing " << config_name << "..." << std::flush;
+
+    for (size_t idx = 0; idx < total; ++idx) {
+        const std::string expr = mexce::benchmark_data::kExpressions[idx];
+        a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
+
+        result.expressions_tested++;
+
+        mexce::stopwatch compile_timer;
+        try {
+            eval.set_expression(expr);
+            result.total_compile_ns += compile_timer.elapsed_nanoseconds();
+            result.expressions_compiled++;
+        }
+        catch (...) {
+            continue;
+        }
+
+        mexce::stopwatch eval_timer;
+        for (size_t i = 0; i < iterations_u; ++i) {
+            (void)eval.evaluate();
+        }
+        result.total_eval_ns += eval_timer.elapsed_nanoseconds();
+    }
+
+    if (result.expressions_compiled > 0) {
+        result.avg_compile_ns = (uint64_t)((double)result.total_compile_ns /
+            (double)result.expressions_compiled + 0.5);
+        result.avg_eval_ns = (uint64_t)((double)result.total_eval_ns /
+            ((double)result.expressions_compiled * (double)iterations) + 0.5);
+    }
+
+    progress_out << " done (" << result.expressions_compiled << "/" << total << " compiled)\n";
+    return result;
+}
+
+static int run_comprehensive_benchmark(const benchmark_config& config)
+{
+    std::cout << "\n=== COMPREHENSIVE CONFIGURATION COMPARISON ===\n\n";
+    std::cout << "Running " << config.iterations << " iterations per expression.\n\n";
+
+    std::vector<config_timing_result> results;
+
+    // Test SSE2 configuration (default libm-backed transcendentals)
+    {
+        mexce::evaluator eval;
+        eval.opts().prefer_x87 = false;
+        eval.opts().fast_math = false;
+        results.push_back(run_config_timing("SSE2 (libm)", eval, config.iterations, std::cout));
+    }
+
+    // Test x87 configuration
+    {
+        mexce::evaluator eval;
+        eval.opts().prefer_x87 = true;
+        eval.opts().fast_math = false;
+        results.push_back(run_config_timing("x87", eval, config.iterations, std::cout));
+    }
+
+    // Test SSE2 with fast-math
+    {
+        mexce::evaluator eval;
+        eval.opts().prefer_x87 = false;
+        eval.opts().fast_math = true;
+        results.push_back(run_config_timing("SSE2 (fast-math)", eval, config.iterations, std::cout));
+    }
+
+    // Test x87 with fast-math
+    {
+        mexce::evaluator eval;
+        eval.opts().prefer_x87 = true;
+        eval.opts().fast_math = true;
+        results.push_back(run_config_timing("x87 (fast-math)", eval, config.iterations, std::cout));
+    }
+
+    // Print comparison table
+    std::cout << "\n";
+    const std::string line(70, '=');
+    std::cout << line << "\n";
+    std::cout << "CONFIGURATION COMPARISON SUMMARY\n";
+    std::cout << line << "\n\n";
+
+    // Find column widths
+    size_t name_width = std::string("Configuration").size();
+    for (const auto& r : results) {
+        name_width = std::max(name_width, r.config_name.size());
+    }
+
+    const size_t compile_width = 15;
+    const size_t eval_width = 15;
+    const size_t total_width = 15;
+
+    std::cout << std::left << std::setw((int)name_width) << "Configuration" << "  "
+              << std::setw((int)compile_width) << "Avg Compile" << "  "
+              << std::setw((int)eval_width) << "Avg Eval" << "  "
+              << std::setw((int)total_width) << "Total Eval" << "\n";
+
+    std::cout << std::string(name_width, '-') << "  "
+              << std::string(compile_width, '-') << "  "
+              << std::string(eval_width, '-') << "  "
+              << std::string(total_width, '-') << "\n";
+
+    for (const auto& r : results) {
+        std::cout << std::left << std::setw((int)name_width) << r.config_name << "  "
+                  << std::setw((int)compile_width) << format_ns(r.avg_compile_ns) << "  "
+                  << std::setw((int)eval_width) << format_ns(r.avg_eval_ns) << "  "
+                  << std::setw((int)total_width) << format_ns((uint64_t)r.total_eval_ns) << "\n";
+    }
+
+    std::cout << "\n" << line << "\n";
+
+    // Find fastest configuration
+    if (!results.empty()) {
+        auto fastest_it = std::min_element(results.begin(), results.end(),
+            [](const config_timing_result& a, const config_timing_result& b) {
+                return a.avg_eval_ns < b.avg_eval_ns;
+            });
+        std::cout << "Fastest evaluation: " << fastest_it->config_name
+                  << " (" << format_ns(fastest_it->avg_eval_ns) << " per call)\n";
+    }
+
+    std::cout << "\nNote: SSE2 uses libm for transcendentals (sin, cos, exp, etc.).\n";
+    std::cout << "      x87 uses native FPU instructions for all operations.\n";
+    std::cout << "      fast-math enables algebraic simplifications (x-x=0, x/x=1).\n";
+
+    return 0;
+}
+
+int main(int argc, char* argv[])
+{
+    benchmark_config config;
+    if (!parse_args(argc, argv, config)) {
+        return 1;
+    }
+
+    if (config.comprehensive) {
+        return run_comprehensive_benchmark(config);
+    }
+
+    int iterations = config.iterations;
+    std::string output_path = config.output_path;
 
     const std::string resolved_output = output_path.empty() ? std::string() : resolve_full_path(output_path);
 
@@ -302,6 +507,19 @@ int main(int argc, char* argv[])
     }
 
     mexce::evaluator eval;
+    // Apply configuration options
+    if (config.force_x87) {
+        eval.opts().prefer_x87 = true;
+        std::cout << "Backend: x87 (forced)" << std::endl;
+    }
+    else if (config.force_sse2) {
+        eval.opts().prefer_x87 = false;
+        std::cout << "Backend: SSE2 (forced)" << std::endl;
+    }
+    if (config.fast_math) {
+        eval.opts().fast_math = true;
+        std::cout << "Fast-math: enabled" << std::endl;
+    }
     double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
     eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
     mexce::benchmark_data::NativeContext native_ctx{};
