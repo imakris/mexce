@@ -669,7 +669,14 @@ static void generate_detailed_report(
 
         // Timing: run multiple trials and take the minimum to reduce OS scheduling noise
         // The minimum represents the "true" speed without interruption
-        constexpr int k_timing_trials = 5;
+        // Use more trials for better chance of catching a quiet moment
+        constexpr int k_timing_trials = 10;
+
+        // Warmup: run a few iterations to warm up instruction cache
+        for (size_t i = 0; i < std::min(iterations_u, (size_t)1000); ++i) {
+            (void)eval.evaluate();
+        }
+
         uint64_t best_ns = std::numeric_limits<uint64_t>::max();
         for (int trial = 0; trial < k_timing_trials; ++trial) {
             mexce::stopwatch eval_timer;
@@ -682,6 +689,11 @@ static void generate_detailed_report(
         rec.avg_ns = best_ns;
 
         if (rec.native_eval_ok) {
+            // Warmup for native too
+            for (size_t i = 0; i < std::min(iterations_u, (size_t)1000); ++i) {
+                (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+            }
+
             uint64_t best_native_ns = std::numeric_limits<uint64_t>::max();
             for (int trial = 0; trial < k_timing_trials; ++trial) {
                 mexce::stopwatch native_timer;
