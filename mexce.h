@@ -2971,9 +2971,11 @@ constexpr int k_sse2_max_registers = 8;   // XMM0-XMM7 (all volatile on System V
 // Check if a function is a direct SSE2 arithmetic operation
 inline bool is_sse2_direct_function(const string& fn_name)
 {
-    // Basic arithmetic operations that SSE2 can handle directly
+    // Basic arithmetic operations that SSE2 can handle directly,
+    // plus SSE4.1 rounding instructions (roundsd)
     static const std::set<string> supported = {
-        "add", "sub", "mul", "div", "neg", "abs"
+        "add", "sub", "mul", "div", "neg", "abs",
+        "floor", "ceil", "round", "trunc", "int"
     };
     return supported.find(fn_name) != supported.end();
 }
@@ -3455,6 +3457,30 @@ inline void emit_sse2_sqrtsd(impl::mexce_charstream& s, int dst, int src)
 #endif
 }
 
+// SSE4.1 rounding mode constants for roundsd
+constexpr uint8_t k_roundsd_nearest = 0x08;  // Round to nearest (ties to even)
+constexpr uint8_t k_roundsd_floor   = 0x09;  // Round toward -infinity
+constexpr uint8_t k_roundsd_ceil    = 0x0A;  // Round toward +infinity
+constexpr uint8_t k_roundsd_trunc   = 0x0B;  // Round toward zero (truncate)
+
+// Emit roundsd xmm[dst], xmm[src], imm8 - SSE4.1 rounding instruction
+inline void emit_sse41_roundsd(impl::mexce_charstream& s, int dst, int src, uint8_t mode)
+{
+#ifdef MEXCE_64
+    // 66 [REX] 0F 3A 0B ModRM imm8
+    uint8_t rex = 0;
+    if (dst >= 8) rex |= 0x44;  // REX.R
+    if (src >= 8) rex |= 0x41;  // REX.B
+    int dst_enc = dst & 7;
+    int src_enc = src & 7;
+    s < 0x66;
+    if (rex) s < rex;
+    s < 0x0F < 0x3A < 0x0B < (uint8_t)(0xC0 + dst_enc * 8 + src_enc) < mode;
+#else
+    (void)s; (void)dst; (void)src; (void)mode;
+#endif
+}
+
 
 // Emit a unary libm call in SSE2 mode
 // Argument is at xmm[depth-1], result will be at xmm[depth-1]
@@ -3791,6 +3817,23 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 else if (fn == "sqrt") {
                     // sqrt has a direct SSE2 instruction
                     emit_sse2_sqrtsd(code_buffer, depth - 1, depth - 1);
+                }
+                // --- SSE4.1 rounding functions ---
+                else if (fn == "floor") {
+                    emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_floor);
+                }
+                else if (fn == "ceil") {
+                    emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_ceil);
+                }
+                else if (fn == "round") {
+                    emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_nearest);
+                }
+                else if (fn == "trunc") {
+                    emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_trunc);
+                }
+                else if (fn == "int") {
+                    // int uses current rounding mode (default: nearest even), like frndint
+                    emit_sse41_roundsd(code_buffer, depth - 1, depth - 1, k_roundsd_nearest);
                 }
                 // --- libm binary functions ---
                 else if (fn == "logb") {
