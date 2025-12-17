@@ -2953,8 +2953,20 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
 // --- SSE2 backend ---
 //
 // The SSE2 backend uses XMM registers to simulate a stack similar to the x87 FPU.
-// XMM0 is the bottom of the stack, and we use XMM0-XMM7 for up to 8 levels.
-// This matches the x64 ABI where XMM0 is used for return values.
+// XMM0 is the bottom of the stack.
+//
+// Platform-specific register limits:
+// - Linux/macOS (System V ABI): XMM0-XMM15 are all volatile, we use XMM0-XMM7 (8 registers)
+// - Windows x64 ABI: XMM0-XMM5 are volatile, XMM6-XMM15 must be preserved
+//   So on Windows we limit to XMM0-XMM5 (6 registers) to avoid corrupting caller state
+//
+// XMM0 is used for return values on both platforms.
+
+#ifdef _WIN32
+constexpr int k_sse2_max_registers = 6;   // XMM0-XMM5 (XMM6+ must be preserved on Windows)
+#else
+constexpr int k_sse2_max_registers = 8;   // XMM0-XMM7 (all volatile on System V ABI)
+#endif
 
 // Check if a function is a direct SSE2 arithmetic operation
 inline bool is_sse2_direct_function(const string& fn_name)
@@ -3014,7 +3026,7 @@ inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::e
         (void)first; (void)last;
         return false;
     }
-    // Estimate stack depth required - SSE2 uses XMM0-XMM7 (8 registers max)
+    // Estimate stack depth required - limited by platform ABI (see k_sse2_max_registers)
     int max_depth = 0;
     int current_depth = 0;
 
@@ -3039,9 +3051,9 @@ inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::e
         }
     }
 
-    // If max depth exceeds 8 (XMM register limit), use x87 with optimizer instead
+    // If max depth exceeds register limit, use x87 with optimizer instead
     // The x87 asmd_optimizer can reduce stack depth for chains of operations
-    if (max_depth > 8) {
+    if (max_depth > k_sse2_max_registers) {
         return false;
     }
 
@@ -3415,7 +3427,7 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 // Copy xmm[depth-1] to xmm[depth]
                 emit_sse2_mov_reg_reg(code_buffer, depth, depth - 1);
                 ++depth;
-                if (depth > 8) {
+                if (depth > k_sse2_max_registers) {
                     throw std::overflow_error("Expression too complex for SSE2 backend (register overflow)");
                 }
                 continue;
@@ -3551,7 +3563,7 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
             }
         }
 
-        if (depth > 8) {
+        if (depth > k_sse2_max_registers) {
             throw std::overflow_error("Expression too complex for SSE2 backend (register overflow)");
         }
     }
