@@ -667,19 +667,31 @@ static void generate_detailed_report(
             rec.ulp_mexce_vs_compiler = (mexce_zero && native_zero) ? 0 : ulp_distance(rec.mexce_result, rec.native_result);
         }
 
-        // Timing
-        mexce::stopwatch eval_timer;
-        for (size_t i = 0; i < iterations_u; ++i) {
-            (void)eval.evaluate();
+        // Timing: run multiple trials and take the minimum to reduce OS scheduling noise
+        // The minimum represents the "true" speed without interruption
+        constexpr int k_timing_trials = 5;
+        uint64_t best_ns = std::numeric_limits<uint64_t>::max();
+        for (int trial = 0; trial < k_timing_trials; ++trial) {
+            mexce::stopwatch eval_timer;
+            for (size_t i = 0; i < iterations_u; ++i) {
+                (void)eval.evaluate();
+            }
+            uint64_t trial_ns = (uint64_t)((double)eval_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
+            if (trial_ns < best_ns) best_ns = trial_ns;
         }
-        rec.avg_ns = (uint64_t)((double)eval_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
+        rec.avg_ns = best_ns;
 
         if (rec.native_eval_ok) {
-            mexce::stopwatch native_timer;
-            for (size_t i = 0; i < iterations_u; ++i) {
-                (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+            uint64_t best_native_ns = std::numeric_limits<uint64_t>::max();
+            for (int trial = 0; trial < k_timing_trials; ++trial) {
+                mexce::stopwatch native_timer;
+                for (size_t i = 0; i < iterations_u; ++i) {
+                    (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+                }
+                uint64_t trial_ns = (uint64_t)((double)native_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
+                if (trial_ns < best_native_ns) best_native_ns = trial_ns;
             }
-            rec.native_avg_ns = (uint64_t)((double)native_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
+            rec.native_avg_ns = best_native_ns;
         }
 
         detail_records.push_back(rec);
