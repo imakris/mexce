@@ -306,6 +306,7 @@ private:
 
     bool                    is_constant_expression      = false;
     double                  constant_expression_value   = 0.0;
+    bool                    m_sse2_simplify_mode        = false;  // When true, asmd_optimizer reconstructs elist instead of x87 code
     size_t                  m_buffer_size               = 0;
     std::string             m_expression;
     impl::elist_t           m_elist;
@@ -621,7 +622,6 @@ shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v)
         return it->second;
     }
 }
-
 
 
 inline
@@ -3956,6 +3956,14 @@ string elist_to_string(const elist_t& elist)
 inline
 void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
+    // In SSE2 mode, skip the optimizer - SSE2 backend handles add/sub/mul/div directly.
+    // The optimizer generates x87 code and modifies elist in ways incompatible with SSE2.
+    // Note: fast_math algebraic simplifications (x-x→0, x/x→1) are handled separately
+    // in a pre-optimizer pass in set_expression(), so SSE2 still benefits from those.
+    if (ev->m_sse2_simplify_mode) {
+        return;
+    }
+
     auto f = it->f;
     auto fname = f->name;
     int fclass = (fname == "add" || fname == "sub") ? 1 : (fname == "mul" || fname == "div") ? 2 : 0;
@@ -4059,7 +4067,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 merged.pop_back();
             }
         }
-        else 
+        else
         if (term.factor != 0) {
             merged.push_back({std::move(term.chunk), term.factor});
         }
@@ -5164,9 +5172,9 @@ void evaluator::set_expression(std::string e)
     }
 
     // Check if the expression is SSE2-compatible BEFORE running optimizers.
-    // Note: asmd_optimizer generates x87 FPU code directly, so it must be skipped
-    // for SSE2-compatible expressions. The SSE2 backend handles add/sub/mul/div directly.
-    bool skip_asmd_optimizer = is_sse2_compatible(m_elist.begin(), m_elist.end(), m_options.prefer_x87);
+    // For SSE2, we still want the algebraic simplifications from asmd_optimizer,
+    // but we want it to output a simplified elist instead of x87 code.
+    m_sse2_simplify_mode = is_sse2_compatible(m_elist.begin(), m_elist.end(), m_options.prefer_x87);
 
     // Fast-math algebraic simplifications - run in a SEPARATE PASS before any optimizer
     // modifies the expression structure. This must happen before asmd_optimizer which
@@ -5286,17 +5294,12 @@ void evaluator::set_expression(std::string e)
                 }
             }
 
-            // Skip asmd_optimizer for SSE2-compatible expressions to preserve
-            // the function nodes in their original form for SSE2 code generation.
-            // Note: pow_optimizer is always run because it handles special cases
+            // Run optimizers. asmd_optimizer checks m_sse2_simplify_mode to decide
+            // whether to output x87 code (for x87 backend) or a simplified elist (for SSE2).
+            // pow_optimizer always runs because it handles special cases
             // (negative bases, nested powers) that std::pow() doesn't handle correctly.
             if (f->optimizer != 0) {
-                if (skip_asmd_optimizer && f->optimizer == asmd_optimizer) {
-                    // Don't run asmd_optimizer, SSE2 backend will handle add/sub/mul/div directly
-                }
-                else {
-                    f->optimizer(y, this, &m_elist);
-                }
+                f->optimizer(y, this, &m_elist);
             }
         }
         y = y_next;
