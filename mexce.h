@@ -2631,6 +2631,20 @@ inline Function Int()
 }
 
 
+inline Function Trunc()
+{
+    // Round toward zero (truncate) - control word bits [11:10] = 11
+    uint8_t code[] = {
+        0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x0e,   // mov         word ptr [esp-4], e7fh
+        0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]
+        0xd9, 0x6c, 0x24, 0xfc,                     // fldcw       word ptr [esp-4]
+        0xd9, 0xfc,                                 // frndint
+        0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
+    };
+    return Function(0, "trunc", 1, 0, sizeof(code), code);
+}
+
+
 inline Function Mod()
 {
     uint8_t code[] = {
@@ -4537,7 +4551,7 @@ inline const map<string, Function>& make_function_map()
     if (ret.empty()) { // Initialize only once
         Function f[] = {
             Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(), Lt(), Gt(), Le(), Ge(), Eq(), Ne(),
-            Log(), Log2(), Ln(), Log10(), Logb(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Mod(),
+            Log(), Log2(), Ln(), Log10(), Logb(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Trunc(), Mod(),
             Bnd(), Add(), Sub(), Neg(), Mul(), Div(), Bias(), Gain()
         };
         for (auto& e : f) {
