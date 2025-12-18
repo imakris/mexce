@@ -1335,6 +1335,61 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     out << "TIMING COMPARISON\n";
     out << line << "\n\n";
 
+    // Find the intersection of expressions that work for ALL backends
+    // This ensures a fair 1:1 comparison across Native and all mexce configs
+    const size_t total_expr = results.empty() ? 0 : results[0].records.size();
+    std::vector<bool> in_intersection(total_expr, false);
+    size_t intersection_count = 0;
+
+    for (size_t idx = 0; idx < total_expr; ++idx) {
+        // Must have native available
+        if (!results[0].records[idx].native_available) continue;
+
+        // Must have compiled successfully in ALL configs
+        bool all_compiled = true;
+        for (const auto& r : results) {
+            if (idx >= r.records.size() || !r.records[idx].compiled) {
+                all_compiled = false;
+                break;
+            }
+        }
+        if (!all_compiled) continue;
+
+        in_intersection[idx] = true;
+        intersection_count++;
+    }
+
+    // Compute timing for the intersection set only
+    struct intersection_timing {
+        long long total_eval_ns = 0;
+        long long total_native_ns = 0;
+        long long total_compile_ns = 0;
+        size_t count = 0;
+    };
+
+    // Native timing for intersection
+    long long native_total_ns = 0;
+    for (size_t idx = 0; idx < total_expr && idx < results[0].records.size(); ++idx) {
+        if (in_intersection[idx]) {
+            native_total_ns += results[0].records[idx].native_dur_ns;
+        }
+    }
+
+    // Per-config timing for intersection
+    std::vector<intersection_timing> intersection_timings(results.size());
+    for (size_t cfg_idx = 0; cfg_idx < results.size(); ++cfg_idx) {
+        const auto& r = results[cfg_idx];
+        auto& timing = intersection_timings[cfg_idx];
+        for (size_t idx = 0; idx < total_expr && idx < r.records.size(); ++idx) {
+            if (in_intersection[idx]) {
+                timing.total_eval_ns += r.records[idx].dur_ns;
+                timing.total_native_ns += r.records[idx].native_dur_ns;
+                timing.total_compile_ns += (long long)r.records[idx].compile_ns;
+                timing.count++;
+            }
+        }
+    }
+
     // Find column widths
     size_t name_width = std::string("Configuration").size();
     for (const auto& r : results) {
@@ -1347,55 +1402,51 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     out << std::left << std::setw((int)name_width) << "Configuration" << "  "
         << std::setw((int)col_width) << "Avg Compile" << "  "
         << std::setw((int)col_width) << "Avg Eval" << "  "
-        << std::setw((int)col_width) << "Avg Native" << "  "
-        << std::setw((int)col_width) << "Expressions" << "\n";
+        << std::setw((int)col_width) << "Total Eval" << "\n";
 
     out << std::string(name_width, '-') << "  "
         << std::string(col_width, '-') << "  "
         << std::string(col_width, '-') << "  "
-        << std::string(col_width, '-') << "  "
         << std::string(col_width, '-') << "\n";
 
-    for (const auto& r : results) {
-        // Calculate average eval time using only expressions that used the actual requested backend
-        double avg_eval_actual = 0.0;
-        if (r.eval_count_actual_backend > 0) {
-            avg_eval_actual = (double)r.total_eval_ns_actual_backend /
-                ((double)r.eval_count_actual_backend * (double)config.iterations);
-        }
-
-        // Calculate average native time for the SAME set of expressions (1:1 comparison)
-        double avg_native_actual = 0.0;
-        if (r.native_count_actual_backend > 0) {
-            avg_native_actual = (double)r.total_native_ns_actual_backend /
-                ((double)r.native_count_actual_backend * (double)config.iterations);
-        }
-
-        // Show timing for expressions that actually used the requested backend
-        // Native column shows timing for the SAME expressions (fair 1:1 comparison)
-        out << std::left << std::setw((int)name_width) << r.config_name << "  "
-            << std::setw((int)col_width) << format_ns(r.avg_compile_ns) << "  "
-            << std::setw((int)col_width) << format_ns(avg_eval_actual) << "  "
-            << std::setw((int)col_width) << format_ns(avg_native_actual) << "  "
-            << r.native_count_actual_backend << "\n";
+    // Print Native row first
+    if (intersection_count > 0) {
+        double native_avg = (double)native_total_ns / ((double)intersection_count * (double)config.iterations);
+        out << std::left << std::setw((int)name_width) << "Native" << "  "
+            << std::setw((int)col_width) << "-" << "  "
+            << std::setw((int)col_width) << format_ns(native_avg) << "  "
+            << std::setw((int)col_width) << format_ns((uint64_t)native_total_ns) << "\n";
     }
 
-    // Find fastest (using actual backend timing)
-    if (!results.empty()) {
-        auto fastest_it = std::min_element(results.begin(), results.end(),
-            [&config](const benchmark_result& a, const benchmark_result& b) {
-                double avg_a = (a.eval_count_actual_backend > 0) ?
-                    (double)a.total_eval_ns_actual_backend / ((double)a.eval_count_actual_backend * (double)config.iterations) :
-                    std::numeric_limits<double>::max();
-                double avg_b = (b.eval_count_actual_backend > 0) ?
-                    (double)b.total_eval_ns_actual_backend / ((double)b.eval_count_actual_backend * (double)config.iterations) :
-                    std::numeric_limits<double>::max();
-                return avg_a < avg_b;
-            });
-        double fastest_avg = (fastest_it->eval_count_actual_backend > 0) ?
-            (double)fastest_it->total_eval_ns_actual_backend /
-            ((double)fastest_it->eval_count_actual_backend * (double)config.iterations) : 0.0;
-        out << "\nFastest: " << fastest_it->config_name
+    // Print each mexce config
+    for (size_t cfg_idx = 0; cfg_idx < results.size(); ++cfg_idx) {
+        const auto& r = results[cfg_idx];
+        const auto& timing = intersection_timings[cfg_idx];
+
+        double avg_compile = (timing.count > 0) ? (double)timing.total_compile_ns / (double)timing.count : 0.0;
+        double avg_eval = (timing.count > 0) ? (double)timing.total_eval_ns / ((double)timing.count * (double)config.iterations) : 0.0;
+
+        out << std::left << std::setw((int)name_width) << r.config_name << "  "
+            << std::setw((int)col_width) << format_ns(avg_compile) << "  "
+            << std::setw((int)col_width) << format_ns(avg_eval) << "  "
+            << std::setw((int)col_width) << format_ns((uint64_t)timing.total_eval_ns) << "\n";
+    }
+
+    out << "\nExpressions in intersection: " << intersection_count << " (of " << total_expr << " total)\n";
+
+    // Find fastest mexce config (using intersection timing)
+    if (!intersection_timings.empty() && intersection_count > 0) {
+        size_t fastest_idx = 0;
+        double fastest_avg = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < intersection_timings.size(); ++i) {
+            double avg = (double)intersection_timings[i].total_eval_ns /
+                ((double)intersection_count * (double)config.iterations);
+            if (avg < fastest_avg) {
+                fastest_avg = avg;
+                fastest_idx = i;
+            }
+        }
+        out << "\nFastest: " << results[fastest_idx].config_name
             << " (" << format_ns(fastest_avg) << " per call)\n";
     }
 
