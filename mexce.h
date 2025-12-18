@@ -2930,43 +2930,51 @@ inline
 void normalize_commutative_operands(elist_t& elist)
 {
     elist_comparison comp;
-    
-    for (auto it = elist.begin(); it != elist.end(); ++it) {
-        if (it->type != Element_type::CFUNC) continue;
-        
-        auto f = it->f;
-        if (f->num_args != 2) continue;
-        
-        // Only normalize commutative operations
-        bool is_commutative = (f->name == "add" || f->name == "mul");
-        if (!is_commutative) continue;
-        
-        // Get the dependent chunks for both arguments
-        // args[0] = second operand (top of stack), args[1] = first operand (computed first)
-        auto chunk0 = get_dependent_chunk(f->args[0]);
-        auto chunk1 = get_dependent_chunk(f->args[1]);
-        
-        // Create temporary lists to compare (elist_comparison expects elist_t)
-        elist_t temp0(chunk0.first, chunk0.second);
-        elist_t temp1(chunk1.first, chunk1.second);
-        
-        // Canonical order: larger/more complex chunk should be in args[1] (computed first)
-        // This improves stack efficiency (compute complex while stack is emptier)
-        // and provides consistent ordering for CSE.
-        // comp returns true if first arg is "greater" (larger size, higher type, lower id)
-        if (comp(temp0, temp1)) {
-            // chunk0 is "greater", should be in args[1] position - need to swap
-            // Swap by splicing: move chunk1 to after chunk0 (before the function node)
-            // After swap: [..., chunk0_elements, chunk1_elements, func]
 
-            // Move chunk1 to right before the function node (after chunk0)
-            // splice(pos, list, first, last) inserts [first, last) before pos
-            elist.splice(it, elist, chunk1.first, chunk1.second);
+    // After each splice, we must re-link arguments because get_dependent_chunk
+    // relies on args pointers and next() which depend on list order.
+    bool modified;
+    do {
+        modified = false;
+        for (auto it = elist.begin(); it != elist.end(); ++it) {
+            if (it->type != Element_type::CFUNC) continue;
+
+            auto f = it->f;
+            if (f->num_args != 2) continue;
+
+            // Only normalize commutative operations
+            bool is_commutative = (f->name == "add" || f->name == "mul");
+            if (!is_commutative) continue;
+
+            // Get the dependent chunks for both arguments
+            // args[0] = second operand (top of stack), args[1] = first operand (computed first)
+            auto chunk0 = get_dependent_chunk(f->args[0]);
+            auto chunk1 = get_dependent_chunk(f->args[1]);
+
+            // Create temporary lists to compare (elist_comparison expects elist_t)
+            elist_t temp0(chunk0.first, chunk0.second);
+            elist_t temp1(chunk1.first, chunk1.second);
+
+            // Canonical order: larger/more complex chunk should be in args[1] (computed first)
+            // This improves stack efficiency (compute complex while stack is emptier)
+            // and provides consistent ordering for CSE.
+            // comp returns true if first arg is "greater" (larger size, higher type, lower id)
+            if (comp(temp0, temp1)) {
+                // chunk0 is "greater", should be in args[1] position - need to swap
+                // Swap by splicing: move chunk1 to after chunk0 (before the function node)
+                // After swap: [..., chunk0_elements, chunk1_elements, func]
+
+                // Move chunk1 to right before the function node (after chunk0)
+                // splice(pos, list, first, last) inserts [first, last) before pos
+                elist.splice(it, elist, chunk1.first, chunk1.second);
+
+                // Re-link and restart - args pointers are now stale
+                link_arguments(elist);
+                modified = true;
+                break;
+            }
         }
-    }
-    
-    // Re-link arguments after reordering
-    link_arguments(elist);
+    } while (modified);
 }
 
 
