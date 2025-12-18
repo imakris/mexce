@@ -45,58 +45,50 @@
 // ----------------------------- Utils ---------------------------------
 
 // Human-readable ns formatter (no chrono)
-static std::string format_ns(uint64_t ns)
+static std::string format_ns(double ns)
 {
-    struct unit_t { const char* name; uint64_t factor; };
+    struct unit_t { const char* name; double factor; };
     static const unit_t s_units[] = {
-        {"sec", 1000000000ULL},
-        {"ms",     1000000ULL},
-        {"us",        1000ULL},
-        {"ns",           1ULL}
+        {"sec", 1000000000.0},
+        {"ms",     1000000.0},
+        {"us",        1000.0},
+        {"ns",           1.0}
     };
 
-    if (ns == 0) {
+    if (ns == 0.0) {
         return "0.0 ns";
     }
 
     const unit_t* chosen = &s_units[3];
     for (size_t i = 0; i < sizeof(s_units) / sizeof(s_units[0]); ++i) {
-        uint64_t integer = ns / s_units[i].factor;
-        if (integer >= 1 && integer <= 999) {
+        double value = ns / s_units[i].factor;
+        if (value >= 1.0 && value < 1000.0) {
             chosen = &s_units[i];
             break;
         }
     }
-    if (ns / s_units[0].factor >= 1000) {
+    if (ns / s_units[0].factor >= 1000.0) {
         chosen = &s_units[0];
     }
 
-    uint64_t integer = ns / chosen->factor;
-    uint64_t frac = ns % chosen->factor;
-    unsigned width = 0;
-    for (uint64_t f = chosen->factor; f > 1; f /= 10) {
-        ++width;
+    double value = ns / chosen->factor;
+
+    // Format with up to 3 decimal places, removing trailing zeros
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3) << value;
+    std::string out = oss.str();
+
+    // Remove trailing zeros after decimal point, but keep at least one digit
+    size_t dot_pos = out.find('.');
+    if (dot_pos != std::string::npos) {
+        size_t last_nonzero = out.find_last_not_of('0');
+        if (last_nonzero != std::string::npos && last_nonzero > dot_pos) {
+            out.erase(last_nonzero + 1);
+        } else if (last_nonzero == dot_pos) {
+            out.erase(dot_pos + 2);  // Keep ".0"
+        }
     }
 
-    std::string out;
-    out.reserve(32);
-    out += std::to_string(integer);
-
-    if (width > 0) {
-        std::string frac_str(width, '0');
-        for (int i = (int)width - 1; i >= 0 && frac > 0; --i) {
-            frac_str[(size_t)i] = char('0' + (frac % 10));
-            frac /= 10;
-        }
-        while (!frac_str.empty() && frac_str.back() == '0') {
-            frac_str.pop_back();
-        }
-        out += '.';
-        out += frac_str.empty() ? "0" : frac_str;
-    }
-    else {
-        out += ".0";
-    }
     out += ' ';
     out += chosen->name;
     return out;
@@ -365,8 +357,8 @@ struct config_result {
     size_t expressions_evaluated = 0;
     long long total_compile_ns = 0;
     long long total_eval_ns = 0;
-    uint64_t avg_compile_ns = 0;
-    uint64_t avg_eval_ns = 0;
+    double avg_compile_ns = 0.0;
+    double avg_eval_ns = 0.0;
 
     // Precision stats
     size_t exact_zero_count = 0;
@@ -487,12 +479,12 @@ static config_result run_config_benchmark(
     }
 
     if (result.expressions_compiled > 0) {
-        result.avg_compile_ns = (uint64_t)((double)result.total_compile_ns /
-            (double)result.expressions_compiled + 0.5);
+        result.avg_compile_ns = (double)result.total_compile_ns /
+            (double)result.expressions_compiled;
     }
     if (result.expressions_evaluated > 0) {
-        result.avg_eval_ns = (uint64_t)((double)result.total_eval_ns /
-            ((double)result.expressions_evaluated * (double)iterations) + 0.5);
+        result.avg_eval_ns = (double)result.total_eval_ns /
+            ((double)result.expressions_evaluated * (double)iterations);
     }
 
     progress_out << " done (" << result.expressions_compiled << "/" << total << " compiled)\n";
@@ -566,12 +558,12 @@ static config_result run_native_benchmark(
     }
 
     // No compile time for native
-    result.avg_compile_ns = 0;
+    result.avg_compile_ns = 0.0;
     result.total_compile_ns = 0;
 
     if (result.expressions_evaluated > 0) {
-        result.avg_eval_ns = (uint64_t)((double)result.total_eval_ns /
-            ((double)result.expressions_evaluated * (double)iterations) + 0.5);
+        result.avg_eval_ns = (double)result.total_eval_ns /
+            ((double)result.expressions_evaluated * (double)iterations);
     }
 
     progress_out << " done (" << result.expressions_evaluated << "/" << native_count << " available)\n";
@@ -858,7 +850,7 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
         out << std::left << std::setw((int)name_width) << r.config_name << "  "
             << std::setw((int)col_width) << format_ns(r.avg_compile_ns) << "  "
             << std::setw((int)col_width) << format_ns(r.avg_eval_ns) << "  "
-            << std::setw((int)col_width) << format_ns((uint64_t)r.total_eval_ns) << "\n";
+            << std::setw((int)col_width) << format_ns((double)r.total_eval_ns) << "\n";
     }
 
     // Find fastest
@@ -1549,19 +1541,19 @@ int main(int argc, char* argv[])
         mexce_column.values.assign(summary_rows.size(), "-");
         mexce_column.values[0] = std::to_string(benchmarked_functions);
         if (compiled_count > 0) {
-            const uint64_t avg_compile_ns = (uint64_t)(sum_compile_ns / (long double)compiled_count + 0.5L);
+            const double avg_compile_ns = (double)sum_compile_ns / (double)compiled_count;
             mexce_column.values[1] = format_ns(avg_compile_ns);
-            mexce_column.values[3] = format_ns((uint64_t)total_compile_duration_ns);
+            mexce_column.values[3] = format_ns((double)total_compile_duration_ns);
         }
         if (benchmarked_functions > 0) {
             // Compute average time per single function call from totals
             // avg = total_time / (num_functions * iterations_per_function)
-            const uint64_t total_calls = (uint64_t)benchmarked_functions * (uint64_t)iterations;
-            const uint64_t avg_per_func_ns = (total_calls > 0)
-                ? (uint64_t)((double)total_duration_ns / (double)total_calls + 0.5)
-                : 0;
+            const double total_calls = (double)benchmarked_functions * (double)iterations;
+            const double avg_per_func_ns = (total_calls > 0.0)
+                ? (double)total_duration_ns / total_calls
+                : 0.0;
             mexce_column.values[2] = format_ns(avg_per_func_ns);
-            mexce_column.values[4] = format_ns((uint64_t)total_duration_ns);
+            mexce_column.values[4] = format_ns((double)total_duration_ns);
         }
         summary_columns.push_back(std::move(mexce_column));
     }
@@ -1573,12 +1565,12 @@ int main(int argc, char* argv[])
         compiler_column.values[0] = std::to_string(benchmarked_native_functions);
         if (benchmarked_native_functions > 0) {
             // Compute average time per single function call from totals
-            const uint64_t total_native_calls = (uint64_t)benchmarked_native_functions * (uint64_t)iterations;
-            const uint64_t avg_native_ns = (total_native_calls > 0)
-                ? (uint64_t)((double)total_native_duration_ns / (double)total_native_calls + 0.5)
-                : 0;
+            const double total_native_calls = (double)benchmarked_native_functions * (double)iterations;
+            const double avg_native_ns = (total_native_calls > 0.0)
+                ? (double)total_native_duration_ns / total_native_calls
+                : 0.0;
             compiler_column.values[2] = format_ns(avg_native_ns);
-            compiler_column.values[4] = format_ns((uint64_t)total_native_duration_ns);
+            compiler_column.values[4] = format_ns((double)total_native_duration_ns);
         }
         summary_columns.push_back(std::move(compiler_column));
     }
