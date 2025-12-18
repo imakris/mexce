@@ -340,6 +340,7 @@ private:
     backend_type            m_backend_used              = backend_type::none;
     size_t                  m_buffer_size               = 0;
     std::string             m_expression;
+    std::string             m_last_expression;          // Saved for potential SSE2->x87 fallback re-parsing
     impl::elist_t           m_elist;
     std::list<std::string>  m_intermediate_code;
     impl::constant_map_t    m_intermediate_constants;  // produced during expression simplification
@@ -5104,6 +5105,9 @@ void evaluator::set_expression(std::string e)
     using namespace impl;
     using mpe = mexce_parsing_exception;
 
+    // Save for potential fallback re-parsing (SSE2->x87)
+    m_last_expression = e;
+
     deque<Token> tokens;
 
     m_intermediate_constants.clear();
@@ -5525,14 +5529,10 @@ void evaluator::set_expression(std::string e)
     // but we want it to output a simplified elist instead of x87 code.
     m_sse2_simplify_mode = is_sse2_compatible(m_elist.begin(), m_elist.end(), m_options.prefer_x87);
 
-    // Save elist state before optimization for potential fallback.
-    // If we run in SSE2 mode but the optimizer produces an elist that's too deep,
-    // we need to restore and re-run in x87 mode.
-    elist_t elist_backup;
+    // Track if we need to check for SSE2->x87 fallback after optimization.
+    // We can't backup the elist because optimizers modify Function objects in place
+    // (shared via shared_ptr), so instead we re-parse from m_last_expression if needed.
     bool need_fallback_check = m_sse2_simplify_mode;
-    if (need_fallback_check) {
-        elist_backup = m_elist;
-    }
 
     // Fast-math algebraic simplifications - run in a SEPARATE PASS before any optimizer
     // modifies the expression structure. This must happen before asmd_optimizer which
@@ -5665,24 +5665,16 @@ void evaluator::set_expression(std::string e)
 
     // Check if SSE2 optimization produced an elist that's no longer SSE2-compatible.
     // This can happen when asmd_optimizer flattens chains into too many parallel terms.
-    // If so, restore the pre-optimization elist and re-run in x87 mode.
+    // If so, re-parse the expression with x87 mode forced.
+    // Note: We cannot simply restore the backup because the optimizer modifies Function
+    // objects in place (shared via shared_ptr), corrupting the backup.
     if (need_fallback_check && !is_sse2_compatible(m_elist.begin(), m_elist.end(), false)) {
-        // Restore elist and re-run optimization in x87 mode
-        m_elist = std::move(elist_backup);
-        m_sse2_simplify_mode = false;
-        link_arguments(m_elist);
-
-        // Re-run the optimizer loop in x87 mode
-        for (auto y = m_elist.begin(); y != m_elist.end(); ) {
-            auto y_next = next(y);
-            if (y->type == Element_type::CFUNC) {
-                auto f = y->f;
-                if (f->optimizer != 0) {
-                    f->optimizer(y, this, &m_elist);
-                }
-            }
-            y = y_next;
-        }
+        // Force x87 mode and re-parse the expression from scratch
+        bool original_prefer_x87 = m_options.prefer_x87;
+        m_options.prefer_x87 = true;
+        set_expression(m_last_expression);
+        m_options.prefer_x87 = original_prefer_x87;
+        return;
     }
 
     is_constant_expression = m_elist.size()==1 && m_elist.back().type == Element_type::CCONST;
