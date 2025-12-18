@@ -1541,8 +1541,8 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
         out << "\n";
     }
 
-    // Print totals (extra blank line ensures >65536 row is visible in CI)
-    out << "\n\n";
+    // Print totals
+    out << "\n";
     out << std::left << std::setw((int)label_width) << "Total ULP sum" << "  ";
     // Native ULP sum
     if (!results.empty()) {
