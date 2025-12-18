@@ -625,6 +625,19 @@ static benchmark_result run_benchmark(
     return result;
 }
 
+// Print explanatory notes about backends and options
+static void print_backend_notes(std::ostream& out) {
+    out << "\nBackend notes:\n";
+    out << "  SSE2:      Uses SSE2 scalar instructions (addsd, mulsd, etc.) for arithmetic,\n";
+    out << "             plus SSE4.1 roundsd for rounding functions (floor, ceil, round, trunc).\n";
+    out << "  x87:       Uses the legacy x87 FPU stack. May produce different precision results\n";
+    out << "             due to 80-bit extended precision intermediate calculations.\n";
+    out << "  fast-math: Enables algebraic optimizations (e.g., x*0=0, x+0=x) that assume\n";
+    out << "             no NaN/Inf values, similar to compiler -ffast-math behavior.\n";
+    out << "  Native:    Compiler-generated code using the same flags shown above.\n";
+    out << std::endl;  // flush to ensure notes appear before progress output
+}
+
 // Print detailed per-expression report from benchmark result
 static void print_detailed_report(
     const benchmark_result& result,
@@ -1244,6 +1257,8 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     out << "Compiler flags: " << BENCHMARK_COMPILER_FLAGS << "\n";
 #endif
 
+    print_backend_notes(out);
+
     out << "Iterations per expression: " << config.iterations << "\n";
     out << "Total expressions: " << mexce::benchmark_data::kExpressionCount << "\n\n";
 
@@ -1527,6 +1542,8 @@ int main(int argc, char* argv[])
 #ifdef BENCHMARK_COMPILER_FLAGS
     out << "Compiler flags: " << BENCHMARK_COMPILER_FLAGS << std::endl;
 #endif
+
+    print_backend_notes(out);
 
     if (mexce::benchmark_data::kExpressionCount == 0) {
         out << "No expressions available for benchmarking." << std::endl;
