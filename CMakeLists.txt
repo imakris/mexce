@@ -26,52 +26,46 @@ target_include_directories(benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 find_package(OpenMP REQUIRED)
 target_link_libraries(benchmark PRIVATE OpenMP::OpenMP_CXX)
 
+# Define optimization flags explicitly - these are what matter for performance
+# This ensures flags are unambiguous and consistently reported
 if (MSVC)
-    set(MEXCE_BENCHMARK_LOCAL_FLAGS /W4 /permissive- /bigobj)
+    set(MEXCE_OPTIMIZATION_FLAGS /O2)
+    set(MEXCE_WARNING_FLAGS /W4 /permissive- /bigobj)
 else()
-    set(MEXCE_BENCHMARK_LOCAL_FLAGS -Wall -Wextra -Wpedantic)
+    set(MEXCE_OPTIMIZATION_FLAGS -O3 -DNDEBUG)
+    set(MEXCE_WARNING_FLAGS -Wall -Wextra -Wpedantic)
 endif()
 
-target_compile_options(benchmark PRIVATE ${MEXCE_BENCHMARK_LOCAL_FLAGS})
+# Apply optimization flags only when coverage is disabled
+if(NOT ENABLE_COVERAGE)
+    target_compile_options(benchmark PRIVATE ${MEXCE_OPTIMIZATION_FLAGS})
+endif()
+target_compile_options(benchmark PRIVATE ${MEXCE_WARNING_FLAGS})
 
 add_executable(unit_tests test/unit_tests.cpp)
 target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(unit_tests PRIVATE ${MEXCE_BENCHMARK_LOCAL_FLAGS})
+target_compile_options(unit_tests PRIVATE ${MEXCE_WARNING_FLAGS})
 
+# Capture compiler info for benchmark output
 set(MEXCE_BENCHMARK_COMPILER "${CMAKE_CXX_COMPILER_ID}")
 if (CMAKE_CXX_COMPILER_VERSION)
     string(APPEND MEXCE_BENCHMARK_COMPILER " ${CMAKE_CXX_COMPILER_VERSION}")
 endif()
 
-set(MEXCE_BENCHMARK_FLAGS "${CMAKE_CXX_FLAGS}")
-if (CMAKE_BUILD_TYPE)
-    string(TOUPPER "${CMAKE_BUILD_TYPE}" MEXCE_BUILD_TYPE_UPPER)
-    if (DEFINED CMAKE_CXX_FLAGS_${MEXCE_BUILD_TYPE_UPPER})
-        set(MEXCE_BUILD_TYPE_FLAGS "${CMAKE_CXX_FLAGS_${MEXCE_BUILD_TYPE_UPPER}}")
-        if (MEXCE_BUILD_TYPE_FLAGS)
-            if (MEXCE_BENCHMARK_FLAGS)
-                string(APPEND MEXCE_BENCHMARK_FLAGS " ")
-            endif()
-            string(APPEND MEXCE_BENCHMARK_FLAGS "${MEXCE_BUILD_TYPE_FLAGS}")
-        endif()
-    endif()
+# Build the flags string from our explicitly defined flags
+# This ensures what's reported matches exactly what's applied
+if(ENABLE_COVERAGE)
+    # Coverage mode uses -O0 -g instead of optimization flags
+    set(MEXCE_BENCHMARK_FLAGS "-O0 -g")
+else()
+    list(JOIN MEXCE_OPTIMIZATION_FLAGS " " MEXCE_BENCHMARK_FLAGS)
 endif()
 
-if (MEXCE_BENCHMARK_LOCAL_FLAGS)
-    list(JOIN MEXCE_BENCHMARK_LOCAL_FLAGS " " MEXCE_BENCHMARK_LOCAL_FLAGS_STR)
-    if (MEXCE_BENCHMARK_LOCAL_FLAGS_STR)
-        if (MEXCE_BENCHMARK_FLAGS)
-            string(APPEND MEXCE_BENCHMARK_FLAGS " ")
-        endif()
-        string(APPEND MEXCE_BENCHMARK_FLAGS "${MEXCE_BENCHMARK_LOCAL_FLAGS_STR}")
-    endif()
-endif()
+# Append warning flags
+list(JOIN MEXCE_WARNING_FLAGS " " MEXCE_WARNING_FLAGS_STR)
+string(APPEND MEXCE_BENCHMARK_FLAGS " ${MEXCE_WARNING_FLAGS_STR}")
 
-string(STRIP "${MEXCE_BENCHMARK_FLAGS}" MEXCE_BENCHMARK_FLAGS)
-if ("${MEXCE_BENCHMARK_FLAGS}" STREQUAL "")
-    set(MEXCE_BENCHMARK_FLAGS "<none>")
-endif()
-
+# Escape special characters for C++ string literals
 foreach(_var MEXCE_BENCHMARK_COMPILER MEXCE_BENCHMARK_FLAGS)
     string(REPLACE "\\" "\\\\" ${_var} "${${_var}}")
     string(REPLACE "\"" "\\\"" ${_var} "${${_var}}")
