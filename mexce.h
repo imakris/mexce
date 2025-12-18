@@ -3042,6 +3042,21 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
 
     int current_depth = 0;
 
+#ifdef MEXCE_64
+    // RAX caching: tracks current RAX value to avoid redundant mov instructions.
+    // This optimization eliminates repeated 'mov rax, addr' when the same
+    // address is loaded multiple times (common in polynomial expressions).
+    void* rax_cached = nullptr;
+
+    auto emit_load_rax_if_needed = [&](void* addr) {
+        if (rax_cached != addr) {
+            code_buffer << (uint16_t)0xb848;    // mov rax, imm64 (opcode)
+            code_buffer << addr;
+            rax_cached = addr;
+        }
+    };
+#endif
+
     for (auto it = first; it != last; ++it) {
         // Peephole: if the same leaf is loaded twice in a row, duplicate ST(0)
         // instead of reloading from memory.
@@ -3062,8 +3077,7 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             case Element_type::CVAR: {
                 auto tn = it->v;
 #ifdef MEXCE_64
-                code_buffer << (uint16_t)0xb848;    // move input address to rax (opcode)
-                code_buffer << (void*)tn->address;
+                emit_load_rax_if_needed(const_cast<void*>(static_cast<const volatile void*>(tn->address)));
 #endif
                 switch (tn->numeric_data_type) {
 #ifdef MEXCE_64
@@ -3110,8 +3124,7 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
                 }
                 else {
 #ifdef MEXCE_64
-                    code_buffer << (uint16_t)0xb848;
-                    code_buffer << (void*)tn->address;
+                    emit_load_rax_if_needed(const_cast<void*>(static_cast<const volatile void*>(tn->address)));
                     code_buffer < 0xdd < 0x00;
 #else
                     code_buffer < 0xdd < 0x05;
