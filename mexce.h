@@ -2160,7 +2160,7 @@ inline
 pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it);
 
 inline
-void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last);
+void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last, void** shared_rax_cache = nullptr);
 
 inline
 void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
@@ -3036,7 +3036,7 @@ void emit_load_constant(evaluator* ev, impl::mexce_charstream& s, double v)
 
 
 inline
-void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last)
+void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last, void** shared_rax_cache)
 {
     using namespace impl;
 
@@ -3046,7 +3046,9 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
     // RAX caching: tracks current RAX value to avoid redundant mov instructions.
     // This optimization eliminates repeated 'mov rax, addr' when the same
     // address is loaded multiple times (common in polynomial expressions).
-    void* rax_cached = nullptr;
+    // If shared_rax_cache is provided, use it to share state across multiple calls.
+    void* local_rax_cache = nullptr;
+    void*& rax_cached = shared_rax_cache ? *shared_rax_cache : local_rax_cache;
 
     auto emit_load_rax_if_needed = [&](void* addr) {
         if (rax_cached != addr) {
@@ -3055,6 +3057,8 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             rax_cached = addr;
         }
     };
+#else
+    (void)shared_rax_cache;  // Unused on 32-bit
 #endif
 
     for (auto it = first; it != last; ++it) {
@@ -3142,6 +3146,11 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
                 if (!tf->cse_store_suffix.empty()) {
                     code_buffer.write(tf->cse_store_suffix.data(), tf->cse_store_suffix.size());
                 }
+#ifdef MEXCE_64
+                // Function code may clobber RAX (e.g., libm calls, complex operations).
+                // Invalidate the cache to ensure the next variable/constant load emits mov rax.
+                rax_cached = nullptr;
+#endif
                 current_depth = current_depth - static_cast<int>(tf->num_args) + 1;
                 break;
             }
@@ -4525,12 +4534,19 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     stringstream debug_ss;
     bool debug_first = true;
 
+    // Shared RAX cache for compile_elist calls - allows caching variable addresses
+    // across term compilations (e.g., polynomial terms that all use the same variable).
+    // Must be invalidated after any operation that clobbers RAX.
+    void* rax_cache = nullptr;
+    auto invalidate_rax_cache = [&]() { rax_cache = nullptr; };
+
     if (fclass == 1) {
         bool have_value = false;
         bool constant_added = (ac_final == neutral);
         auto ensure_constant = [&]() {
             if (have_value && !constant_added && ac_final != neutral) {
                 emit_apply_op_with_constant<0x00>(ev, s, ac_final);
+                invalidate_rax_cache();
                 constant_added = true;
             }
         };
@@ -4563,20 +4579,24 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 ensure_constant();
             }
 
-            compile_elist(s, term.chunk.begin(), term.chunk.end());
+            compile_elist(s, term.chunk.begin(), term.chunk.end(), &rax_cache);
 
             switch (factor) {
                 case  1:  break;
                 case  2:  s < 0xd8 < 0xc0; break;               // fadd st(0), st(0)
                 case -2:  s < 0xd8 < 0xc0 < 0xd9 < 0xe0; break; // fadd st(0), st(0) + fchs
                 case -1:  s < 0xd9 < 0xe0; break;               // fchs
-                default:  emit_apply_op_with_constant<0x08>(ev, s, static_cast<double>(factor)); break;
+                default:
+                    emit_apply_op_with_constant<0x08>(ev, s, static_cast<double>(factor));
+                    invalidate_rax_cache();
+                    break;
             }
 
             if (!have_value) {
                 have_value = true;
                 if (ac_final != neutral) {
                     emit_apply_op_with_constant<0x00>(ev, s, ac_final);
+                    invalidate_rax_cache();
                     constant_added = true;
                 }
             }
@@ -4587,6 +4607,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
         if (!have_value) {
             emit_load_constant(ev, s, ac_final);
+            invalidate_rax_cache();
         }
         else {
             ensure_constant();
@@ -4598,6 +4619,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         auto ensure_constant = [&]() {
             if (have_value && !constant_multiplied && ac_final != neutral) {
                 emit_apply_op_with_constant<0x08>(ev, s, ac_final);
+                invalidate_rax_cache();
                 constant_multiplied = true;
             }
         };
@@ -4631,7 +4653,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 ensure_constant();
             }
 
-            compile_elist(s, term.chunk.begin(), term.chunk.end());
+            compile_elist(s, term.chunk.begin(), term.chunk.end(), &rax_cache);
 
             uint32_t abs_factor = static_cast<uint32_t>(abs(factor));
             if (abs_factor > 1U) {
@@ -4655,6 +4677,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 have_value = true;
                 if (ac_final != neutral) {
                     emit_apply_op_with_constant<0x08>(ev, s, ac_final);
+                    invalidate_rax_cache();
                     constant_multiplied = true;
                 }
             }
@@ -4662,6 +4685,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
         if (!have_value) {
             emit_load_constant(ev, s, ac_final);
+            invalidate_rax_cache();
         }
         else {
             ensure_constant();
