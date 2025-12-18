@@ -2369,13 +2369,26 @@ inline Function Pow()
     s <0x9e;                                        // sahf
     s <0x0f <0x85; size_t jne_pop_before_generic_pow = s.buf.size(); s << int32_t(0); // jne pop_before_generic_pow
 
+#ifdef MEXCE_64
+    s <0x48 <0x83 <0xec <0x08;                      // sub         rsp, 8
+#endif
     s <0xd9 <0xe1;                                  // fabs
+#ifdef MEXCE_64
+    s <0x66 <0xc7 <0x44 <0x24 <0x00 <0xff <0xff;    // mov         word ptr [rsp+0], 0xffff
+    s <0xdf <0x5c <0x24 <0x00;                      // fistp       word ptr [rsp+0]
+    s <0x66 <0x8b <0x44 <0x24 <0x00;                // mov         ax, word ptr [rsp+0]
+#else
     s <0x66 <0xc7 <0x44 <0x24 <0xfe <0xff <0xff;    // mov         word ptr [esp-2], 0xffff
     s <0xdf <0x5c <0x24 <0xfe;                      // fistp       word ptr [esp-2]
     s <0x66 <0x8b <0x44 <0x24 <0xfe;                // mov         ax, word ptr [esp-2]
+#endif
     s <0x66 <0x83 <0xe8 <0x01;                      // sub         ax, 1
     s <0x66 <0x83 <0xf8 <0x21;                      // cmp         ax, 0x21
+#ifdef MEXCE_64
+    s <0x0f <0x87; size_t ja_dealloc_then_generic = s.buf.size(); s << int32_t(0);    // ja dealloc_then_generic
+#else
     s <0x0f <0x87; size_t ja_generic_pow = s.buf.size(); s << int32_t(0);             // ja generic_pow
+#endif
 
     s <0xd9 <0xc1;                                  // fld         st(1)
     const size_t loop_start = s.buf.size();
@@ -2433,16 +2446,37 @@ inline Function Pow()
     const size_t store_and_exit = s.buf.size();
     s <0xdd <0xd9;                                  // fstp        st(1)
 #endif
+    s <0xe9; size_t jmp_exit_from_generic = s.buf.size(); s << int32_t(0);  // jmp exit_point
+
+#ifdef MEXCE_64
+    // Dealloc stubs for integer optimization paths
+    const size_t dealloc_then_exit = s.buf.size();
+    s <0x48 <0x83 <0xc4 <0x08;                      // add         rsp, 8
+    s <0xe9; size_t jmp_to_exit_from_dealloc = s.buf.size(); s << int32_t(0);  // jmp exit_point
+
+    const size_t dealloc_then_generic = s.buf.size();
+    s <0x48 <0x83 <0xc4 <0x08;                      // add         rsp, 8
+    s <0xe9; size_t jmp_to_generic = s.buf.size(); s << int32_t(0);  // jmp generic_pow
+#endif
 
     const size_t exit_point = s.buf.size();
 
     // Patch jumps
     patch_rel32(s, jne_pop_before_generic_pow, pop_before_generic_pow);
+    patch_rel32(s, jmp_exit_from_generic, exit_point);
+#ifdef MEXCE_64
+    patch_rel32(s, jmp_to_exit_from_dealloc, exit_point);
+    patch_rel32(s, jmp_to_generic, generic_pow);
+    patch_rel32(s, ja_dealloc_then_generic, dealloc_then_generic);
+    patch_rel32(s, ja_exit_point_posexp, dealloc_then_exit);
+    patch_rel32(s, jmp_exit_point_inv, dealloc_then_exit);
+#else
     patch_rel32(s, ja_generic_pow, generic_pow);
-    patch_rel32(s, je_loop_end, loop_end);
-    patch_rel32(s, jmp_loop_start, loop_start);
     patch_rel32(s, ja_exit_point_posexp, exit_point);
     patch_rel32(s, jmp_exit_point_inv, exit_point);
+#endif
+    patch_rel32(s, je_loop_end, loop_end);
+    patch_rel32(s, jmp_loop_start, loop_start);
     patch_rel32(s, jne_non_zero_exponent, non_zero_exponent);
     patch_rel32(s, jmp_exit_point_zeroexp, exit_point);
 #if !MEXCE_USE_LIBM_GENERIC_POW
@@ -2599,6 +2633,17 @@ inline Function Min()
 
 inline Function Floor()
 {
+#ifdef MEXCE_64
+    uint8_t code[] = {
+        0x48, 0x83, 0xec, 0x08,                     // sub         rsp, 8
+        0x66, 0xc7, 0x04, 0x24, 0x7f, 0x06,         // mov         word ptr [rsp], 67fh
+        0xd9, 0x7c, 0x24, 0x02,                     // fnstcw      word ptr [rsp+2]
+        0xd9, 0x2c, 0x24,                           // fldcw       word ptr [rsp]
+        0xd9, 0xfc,                                 // frndint
+        0xd9, 0x6c, 0x24, 0x02,                     // fldcw       word ptr [rsp+2]
+        0x48, 0x83, 0xc4, 0x08                      // add         rsp, 8
+    };
+#else
     uint8_t code[] = {
         0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x06,   // mov         word ptr [esp-4], 67fh
         0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]
@@ -2606,12 +2651,24 @@ inline Function Floor()
         0xd9, 0xfc,                                 // frndint
         0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
+#endif
     return Function(0, "floor", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Ceil()
 {
+#ifdef MEXCE_64
+    uint8_t code[] = {
+        0x48, 0x83, 0xec, 0x08,                     // sub         rsp, 8
+        0x66, 0xc7, 0x04, 0x24, 0x7f, 0x0a,         // mov         word ptr [rsp], a7fh
+        0xd9, 0x7c, 0x24, 0x02,                     // fnstcw      word ptr [rsp+2]
+        0xd9, 0x2c, 0x24,                           // fldcw       word ptr [rsp]
+        0xd9, 0xfc,                                 // frndint
+        0xd9, 0x6c, 0x24, 0x02,                     // fldcw       word ptr [rsp+2]
+        0x48, 0x83, 0xc4, 0x08                      // add         rsp, 8
+    };
+#else
     uint8_t code[] = {
         0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x0a,   // mov         word ptr [esp-4], a7fh
         0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]
@@ -2619,12 +2676,27 @@ inline Function Ceil()
         0xd9, 0xfc,                                 // frndint
         0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
+#endif
     return Function(0, "ceil", 1, 0, sizeof(code), code);
 }
 
 
 inline Function Round()
 {
+#ifdef MEXCE_64
+    uint8_t code[] = {
+
+        // NOTE: In this case, saving/restoring the control word is most likely redundant.
+
+        0x48, 0x83, 0xec, 0x08,                     // sub         rsp, 8
+        0x66, 0xc7, 0x04, 0x24, 0x7f, 0x02,         // mov         word ptr [rsp], 27fh
+        0xd9, 0x7c, 0x24, 0x02,                     // fnstcw      word ptr [rsp+2]
+        0xd9, 0x2c, 0x24,                           // fldcw       word ptr [rsp]
+        0xd9, 0xfc,                                 // frndint
+        0xd9, 0x6c, 0x24, 0x02,                     // fldcw       word ptr [rsp+2]
+        0x48, 0x83, 0xc4, 0x08                      // add         rsp, 8
+    };
+#else
     uint8_t code[] = {
 
         // NOTE: In this case, saving/restoring the control word is most likely redundant.
@@ -2635,6 +2707,7 @@ inline Function Round()
         0xd9, 0xfc,                                 // frndint
         0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
+#endif
     return Function(0, "round", 1, 0, sizeof(code), code);
 }
 
@@ -2651,6 +2724,17 @@ inline Function Int()
 inline Function Trunc()
 {
     // Round toward zero (truncate) - control word bits [11:10] = 11
+#ifdef MEXCE_64
+    uint8_t code[] = {
+        0x48, 0x83, 0xec, 0x08,                     // sub         rsp, 8
+        0x66, 0xc7, 0x04, 0x24, 0x7f, 0x0e,         // mov         word ptr [rsp], e7fh
+        0xd9, 0x7c, 0x24, 0x02,                     // fnstcw      word ptr [rsp+2]
+        0xd9, 0x2c, 0x24,                           // fldcw       word ptr [rsp]
+        0xd9, 0xfc,                                 // frndint
+        0xd9, 0x6c, 0x24, 0x02,                     // fldcw       word ptr [rsp+2]
+        0x48, 0x83, 0xc4, 0x08                      // add         rsp, 8
+    };
+#else
     uint8_t code[] = {
         0x66, 0xc7, 0x44, 0x24, 0xfc, 0x7f, 0x0e,   // mov         word ptr [esp-4], e7fh
         0xd9, 0x7c, 0x24, 0xfe,                     // fnstcw      word ptr [esp-2]
@@ -2658,6 +2742,7 @@ inline Function Trunc()
         0xd9, 0xfc,                                 // frndint
         0xd9, 0x6c, 0x24, 0xfe                      // fldcw       word ptr [esp-2]
     };
+#endif
     return Function(0, "trunc", 1, 0, sizeof(code), code);
 }
 
