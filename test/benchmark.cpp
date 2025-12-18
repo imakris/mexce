@@ -350,35 +350,15 @@ static constexpr uint64_t k_ulp_bin_thresholds[] = {
 static constexpr size_t k_ulp_num_bins = sizeof(k_ulp_bin_thresholds) / sizeof(k_ulp_bin_thresholds[0]);
 static constexpr long double k_zero_abs_tol = 1e-12L;
 
-// Configuration definition for comprehensive benchmark
+// Configuration definition for benchmark
 struct mexce_config {
     std::string name;
     bool prefer_x87;
     bool fast_math;
 };
 
-// Results for a single configuration
-struct config_result {
-    std::string config_name;
-    size_t expressions_tested = 0;
-    size_t expressions_compiled = 0;
-    size_t expressions_evaluated = 0;
-    long long total_compile_ns = 0;
-    long long total_eval_ns = 0;
-    uint64_t avg_compile_ns = 0;
-    uint64_t avg_eval_ns = 0;
-
-    // Precision stats
-    size_t exact_zero_count = 0;
-    std::vector<size_t> ulp_bins;
-    ulp_sum_t ulp_sum;
-
-    config_result() : ulp_bins(k_ulp_num_bins + 1, 0) {}
-};
-
-// Detailed per-expression record for comprehensive output
-struct detail_record_t {
-    size_t original_idx = 0;  // Index into benchmark_data arrays
+// Unified per-expression record (used by both single and comprehensive modes)
+struct benchmark_record {
     std::string expr;
     std::string optimized_expr;
     std::string bytes_expr;
@@ -394,14 +374,67 @@ struct detail_record_t {
     uint64_t ulp_compiler_vs_reference = UINT64_MAX;
     uint64_t compile_ns = 0;
     uint64_t avg_ns = 0;
+    long long dur_ns = 0;
     uint64_t native_avg_ns = 0;
+    long long native_dur_ns = 0;
     std::string error;
 };
 
-static void update_ulp_bins(uint64_t ulp, size_t& exact_zero_count, std::vector<size_t>& bins) {
+// Results for a single configuration (summary statistics)
+struct benchmark_result {
+    std::string config_name;
+    std::vector<benchmark_record> records;
+
+    // Summary stats
+    size_t expressions_tested = 0;
+    size_t compiled_count = 0;
+    size_t eval_count = 0;
+    size_t compile_fail_count = 0;
+    size_t eval_fail_count = 0;
+
+    // Timing stats
+    long long total_compile_ns = 0;
+    long long total_eval_ns = 0;
+    uint64_t avg_compile_ns = 0;
+    uint64_t avg_eval_ns = 0;
+    uint64_t compile_min_ns = std::numeric_limits<uint64_t>::max();
+    uint64_t compile_max_ns = 0;
+    std::vector<uint64_t> compile_times;
+
+    // Native timing
+    long long total_native_ns = 0;
+    size_t benchmarked_native_count = 0;
+
+    // ULP stats for mexce vs reference
+    size_t exact_zero_count_mexce_ref = 0;
+    std::vector<size_t> ulp_bins_mexce_ref;
+    ulp_sum_t ulp_sum_mexce_ref;
+    size_t comparisons_mexce_ref = 0;
+
+    // ULP stats for compiler vs reference
+    size_t exact_zero_count_comp_ref = 0;
+    std::vector<size_t> ulp_bins_comp_ref;
+    ulp_sum_t ulp_sum_comp_ref;
+    size_t comparisons_comp_ref = 0;
+
+    // ULP stats for mexce vs compiler
+    size_t exact_zero_count_mexce_comp = 0;
+    std::vector<size_t> ulp_bins_mexce_comp;
+    ulp_sum_t ulp_sum_mexce_comp;
+    size_t comparisons_mexce_comp = 0;
+
+    benchmark_result()
+        : ulp_bins_mexce_ref(k_ulp_num_bins + 1, 0)
+        , ulp_bins_comp_ref(k_ulp_num_bins + 1, 0)
+        , ulp_bins_mexce_comp(k_ulp_num_bins + 1, 0)
+    {}
+};
+
+static void update_ulp_bins(uint64_t ulp, size_t& exact_zero_count, std::vector<size_t>& bins, size_t& comparisons) {
     if (ulp == UINT64_MAX) {
         return;
     }
+    ++comparisons;
     if (ulp == 0) {
         ++exact_zero_count;
         return;
@@ -416,13 +449,14 @@ static void update_ulp_bins(uint64_t ulp, size_t& exact_zero_count, std::vector<
     ++bins[bin_idx];
 }
 
-// Run benchmark for a single configuration with timing and precision
-static config_result run_config_benchmark(
+// Run benchmark for a single configuration with full per-expression records
+// This is the core benchmark function used by both single and comprehensive modes
+static benchmark_result run_benchmark(
     const mexce_config& cfg,
     int iterations,
     std::ostream& progress_out)
 {
-    config_result result;
+    benchmark_result result;
     result.config_name = cfg.name;
 
     mexce::evaluator eval;
@@ -431,187 +465,24 @@ static config_result run_config_benchmark(
 
     double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
     eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
-
-    const size_t total = mexce::benchmark_data::kExpressionCount;
-    const size_t iterations_u = static_cast<size_t>(iterations);
-
-    progress_out << "  Testing " << cfg.name << "..." << std::flush;
-
-    for (size_t idx = 0; idx < total; ++idx) {
-        const std::string expr = mexce::benchmark_data::kExpressions[idx];
-        const long double golden = mexce::benchmark_data::kGoldenResults[idx];
-        const double golden_d = static_cast<double>(golden);
-
-        a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
-        result.expressions_tested++;
-
-        // Compile
-        mexce::stopwatch compile_timer;
-        try {
-            eval.set_expression(expr);
-            result.total_compile_ns += compile_timer.elapsed_nanoseconds();
-            result.expressions_compiled++;
-        }
-        catch (...) {
-            continue;
-        }
-
-        // Evaluate once for precision
-        double mexce_result;
-        try {
-            mexce_result = eval.evaluate();
-            result.expressions_evaluated++;
-        }
-        catch (...) {
-            continue;
-        }
-
-        // Compute ULP distance vs reference
-        const bool mexce_zero = std::fabs(mexce_result) <= (double)k_zero_abs_tol;
-        const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
-        uint64_t ulp;
-        if (mexce_zero && golden_zero) {
-            ulp = 0;
-        } else {
-            ulp = ulp_distance(mexce_result, golden_d);
-        }
-        result.ulp_sum.add(ulp);
-        update_ulp_bins(ulp, result.exact_zero_count, result.ulp_bins);
-
-        // Timing benchmark
-        mexce::stopwatch eval_timer;
-        for (size_t i = 0; i < iterations_u; ++i) {
-            (void)eval.evaluate();
-        }
-        result.total_eval_ns += eval_timer.elapsed_nanoseconds();
-    }
-
-    if (result.expressions_compiled > 0) {
-        result.avg_compile_ns = (uint64_t)((double)result.total_compile_ns /
-            (double)result.expressions_compiled + 0.5);
-    }
-    if (result.expressions_evaluated > 0) {
-        result.avg_eval_ns = (uint64_t)((double)result.total_eval_ns /
-            ((double)result.expressions_evaluated * (double)iterations) + 0.5);
-    }
-
-    progress_out << " done (" << result.expressions_compiled << "/" << total << " compiled)\n";
-    return result;
-}
-
-// Run benchmark for native (compiler-generated) expressions
-static config_result run_native_benchmark(
-    int iterations,
-    std::ostream& progress_out)
-{
-    config_result result;
-    result.config_name = "Native";
-
-    const size_t total = mexce::benchmark_data::kExpressionCount;
-    const size_t native_count = mexce::benchmark_data::kNativeExpressionsCount;
-    const size_t iterations_u = static_cast<size_t>(iterations);
-
-    mexce::benchmark_data::NativeContext native_ctx{};
-
-    progress_out << "  Testing Native..." << std::flush;
-
-    for (size_t idx = 0; idx < total; ++idx) {
-        const long double golden = mexce::benchmark_data::kGoldenResults[idx];
-        const double golden_d = static_cast<double>(golden);
-
-        result.expressions_tested++;
-
-        // Check if native expression is available for this index
-        if (idx >= native_count) {
-            continue;
-        }
-
-        // Evaluate once for precision
-        native_ctx.a = 1.1;
-        native_ctx.b = 2.2;
-        native_ctx.c = 3.3;
-        native_ctx.x = 4.4;
-        native_ctx.y = 5.5;
-        native_ctx.z = 6.6;
-        native_ctx.w = 7.7;
-
-        double native_result;
-        try {
-            native_result = mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
-            result.expressions_evaluated++;
-        }
-        catch (...) {
-            continue;
-        }
-        result.expressions_compiled++;  // Native is always "compiled" if available
-
-        // Compute ULP distance vs reference
-        const bool native_zero = std::fabs(native_result) <= (double)k_zero_abs_tol;
-        const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
-        uint64_t ulp;
-        if (native_zero && golden_zero) {
-            ulp = 0;
-        } else {
-            ulp = ulp_distance(native_result, golden_d);
-        }
-        result.ulp_sum.add(ulp);
-        update_ulp_bins(ulp, result.exact_zero_count, result.ulp_bins);
-
-        // Timing benchmark
-        mexce::stopwatch eval_timer;
-        for (size_t i = 0; i < iterations_u; ++i) {
-            (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
-        }
-        result.total_eval_ns += eval_timer.elapsed_nanoseconds();
-    }
-
-    // No compile time for native
-    result.avg_compile_ns = 0;
-    result.total_compile_ns = 0;
-
-    if (result.expressions_evaluated > 0) {
-        result.avg_eval_ns = (uint64_t)((double)result.total_eval_ns /
-            ((double)result.expressions_evaluated * (double)iterations) + 0.5);
-    }
-
-    progress_out << " done (" << result.expressions_evaluated << "/" << native_count << " available)\n";
-    return result;
-}
-
-// Generate detailed per-expression report for a single configuration
-static void generate_detailed_report(
-    const mexce_config& cfg,
-    int iterations,
-    std::ostream& out,
-    std::ostream& progress_out)
-{
-    const std::string line(78, '=');
-
-    out << "\n" << line << "\n";
-    out << "DETAILED PER-EXPRESSION REPORT (" << cfg.name << ")\n";
-    out << line << "\n\n";
-
-    double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
     mexce::benchmark_data::NativeContext native_ctx{};
 
     const size_t total_expressions = mexce::benchmark_data::kExpressionCount;
     const size_t iterations_u = static_cast<size_t>(iterations);
 
-    // Number of timing passes - spread trials apart to avoid sustained OS scheduling effects
-    // Use fewer trials when iterations is high (timing is more stable)
-    const int k_timing_passes = (iterations >= 10000) ? 5 :
-                                (iterations >= 1000)  ? 7 : 10;
+    // Timing trials - use median for stability
+    const int timing_trials =
+        (iterations >= 10000) ? 1 :
+        (iterations >= 1000) ? 5 : 11;
+    std::vector<long long> timing_samples;
+    std::vector<long long> native_timing_samples;
+    timing_samples.reserve(static_cast<size_t>(timing_trials));
+    native_timing_samples.reserve(static_cast<size_t>(timing_trials));
 
-    std::vector<detail_record_t> detail_records;
-    detail_records.reserve(total_expressions);
+    result.records.reserve(total_expressions);
+    result.compile_times.reserve(total_expressions);
 
-    // Store compiled evaluators to avoid recompilation in timing passes
-    // Each evaluator is bound to the same variables (by reference)
-    std::vector<std::unique_ptr<mexce::evaluator>> compiled_evals;
-    compiled_evals.reserve(total_expressions);
-
-    // ========== Pass 1: Compile, evaluate, and collect metadata ==========
-    progress_out << "  Compiling " << cfg.name << "..." << std::flush;
+    progress_out << "  Testing " << cfg.name << "..." << std::flush;
 
     for (size_t idx = 0; idx < total_expressions; ++idx) {
         const std::string expr = mexce::benchmark_data::kExpressions[idx];
@@ -620,59 +491,65 @@ static void generate_detailed_report(
 
         a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
 
-        detail_record_t rec;
-        rec.original_idx = idx;
+        benchmark_record rec;
         rec.expr = expr;
         rec.expected = golden;
         rec.native_available = idx < mexce::benchmark_data::kNativeExpressionsCount;
         rec.mexce_result = std::numeric_limits<double>::quiet_NaN();
         rec.native_result = std::numeric_limits<double>::quiet_NaN();
-        rec.avg_ns = std::numeric_limits<uint64_t>::max();
-        rec.native_avg_ns = std::numeric_limits<uint64_t>::max();
 
-        // Native evaluation
+        result.expressions_tested++;
+
+        // Native evaluation (for comparison)
         if (rec.native_available) {
             native_ctx.a = a; native_ctx.b = b; native_ctx.c = c;
             native_ctx.x = x; native_ctx.y = y; native_ctx.z = z; native_ctx.w = w;
-            try {
-                rec.native_result = mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
-                rec.native_eval_ok = true;
-                const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
-                const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
-                rec.ulp_compiler_vs_reference = (native_zero && golden_zero) ? 0 : ulp_distance(rec.native_result, golden_d);
-            } catch (...) {}
-        }
 
-        // Create a new evaluator for this expression
-        std::unique_ptr<mexce::evaluator> expr_eval(new mexce::evaluator());
-        expr_eval->opts().prefer_x87 = cfg.prefer_x87;
-        expr_eval->opts().fast_math = cfg.fast_math;
-        expr_eval->bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
+            rec.native_result = mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+            rec.native_eval_ok = true;
+
+            const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
+            const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
+            rec.ulp_compiler_vs_reference = (native_zero && golden_zero) ? 0 : ulp_distance(rec.native_result, golden_d);
+
+            result.ulp_sum_comp_ref.add(rec.ulp_compiler_vs_reference);
+            update_ulp_bins(rec.ulp_compiler_vs_reference, result.exact_zero_count_comp_ref,
+                           result.ulp_bins_comp_ref, result.comparisons_comp_ref);
+        }
 
         // Mexce compilation
         mexce::stopwatch compile_timer;
         try {
-            expr_eval->set_expression(expr);
+            eval.set_expression(expr);
             rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
-            rec.optimized_expr = expr_eval->get_optimized_expression();
-            rec.bytes_expr = expr_eval->get_byte_representation();
+            rec.optimized_expr = eval.get_optimized_expression();
+            rec.bytes_expr = eval.get_byte_representation();
             rec.compiled = true;
-        } catch (const std::exception& e) {
+
+            result.compiled_count++;
+            result.total_compile_ns += (long long)rec.compile_ns;
+            result.compile_min_ns = std::min(result.compile_min_ns, rec.compile_ns);
+            result.compile_max_ns = std::max(result.compile_max_ns, rec.compile_ns);
+            result.compile_times.push_back(rec.compile_ns);
+        }
+        catch (const std::exception& e) {
             rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
+            result.compile_fail_count++;
             rec.error = std::string("compile: ") + e.what();
-            detail_records.push_back(rec);
-            compiled_evals.push_back(nullptr);
+            result.records.push_back(rec);
             continue;
         }
 
-        // Mexce evaluation
+        // Mexce evaluation (once for precision)
         try {
-            rec.mexce_result = expr_eval->evaluate();
+            rec.mexce_result = eval.evaluate();
             rec.eval_ok = true;
-        } catch (const std::exception& e) {
+            result.eval_count++;
+        }
+        catch (const std::exception& e) {
+            result.eval_fail_count++;
             rec.error = std::string("evaluate: ") + e.what();
-            detail_records.push_back(rec);
-            compiled_evals.push_back(nullptr);
+            result.records.push_back(rec);
             continue;
         }
 
@@ -680,60 +557,92 @@ static void generate_detailed_report(
         const bool mexce_zero = std::fabs(rec.mexce_result) <= (double)k_zero_abs_tol;
         const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
         rec.ulp_mexce_vs_reference = (mexce_zero && golden_zero) ? 0 : ulp_distance(rec.mexce_result, golden_d);
+
+        result.ulp_sum_mexce_ref.add(rec.ulp_mexce_vs_reference);
+        update_ulp_bins(rec.ulp_mexce_vs_reference, result.exact_zero_count_mexce_ref,
+                       result.ulp_bins_mexce_ref, result.comparisons_mexce_ref);
+
         if (rec.native_eval_ok) {
             const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
             rec.ulp_mexce_vs_compiler = (mexce_zero && native_zero) ? 0 : ulp_distance(rec.mexce_result, rec.native_result);
+
+            result.ulp_sum_mexce_comp.add(rec.ulp_mexce_vs_compiler);
+            update_ulp_bins(rec.ulp_mexce_vs_compiler, result.exact_zero_count_mexce_comp,
+                           result.ulp_bins_mexce_comp, result.comparisons_mexce_comp);
         }
 
-        detail_records.push_back(rec);
-        compiled_evals.push_back(std::move(expr_eval));
-    }
-    progress_out << " done\n";
-
-    // ========== Timing passes: spread trials apart to reduce OS scheduling noise ==========
-    // Running multiple complete passes through all expressions spreads the timing trials
-    // far apart in time, so a scheduling hiccup in one pass won't affect all trials.
-    // Uses pre-compiled evaluators to avoid recompilation overhead.
-    progress_out << "  Timing " << cfg.name << " (" << k_timing_passes << " passes)..." << std::flush;
-
-    for (int pass = 0; pass < k_timing_passes; ++pass) {
-        // Reset variables for consistent state
-        a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
-        native_ctx.a = a; native_ctx.b = b; native_ctx.c = c;
-        native_ctx.x = x; native_ctx.y = y; native_ctx.z = z; native_ctx.w = w;
-
-        for (size_t idx = 0; idx < detail_records.size(); ++idx) {
-            detail_record_t& rec = detail_records[idx];
-            if (!rec.eval_ok || !compiled_evals[idx]) continue;
-
-            // Time mexce using pre-compiled evaluator
-            mexce::stopwatch eval_timer;
+        // Timing benchmark for mexce (multiple trials, take median)
+        timing_samples.clear();
+        for (int trial = 0; trial < timing_trials; ++trial) {
+            mexce::stopwatch timer;
             for (size_t i = 0; i < iterations_u; ++i) {
-                (void)compiled_evals[idx]->evaluate();
+                (void)eval.evaluate();
             }
-            uint64_t trial_ns = (uint64_t)((double)eval_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
-            if (trial_ns < rec.avg_ns) rec.avg_ns = trial_ns;
-
-            // Time native
-            if (rec.native_eval_ok && rec.original_idx < mexce::benchmark_data::kNativeExpressionsCount) {
-                mexce::stopwatch native_timer;
-                for (size_t i = 0; i < iterations_u; ++i) {
-                    (void)mexce::benchmark_data::kNativeExpressions[rec.original_idx](native_ctx);
-                }
-                uint64_t native_trial_ns = (uint64_t)((double)native_timer.elapsed_nanoseconds() / (double)iterations_u + 0.5);
-                if (native_trial_ns < rec.native_avg_ns) rec.native_avg_ns = native_trial_ns;
-            }
+            timing_samples.push_back(timer.elapsed_nanoseconds());
         }
+        std::nth_element(timing_samples.begin(),
+                         timing_samples.begin() + timing_samples.size() / 2,
+                         timing_samples.end());
+        rec.dur_ns = timing_samples[timing_samples.size() / 2];
+        rec.avg_ns = (uint64_t)((long double)rec.dur_ns / (long double)iterations_u + 0.5L);
+
+        result.total_eval_ns += rec.dur_ns;
+
+        // Timing benchmark for native
+        if (rec.native_eval_ok) {
+            native_timing_samples.clear();
+            for (int trial = 0; trial < timing_trials; ++trial) {
+                mexce::stopwatch timer;
+                for (size_t i = 0; i < iterations_u; ++i) {
+                    (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+                }
+                native_timing_samples.push_back(timer.elapsed_nanoseconds());
+            }
+            std::nth_element(native_timing_samples.begin(),
+                             native_timing_samples.begin() + native_timing_samples.size() / 2,
+                             native_timing_samples.end());
+            rec.native_dur_ns = native_timing_samples[native_timing_samples.size() / 2];
+            rec.native_avg_ns = (uint64_t)((long double)rec.native_dur_ns / (long double)iterations_u + 0.5L);
+
+            result.total_native_ns += rec.native_dur_ns;
+            result.benchmarked_native_count++;
+        }
+
+        result.records.push_back(rec);
     }
-    progress_out << " done\n";
+
+    // Compute averages
+    if (result.compiled_count > 0) {
+        result.avg_compile_ns = (uint64_t)((double)result.total_compile_ns /
+            (double)result.compiled_count + 0.5);
+    }
+    if (result.eval_count > 0) {
+        result.avg_eval_ns = (uint64_t)((double)result.total_eval_ns /
+            ((double)result.eval_count * (double)iterations) + 0.5);
+    }
+
+    progress_out << " done (" << result.compiled_count << "/" << total_expressions << " compiled)\n";
+    return result;
+}
+
+// Print detailed per-expression report from benchmark result
+static void print_detailed_report(
+    const benchmark_result& result,
+    std::ostream& out)
+{
+    const std::string line(78, '=');
+
+    out << "\n" << line << "\n";
+    out << "DETAILED PER-EXPRESSION REPORT (" << result.config_name << ")\n";
+    out << line << "\n\n";
 
     // Sort by speedup (problematic regressions first)
-    std::vector<const detail_record_t*> sorted_records;
-    sorted_records.reserve(detail_records.size());
-    for (const auto& rec : detail_records) {
+    std::vector<const benchmark_record*> sorted_records;
+    sorted_records.reserve(result.records.size());
+    for (const auto& rec : result.records) {
         sorted_records.push_back(&rec);
     }
-    std::sort(sorted_records.begin(), sorted_records.end(), [](const detail_record_t* a, const detail_record_t* b) {
+    std::sort(sorted_records.begin(), sorted_records.end(), [](const benchmark_record* a, const benchmark_record* b) {
         if (!a->eval_ok && b->eval_ok) return true;
         if (a->eval_ok && !b->eval_ok) return false;
         if (!a->compiled && b->compiled) return true;
@@ -780,538 +689,30 @@ static void generate_detailed_report(
     }
 }
 
-static int run_comprehensive_benchmark(const benchmark_config& config)
+// Print single-mode benchmark report (more detailed than comprehensive mode)
+static int print_single_mode_report(
+    const benchmark_result& result,
+    int iterations,
+    std::ostream& out)
 {
-    // Set up output stream (file or stdout)
-    std::ofstream file_output;
-    std::ostream* output_stream = &std::cout;
-    if (!config.output_path.empty()) {
-        file_output.open(config.output_path.c_str());
-        if (!file_output) {
-            std::cerr << "Failed to open output file: " << config.output_path << std::endl;
-            return 1;
-        }
-        output_stream = &file_output;
-        std::cout << "Results will be written to " << resolve_full_path(config.output_path) << std::endl;
-    }
-    std::ostream& out = *output_stream;
-
-    const std::string line(78, '=');
-
-    out << "\n" << line << "\n";
-    out << "COMPREHENSIVE CONFIGURATION COMPARISON\n";
-    out << line << "\n\n";
-
-#ifdef BENCHMARK_COMPILER
-    out << "Compiler: " << BENCHMARK_COMPILER << "\n";
-#endif
-#ifdef BENCHMARK_COMPILER_FLAGS
-    out << "Compiler flags: " << BENCHMARK_COMPILER_FLAGS << "\n";
-#endif
-
-    out << "Iterations per expression: " << config.iterations << "\n";
-    out << "Total expressions: " << mexce::benchmark_data::kExpressionCount << "\n\n";
-
-    // Define configurations to test
-    std::vector<mexce_config> configs = {
-        {"SSE2",            false, false},
-        {"SSE2+fast-math",  false, true},
-        {"x87",             true,  false},
-        {"x87+fast-math",   true,  true}
-    };
-
-    std::vector<config_result> results;
-    results.reserve(configs.size() + 1);  // +1 for native
-
-    // Run native benchmark first (as baseline)
-    results.push_back(run_native_benchmark(config.iterations, std::cout));
-
-    // Run mexce configurations
-    for (const auto& cfg : configs) {
-        results.push_back(run_config_benchmark(cfg, config.iterations, std::cout));
-    }
-
-    // ========== TIMING COMPARISON ==========
-    out << "\n" << line << "\n";
-    out << "TIMING COMPARISON\n";
-    out << line << "\n\n";
-
-    // Find column widths
-    size_t name_width = std::string("Configuration").size();
-    for (const auto& r : results) {
-        name_width = std::max(name_width, r.config_name.size());
-    }
-
-    const size_t col_width = 15;
-
-    out << std::left << std::setw((int)name_width) << "Configuration" << "  "
-        << std::setw((int)col_width) << "Avg Compile" << "  "
-        << std::setw((int)col_width) << "Avg Eval" << "  "
-        << std::setw((int)col_width) << "Total Eval" << "\n";
-
-    out << std::string(name_width, '-') << "  "
-        << std::string(col_width, '-') << "  "
-        << std::string(col_width, '-') << "  "
-        << std::string(col_width, '-') << "\n";
-
-    for (const auto& r : results) {
-        out << std::left << std::setw((int)name_width) << r.config_name << "  "
-            << std::setw((int)col_width) << format_ns(r.avg_compile_ns) << "  "
-            << std::setw((int)col_width) << format_ns(r.avg_eval_ns) << "  "
-            << std::setw((int)col_width) << format_ns((uint64_t)r.total_eval_ns) << "\n";
-    }
-
-    // Find fastest
-    if (!results.empty()) {
-        auto fastest_it = std::min_element(results.begin(), results.end(),
-            [](const config_result& a, const config_result& b) {
-                return a.avg_eval_ns < b.avg_eval_ns;
-            });
-        out << "\nFastest: " << fastest_it->config_name
-            << " (" << format_ns(fastest_it->avg_eval_ns) << " per call)\n";
-    }
-
-    // ========== PRECISION COMPARISON ==========
-    out << "\n" << line << "\n";
-    out << "PRECISION COMPARISON (ULP vs Reference)\n";
-    out << line << "\n\n";
-
-    // Build row labels
-    std::vector<std::string> row_labels;
-    row_labels.reserve(k_ulp_num_bins + 2);
-    row_labels.emplace_back("0 (exact)");
-    for (size_t bin_idx = 0; bin_idx < k_ulp_num_bins; ++bin_idx) {
-        char buf[32];
-        uint64_t lo = (bin_idx == 0 ? 1 : (k_ulp_bin_thresholds[bin_idx - 1] + 1));
-        uint64_t hi = k_ulp_bin_thresholds[bin_idx];
-        std::snprintf(buf, sizeof(buf), "%llu-%llu", (unsigned long long)lo, (unsigned long long)hi);
-        row_labels.emplace_back(buf);
-    }
-    row_labels.emplace_back(">65536");
-
-    // Find label width
-    size_t label_width = std::string("ULP Range").size();
-    for (const auto& label : row_labels) {
-        label_width = std::max(label_width, label.size());
-    }
-
-    // Build column values
-    std::vector<std::vector<std::string>> column_values(results.size());
-    std::vector<size_t> column_widths(results.size());
-
-    for (size_t col = 0; col < results.size(); ++col) {
-        const config_result& r = results[col];
-        std::vector<std::string>& values = column_values[col];
-        values.reserve(row_labels.size());
-
-        values.emplace_back(std::to_string(r.exact_zero_count));
-        for (size_t bin_idx = 0; bin_idx < k_ulp_num_bins; ++bin_idx) {
-            values.emplace_back(std::to_string(r.ulp_bins[bin_idx]));
-        }
-        values.emplace_back(std::to_string(r.ulp_bins[k_ulp_num_bins]));
-
-        // Column width
-        column_widths[col] = r.config_name.size();
-        for (const std::string& value : values) {
-            column_widths[col] = std::max(column_widths[col], value.size());
-        }
-    }
-
-    // Print header
-    out << std::left << std::setw((int)label_width) << "ULP Range" << "  ";
-    for (size_t col = 0; col < results.size(); ++col) {
-        out << std::setw((int)column_widths[col]) << results[col].config_name;
-        if (col + 1 != results.size()) out << "  ";
-    }
-    out << "\n";
-
-    // Print separator
-    out << std::string(label_width, '-') << "  ";
-    for (size_t col = 0; col < results.size(); ++col) {
-        out << std::string(column_widths[col], '-');
-        if (col + 1 != results.size()) out << "  ";
-    }
-    out << "\n";
-
-    // Print rows
-    for (size_t row = 0; row < row_labels.size(); ++row) {
-        out << std::left << std::setw((int)label_width) << row_labels[row] << "  ";
-        for (size_t col = 0; col < results.size(); ++col) {
-            out << std::setw((int)column_widths[col]) << column_values[col][row];
-            if (col + 1 != results.size()) out << "  ";
-        }
-        out << "\n";
-    }
-
-    // Print totals
-    out << "\n";
-    out << std::left << std::setw((int)label_width) << "Total ULP sum" << "  ";
-    for (size_t col = 0; col < results.size(); ++col) {
-        std::string sum_str = to_decimal_u128(results[col].ulp_sum.hi, results[col].ulp_sum.lo);
-        out << std::setw((int)column_widths[col]) << sum_str;
-        if (col + 1 != results.size()) out << "  ";
-    }
-    out << "\n";
-
-    out << std::left << std::setw((int)label_width) << "Evaluated" << "  ";
-    for (size_t col = 0; col < results.size(); ++col) {
-        out << std::setw((int)column_widths[col]) << results[col].expressions_evaluated;
-        if (col + 1 != results.size()) out << "  ";
-    }
-    out << "\n";
-
-    // Find most precise (lowest total ULP)
-    if (!results.empty()) {
-        auto most_precise_it = std::min_element(results.begin(), results.end(),
-            [](const config_result& a, const config_result& b) {
-                if (a.ulp_sum.hi != b.ulp_sum.hi) return a.ulp_sum.hi < b.ulp_sum.hi;
-                return a.ulp_sum.lo < b.ulp_sum.lo;
-            });
-        out << "\nMost precise: " << most_precise_it->config_name
-            << " (total ULP: " << to_decimal_u128(most_precise_it->ulp_sum.hi, most_precise_it->ulp_sum.lo) << ")\n";
-    }
-
-    out << "\n" << line << "\n";
-    out << "Notes:\n";
-    out << "  Native:    Compiler-generated code (baseline for comparison)\n";
-    out << "  SSE2:      Uses SSE2 for basic arithmetic, libm for transcendentals\n";
-    out << "  x87:       Uses x87 FPU for all operations (80-bit internal precision)\n";
-    out << "  fast-math: Enables algebraic simplifications (x-x=0, x/x=1, etc.)\n";
-    out << line << "\n";
-
-    // ========== DETAILED PER-EXPRESSION REPORTS FOR ALL CONFIGURATIONS ==========
-    // Generate detailed reports for all 4 mexce configurations
-    for (const auto& cfg : configs) {
-        generate_detailed_report(cfg, config.iterations, out, std::cout);
-    }
-
-    out << "\n" << line << "\n";
-    out << "END OF COMPREHENSIVE BENCHMARK REPORT\n";
-    out << line << "\n";
-
-    return 0;
-}
-
-int main(int argc, char* argv[])
-{
-    benchmark_config config;
-    if (!parse_args(argc, argv, config)) {
-        return 1;
-    }
-
-    if (config.comprehensive) {
-        return run_comprehensive_benchmark(config);
-    }
-
-    int iterations = config.iterations;
-    std::string output_path = config.output_path;
-
-    const std::string resolved_output = output_path.empty() ? std::string() : resolve_full_path(output_path);
-
-    if (argc == 1) {
-        std::cout << "No commandline arguments provided." << std::endl;
-    }
-    std::cout << "Running " << iterations << " iterations." << std::endl;
-    if (!output_path.empty()) {
-        std::cout << "Results will be written to " << resolved_output << std::endl;
-    }
-    else {
-        std::cout << "Results will be written to standard output" << std::endl;
-    }
-
-    mexce::evaluator eval;
-    // Apply configuration options
-    if (config.force_x87) {
-        eval.opts().prefer_x87 = true;
-    }
-    else if (config.force_sse2) {
-        eval.opts().prefer_x87 = false;
-    }
-    if (config.fast_math) {
-        eval.opts().fast_math = true;
-    }
-
-    // Always show configuration
-    std::cout << "Configuration:" << std::endl;
-    std::cout << "  Backend: " << (eval.opts().prefer_x87 ? "x87" : "SSE2") << std::endl;
-    std::cout << "  Fast-math: " << (eval.opts().fast_math ? "enabled" : "disabled") << std::endl;
-
-    double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
-    eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
-    mexce::benchmark_data::NativeContext native_ctx{};
-
-    std::ofstream file_output;
-    std::ostream* output_stream = &std::cout;
-    if (!output_path.empty()) {
-        file_output.open(output_path.c_str());
-        if (!file_output) {
-            std::cerr << "Failed to open output file: " << output_path << std::endl;
-            return 1;
-        }
-        output_stream = &file_output;
-    }
-    std::ostream& out = *output_stream;
-
-#ifdef BENCHMARK_COMPILER
-    out << "Compiler: " << BENCHMARK_COMPILER << std::endl;
-#endif
-#ifdef BENCHMARK_COMPILER_FLAGS
-    out << "Compiler flags: " << BENCHMARK_COMPILER_FLAGS << std::endl;
-#endif
-
-    const volatile std::size_t total_expressions = mexce::benchmark_data::kExpressionCount; // volatile, only for MSVC to shut up
-    if (total_expressions == 0) {
-        out << "No expressions available for benchmarking." << std::endl;
-        return 0;
-    }
-
-    struct record_t {
-        std::string expr;
-        std::string optimized_expr;
-        std::string bytes_expr;
-        bool compiled;
-        bool eval_ok;
-        bool native_available;
-        bool native_eval_ok;
-        long double expected;
-        double mexce_result;
-        double native_result;
-        uint64_t ulp_mexce_vs_compiler;
-        uint64_t ulp_mexce_vs_reference;
-        uint64_t ulp_compiler_vs_reference;
-        uint64_t compile_ns;
-        uint64_t avg_ns;
-        long long dur_ns;
-        uint64_t native_avg_ns;
-        long long native_dur_ns;
-        std::string error;
-    };
-
-    std::vector<record_t> records;
-    records.reserve(total_expressions);
-
-    constexpr uint64_t k_bin_thresholds[] = {
-        16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536
-    };
-    constexpr size_t k_num_bins = sizeof(k_bin_thresholds) / sizeof(k_bin_thresholds[0]);
-
-    size_t compiled_count = 0, compile_fail_count = 0, eval_fail_count = 0;
-    size_t exact_zero_count_mexce_ref = 0;
-    size_t exact_zero_count_mexce_comp = 0;
-    size_t exact_zero_count_comp_ref = 0;
-    std::vector<size_t> bin_counts_mexce_ref(k_num_bins + 1, 0);
-    std::vector<size_t> bin_counts_mexce_comp(k_num_bins + 1, 0);
-    std::vector<size_t> bin_counts_comp_ref(k_num_bins + 1, 0);
-    size_t comparisons_mexce_ref = 0;
-    size_t comparisons_mexce_comp = 0;
-    size_t comparisons_comp_ref = 0;
-    ulp_sum_t ulp_sum_mexce_ref;
-    ulp_sum_t ulp_sum_mexce_comp;
-    ulp_sum_t ulp_sum_comp_ref;
-    constexpr long double k_zero_abs_tol = 1e-12L;
-
-    auto update_bin_counts = [&](uint64_t ulp, size_t& exact_zero_count, std::vector<size_t>& bins, size_t& comparisons) {
-        if (ulp == UINT64_MAX) {
-            return;
-        }
-        ++comparisons;
-        if (ulp == 0) {
-            ++exact_zero_count;
-            return;
-        }
-        size_t bin_idx = k_num_bins;
-        for (size_t bin_i = 0; bin_i < k_num_bins; ++bin_i) {
-            if (ulp <= k_bin_thresholds[bin_i]) {
-                bin_idx = bin_i;
-                break;
-            }
-        }
-        ++bins[bin_idx];
-    };
-
-    long long total_compile_duration_ns = 0;
-    long double sum_compile_ns = 0.0L;
-    uint64_t compile_min_ns = std::numeric_limits<uint64_t>::max();
-    uint64_t compile_max_ns = 0;
-    std::vector<uint64_t> compile_times;
-    compile_times.reserve(total_expressions);
-
-    long long total_duration_ns = 0;
-    size_t benchmarked_functions = 0;
-    long long total_native_duration_ns = 0;
-    size_t benchmarked_native_functions = 0;
-
-    const std::size_t iterations_u = static_cast<std::size_t>(iterations);
-    const int timing_trials =
-        (iterations >= 10000) ? 1 :
-        (iterations >= 1000) ? 5 :
-        11;
-    std::vector<long long> timing_samples;
-    std::vector<long long> native_timing_samples;
-    timing_samples.reserve(static_cast<size_t>(timing_trials));
-    native_timing_samples.reserve(static_cast<size_t>(timing_trials));
-
-    for (std::size_t idx = 0; idx < total_expressions; ++idx) {
-        const std::string expr = mexce::benchmark_data::kExpressions[idx];
-        const long double golden = mexce::benchmark_data::kGoldenResults[idx];
-
-        a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
-
-        const double golden_d = static_cast<double>(golden);
-
-        record_t rec;
-        rec.expr = expr;
-        rec.expected = golden;
-        rec.compiled = false;
-        rec.eval_ok = false;
-        rec.native_available = idx < mexce::benchmark_data::kNativeExpressionsCount;
-        rec.native_eval_ok = false;
-        rec.mexce_result = std::numeric_limits<double>::quiet_NaN();
-        rec.native_result = std::numeric_limits<double>::quiet_NaN();
-        rec.ulp_mexce_vs_compiler = UINT64_MAX;
-        rec.ulp_mexce_vs_reference = UINT64_MAX;
-        rec.ulp_compiler_vs_reference = UINT64_MAX;
-        rec.compile_ns = 0;
-        rec.avg_ns = 0;
-        rec.dur_ns = 0;
-        rec.native_avg_ns = 0;
-        rec.native_dur_ns = 0;
-        rec.error.clear();
-
-        if (rec.native_available) {
-            native_ctx.a = a;
-            native_ctx.b = b;
-            native_ctx.c = c;
-            native_ctx.x = x;
-            native_ctx.y = y;
-            native_ctx.z = z;
-            native_ctx.w = w;
-
-            rec.native_result = mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
-            rec.native_eval_ok = true;
-
-            const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
-            const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
-            if (native_zero && golden_zero) {
-                rec.ulp_compiler_vs_reference = 0;
-            }
-            else {
-                rec.ulp_compiler_vs_reference = ulp_distance(rec.native_result, golden_d);
-            }
-            ulp_sum_comp_ref.add(rec.ulp_compiler_vs_reference);
-            update_bin_counts(rec.ulp_compiler_vs_reference, exact_zero_count_comp_ref, bin_counts_comp_ref, comparisons_comp_ref);
-        }
-
-        mexce::stopwatch compile_timer;
-        try {
-            eval.set_expression(expr);
-            rec.optimized_expr = eval.get_optimized_expression();
-            rec.bytes_expr = eval.get_byte_representation();
-            rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
-            rec.compiled = true;
-            ++compiled_count;
-            total_compile_duration_ns += (long long)rec.compile_ns;
-            sum_compile_ns += (long double)rec.compile_ns;
-            compile_min_ns = std::min(compile_min_ns, rec.compile_ns);
-            compile_max_ns = std::max(compile_max_ns, rec.compile_ns);
-            compile_times.push_back(rec.compile_ns);
-        }
-        catch (const std::exception& e) {
-            rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
-            ++compile_fail_count;
-            rec.error = std::string("compile: ") + e.what();
-            records.push_back(rec);
-            continue;
-        }
-
-        try {
-            rec.mexce_result = eval.evaluate();
-            rec.eval_ok = true;
-        }
-        catch (const std::exception& e) {
-            ++eval_fail_count;
-            rec.error = std::string("evaluate: ") + e.what();
-            records.push_back(rec);
-            continue;
-        }
-
-        const bool mexce_zero = std::fabs(rec.mexce_result) <= (double)k_zero_abs_tol;
-        const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
-        if (mexce_zero && golden_zero) {
-            rec.ulp_mexce_vs_reference = 0;
-        }
-        else {
-            rec.ulp_mexce_vs_reference = ulp_distance(rec.mexce_result, golden_d);
-        }
-        ulp_sum_mexce_ref.add(rec.ulp_mexce_vs_reference);
-        update_bin_counts(rec.ulp_mexce_vs_reference, exact_zero_count_mexce_ref, bin_counts_mexce_ref, comparisons_mexce_ref);
-
-        if (rec.native_eval_ok) {
-            const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
-            if (mexce_zero && native_zero) {
-                rec.ulp_mexce_vs_compiler = 0;
-            }
-            else {
-                rec.ulp_mexce_vs_compiler = ulp_distance(rec.mexce_result, rec.native_result);
-            }
-            ulp_sum_mexce_comp.add(rec.ulp_mexce_vs_compiler);
-            update_bin_counts(rec.ulp_mexce_vs_compiler, exact_zero_count_mexce_comp, bin_counts_mexce_comp, comparisons_mexce_comp);
-        }
-
-        timing_samples.clear();
-        for (int trial = 0; trial < timing_trials; ++trial) {
-            mexce::stopwatch timer;
-            for (std::size_t i = 0; i < iterations_u; ++i) {
-                (void)eval.evaluate();
-            }
-            timing_samples.push_back(timer.elapsed_nanoseconds());
-        }
-        std::nth_element(timing_samples.begin(),
-                         timing_samples.begin() + timing_samples.size() / 2,
-                         timing_samples.end());
-        rec.dur_ns = timing_samples[timing_samples.size() / 2];
-        rec.avg_ns = (uint64_t)((long double)rec.dur_ns / (long double)iterations_u + 0.5L);
-
-        total_duration_ns += rec.dur_ns;
-        ++benchmarked_functions;
-
-        if (rec.native_eval_ok) {
-            native_timing_samples.clear();
-            for (int trial = 0; trial < timing_trials; ++trial) {
-                mexce::stopwatch timer;
-                for (std::size_t i = 0; i < iterations_u; ++i) {
-                    (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
-                }
-                native_timing_samples.push_back(timer.elapsed_nanoseconds());
-            }
-            std::nth_element(native_timing_samples.begin(),
-                             native_timing_samples.begin() + native_timing_samples.size() / 2,
-                             native_timing_samples.end());
-            rec.native_dur_ns = native_timing_samples[native_timing_samples.size() / 2];
-            rec.native_avg_ns = (uint64_t)((long double)rec.native_dur_ns / (long double)iterations_u + 0.5L);
-            total_native_duration_ns += rec.native_dur_ns;
-            ++benchmarked_native_functions;
-        }
-
-        records.push_back(rec);
-    }
-
     const std::string line = std::string(65, '-');
     auto print_kv = [&out](const std::string& k, const std::string& v) {
         out << std::left << std::setw(40) << k << v << "\n";
     };
 
+    // ========== TEST SUMMARY ==========
     out << line << "\n" << "TEST SUMMARY" << "\n" << line << "\n";
-    print_kv("Compiled", std::to_string(compiled_count));
-    print_kv("Failed to compile", std::to_string(compile_fail_count));
-    if (eval_fail_count > 0) {
-        print_kv("Evaluation failures", std::to_string(eval_fail_count));
+    print_kv("Compiled", std::to_string(result.compiled_count));
+    print_kv("Failed to compile", std::to_string(result.compile_fail_count));
+    if (result.eval_fail_count > 0) {
+        print_kv("Evaluation failures", std::to_string(result.eval_fail_count));
     }
 
-    const std::size_t total_expr_count = static_cast<std::size_t>(total_expressions);
-    const std::size_t native_covered = std::min<std::size_t>(total_expr_count, mexce::benchmark_data::kNativeExpressionsCount);
+    const size_t native_covered = std::min(result.expressions_tested,
+        mexce::benchmark_data::kNativeExpressionsCount);
     print_kv("Native expressions covered", std::to_string(native_covered));
 
+    // ========== ACCURACY DISTRIBUTION (ULP) ==========
     out << "\nAccuracy distribution (ULP):\n";
 
     struct Distribution_column {
@@ -1322,18 +723,18 @@ int main(int argc, char* argv[])
     };
 
     const Distribution_column distribution_columns[] = {
-        {"Mexce vs Reference",    comparisons_mexce_ref, exact_zero_count_mexce_ref,   &bin_counts_mexce_ref},
-        {"Compiler vs Reference", comparisons_comp_ref,  exact_zero_count_comp_ref,    &bin_counts_comp_ref},
-        {"Mexce vs Compiler",     comparisons_mexce_comp, exact_zero_count_mexce_comp, &bin_counts_mexce_comp}
+        {"Mexce vs Reference",    result.comparisons_mexce_ref, result.exact_zero_count_mexce_ref, &result.ulp_bins_mexce_ref},
+        {"Compiler vs Reference", result.comparisons_comp_ref,  result.exact_zero_count_comp_ref,  &result.ulp_bins_comp_ref},
+        {"Mexce vs Compiler",     result.comparisons_mexce_comp, result.exact_zero_count_mexce_comp, &result.ulp_bins_mexce_comp}
     };
 
     std::vector<std::string> row_labels;
-    row_labels.reserve(k_num_bins + 2);
+    row_labels.reserve(k_ulp_num_bins + 2);
     row_labels.emplace_back("0 (exact)");
-    for (size_t bin_idx = 0; bin_idx < k_num_bins; ++bin_idx) {
+    for (size_t bin_idx = 0; bin_idx < k_ulp_num_bins; ++bin_idx) {
         char buf[32];
-        uint64_t lo = (bin_idx == 0 ? 1 : (k_bin_thresholds[bin_idx - 1] + 1));
-        uint64_t hi = k_bin_thresholds[bin_idx];
+        uint64_t lo = (bin_idx == 0 ? 1 : (k_ulp_bin_thresholds[bin_idx - 1] + 1));
+        uint64_t hi = k_ulp_bin_thresholds[bin_idx];
         std::snprintf(buf, sizeof(buf), "%llu-%llu", (unsigned long long)lo, (unsigned long long)hi);
         row_labels.emplace_back(buf);
     }
@@ -1354,16 +755,16 @@ int main(int argc, char* argv[])
         values.reserve(row_labels.size());
         if (column.comparisons == 0) {
             values.emplace_back("-");
-            for (size_t bin_idx = 0; bin_idx < k_num_bins + 1; ++bin_idx) {
+            for (size_t bin_idx = 0; bin_idx < k_ulp_num_bins + 1; ++bin_idx) {
                 values.emplace_back("-");
             }
         }
         else {
             values.emplace_back(std::to_string(column.exact_zero_count));
-            for (size_t bin_idx = 0; bin_idx < k_num_bins; ++bin_idx) {
+            for (size_t bin_idx = 0; bin_idx < k_ulp_num_bins; ++bin_idx) {
                 values.emplace_back(std::to_string((*column.bins)[bin_idx]));
             }
-            values.emplace_back(std::to_string((*column.bins)[k_num_bins]));
+            values.emplace_back(std::to_string((*column.bins)[k_ulp_num_bins]));
         }
     }
 
@@ -1411,29 +812,31 @@ int main(int argc, char* argv[])
 
     out << "\n";
 
+    // ========== ACCUMULATED ULP DISTANCE ==========
     out << "Accumulated ULP distance (sum):\n";
-    print_kv("Mexce vs Reference", comparisons_mexce_ref == 0 ? "-" : to_decimal_u128(ulp_sum_mexce_ref.hi, ulp_sum_mexce_ref.lo));
-    print_kv("Compiler vs Reference", comparisons_comp_ref == 0 ? "-" : to_decimal_u128(ulp_sum_comp_ref.hi, ulp_sum_comp_ref.lo));
-    print_kv("Mexce vs Compiler", comparisons_mexce_comp == 0 ? "-" : to_decimal_u128(ulp_sum_mexce_comp.hi, ulp_sum_mexce_comp.lo));
+    print_kv("Mexce vs Reference", result.comparisons_mexce_ref == 0 ? "-" :
+        to_decimal_u128(result.ulp_sum_mexce_ref.hi, result.ulp_sum_mexce_ref.lo));
+    print_kv("Compiler vs Reference", result.comparisons_comp_ref == 0 ? "-" :
+        to_decimal_u128(result.ulp_sum_comp_ref.hi, result.ulp_sum_comp_ref.lo));
+    print_kv("Mexce vs Compiler", result.comparisons_mexce_comp == 0 ? "-" :
+        to_decimal_u128(result.ulp_sum_mexce_comp.hi, result.ulp_sum_mexce_comp.lo));
     out << "\n";
 
+    // ========== COMPILATION TIME HISTOGRAM ==========
     out << "Compilation time histogram:" << "\n";
-    if (compile_times.empty()) {
+    if (result.compile_times.empty()) {
         out << "No successfully compiled expressions." << "\n";
     }
     else {
         constexpr size_t kCompileBins = 10;
         std::vector<size_t> compile_hist(kCompileBins, 0);
 
-        // Use logarithmic bins so that both the common fast compilations and
-        // rare slow outliers are visible.
-        uint64_t log_min_ns = compile_min_ns;
-        uint64_t log_max_ns = compile_max_ns;
+        uint64_t log_min_ns = result.compile_min_ns;
+        uint64_t log_max_ns = result.compile_max_ns;
 
-        // Guard against all-zero or degenerate ranges.
         if (log_min_ns == 0) {
             log_min_ns = std::numeric_limits<uint64_t>::max();
-            for (uint64_t ns : compile_times) {
+            for (uint64_t ns : result.compile_times) {
                 if (ns > 0 && ns < log_min_ns) {
                     log_min_ns = ns;
                 }
@@ -1450,7 +853,7 @@ int main(int argc, char* argv[])
         const long double log_max = std::log10((long double)log_max_ns);
         const long double log_range = (log_max > log_min) ? (log_max - log_min) : 1.0L;
 
-        for (uint64_t ns : compile_times) {
+        for (uint64_t ns : result.compile_times) {
             size_t bin_idx = 0;
             if (log_max > log_min && ns > 0) {
                 const long double x = std::log10((long double)ns);
@@ -1479,9 +882,8 @@ int main(int argc, char* argv[])
             uint64_t end_ns = 0;
 
             if (log_max <= log_min) {
-                // Degenerate case: everything in one bucket.
-                start_ns = compile_min_ns;
-                end_ns = compile_max_ns;
+                start_ns = result.compile_min_ns;
+                end_ns = result.compile_max_ns;
             } else {
                 const long double start_ratio = (long double)bin_idx / (long double)kCompileBins;
                 const long double end_ratio = (long double)(bin_idx + 1) / (long double)kCompileBins;
@@ -1492,12 +894,12 @@ int main(int argc, char* argv[])
                 start_ns = (uint64_t)std::floor(std::pow((long double)10.0, start_log));
                 end_ns   = (uint64_t)std::floor(std::pow((long double)10.0, end_log));
 
-                if (start_ns < compile_min_ns) start_ns = compile_min_ns;
-                if (end_ns > compile_max_ns)   end_ns = compile_max_ns;
+                if (start_ns < result.compile_min_ns) start_ns = result.compile_min_ns;
+                if (end_ns > result.compile_max_ns)   end_ns = result.compile_max_ns;
                 if (end_ns < start_ns)         end_ns = start_ns;
 
                 if (bin_idx == kCompileBins - 1) {
-                    end_ns = compile_max_ns;
+                    end_ns = result.compile_max_ns;
                 }
             }
 
@@ -1525,6 +927,7 @@ int main(int argc, char* argv[])
 
     out << "\n";
 
+    // ========== BENCHMARK SUMMARY ==========
     out << line << "\n" << "BENCHMARK SUMMARY" << "\n" << line << "\n";
 
     struct Summary_column {
@@ -1547,21 +950,14 @@ int main(int argc, char* argv[])
         Summary_column mexce_column;
         mexce_column.title = "Mexce";
         mexce_column.values.assign(summary_rows.size(), "-");
-        mexce_column.values[0] = std::to_string(benchmarked_functions);
-        if (compiled_count > 0) {
-            const uint64_t avg_compile_ns = (uint64_t)(sum_compile_ns / (long double)compiled_count + 0.5L);
-            mexce_column.values[1] = format_ns(avg_compile_ns);
-            mexce_column.values[3] = format_ns((uint64_t)total_compile_duration_ns);
+        mexce_column.values[0] = std::to_string(result.eval_count);
+        if (result.compiled_count > 0) {
+            mexce_column.values[1] = format_ns(result.avg_compile_ns);
+            mexce_column.values[3] = format_ns((uint64_t)result.total_compile_ns);
         }
-        if (benchmarked_functions > 0) {
-            // Compute average time per single function call from totals
-            // avg = total_time / (num_functions * iterations_per_function)
-            const uint64_t total_calls = (uint64_t)benchmarked_functions * (uint64_t)iterations;
-            const uint64_t avg_per_func_ns = (total_calls > 0)
-                ? (uint64_t)((double)total_duration_ns / (double)total_calls + 0.5)
-                : 0;
-            mexce_column.values[2] = format_ns(avg_per_func_ns);
-            mexce_column.values[4] = format_ns((uint64_t)total_duration_ns);
+        if (result.eval_count > 0) {
+            mexce_column.values[2] = format_ns(result.avg_eval_ns);
+            mexce_column.values[4] = format_ns((uint64_t)result.total_eval_ns);
         }
         summary_columns.push_back(std::move(mexce_column));
     }
@@ -1570,15 +966,14 @@ int main(int argc, char* argv[])
         Summary_column compiler_column;
         compiler_column.title = "Compiler";
         compiler_column.values.assign(summary_rows.size(), "-");
-        compiler_column.values[0] = std::to_string(benchmarked_native_functions);
-        if (benchmarked_native_functions > 0) {
-            // Compute average time per single function call from totals
-            const uint64_t total_native_calls = (uint64_t)benchmarked_native_functions * (uint64_t)iterations;
+        compiler_column.values[0] = std::to_string(result.benchmarked_native_count);
+        if (result.benchmarked_native_count > 0) {
+            const uint64_t total_native_calls = (uint64_t)result.benchmarked_native_count * (uint64_t)iterations;
             const uint64_t avg_native_ns = (total_native_calls > 0)
-                ? (uint64_t)((double)total_native_duration_ns / (double)total_native_calls + 0.5)
+                ? (uint64_t)((double)result.total_native_ns / (double)total_native_calls + 0.5)
                 : 0;
             compiler_column.values[2] = format_ns(avg_native_ns);
-            compiler_column.values[4] = format_ns((uint64_t)total_native_duration_ns);
+            compiler_column.values[4] = format_ns((uint64_t)result.total_native_ns);
         }
         summary_columns.push_back(std::move(compiler_column));
     }
@@ -1630,6 +1025,7 @@ int main(int argc, char* argv[])
         print_summary_row(summary_rows[row_idx], row_idx);
     }
 
+    // ========== DETAILED REPORT ==========
     out << "\n" << line << "\n" << "DETAILED REPORT" << "\n" << line << "\n";
 
     const char* kHeaderMexceComp = "ULP(Mx-Cp)";
@@ -1650,7 +1046,7 @@ int main(int argc, char* argv[])
         }
     };
 
-    for (const auto& r : records) {
+    for (const auto& r : result.records) {
         consider_len(r.ulp_mexce_vs_compiler, max_ulp_len_mexce_comp);
         consider_len(r.ulp_mexce_vs_reference, max_ulp_len_mexce_ref);
         consider_len(r.ulp_compiler_vs_reference, max_ulp_len_comp_ref);
@@ -1659,7 +1055,7 @@ int main(int argc, char* argv[])
     auto format_ulp_value = [](uint64_t value) -> std::string {
         return (value == UINT64_MAX) ? "-" : std::to_string(value);
     };
-    
+
     auto format_double_2d = [](double val) {
         std::stringstream ss;
         ss << std::fixed << std::setprecision(2) << val;
@@ -1687,12 +1083,12 @@ int main(int argc, char* argv[])
             << "  " << std::string(40, '-') << " : " << std::string(40, '-') << "\n";
     };
 
-    // --- Create bins for sorting ---
-    std::vector<const record_t*> compile_failures;
-    std::vector<const record_t*> eval_failures;
-    std::vector<const record_t*> passed;
+    // Create bins for sorting
+    std::vector<const benchmark_record*> compile_failures;
+    std::vector<const benchmark_record*> eval_failures;
+    std::vector<const benchmark_record*> passed;
 
-    for (const auto& rec : records) {
+    for (const auto& rec : result.records) {
         if (!rec.compiled) {
             compile_failures.push_back(&rec);
         }
@@ -1704,50 +1100,33 @@ int main(int argc, char* argv[])
         }
     }
 
-    // --- Sort bins ---
-    auto sort_by_expression = [](const record_t* a, const record_t* b) {
+    // Sort bins
+    auto sort_by_expression = [](const benchmark_record* a, const benchmark_record* b) {
         return a->expr < b->expr;
     };
     std::sort(compile_failures.begin(), compile_failures.end(), sort_by_expression);
     std::sort(eval_failures.begin(), eval_failures.end(), sort_by_expression);
 
-    // Sort "Passed" by Speedup (Native / Mexce) ASCENDING.
-    // Speedup < 1.0: Native is slower (Mexce faster).
-    // Speedup > 1.0: Native is faster (Mexce regression).
-    // Wait, logic check:
-    // Speedup = Native_Time / Mexce_Time
-    // If Native takes 100ns and Mexce takes 10ns (Mexce fast), Speedup = 10.0.
-    // If Native takes 10ns and Mexce takes 100ns (Mexce slow), Speedup = 0.1.
-    //
-    // User wants "ascending order, according to how much faster the compiler's version is".
-    // If we sort by (Native_Time / Mexce_Time) Ascending:
-    // 0.1 (Mexce slow/Problematic) comes first.
-    // 10.0 (Mexce fast) comes last.
-    // This highlights problematic regressions first.
-    std::sort(passed.begin(), passed.end(), [](const record_t* a, const record_t* b) {
-        // Push entries without native comparison to the end of the sort order?
-        // Or sort them as 0 speedup? Let's handle native_eval_ok.
-        if (!a->native_eval_ok && b->native_eval_ok) return false; // Put 'no native' after 'has native'
+    std::sort(passed.begin(), passed.end(), [](const benchmark_record* a, const benchmark_record* b) {
+        if (!a->native_eval_ok && b->native_eval_ok) return false;
         if (a->native_eval_ok && !b->native_eval_ok) return true;
         if (!a->native_eval_ok && !b->native_eval_ok) return a->expr < b->expr;
 
         double speedup_a = (double)a->native_avg_ns / (std::max)(1.0, (double)a->avg_ns);
         double speedup_b = (double)b->native_avg_ns / (std::max)(1.0, (double)b->avg_ns);
-        
+
         if (std::abs(speedup_a - speedup_b) > 1e-6) {
-            return speedup_a < speedup_b; 
+            return speedup_a < speedup_b;
         }
         return a->expr < b->expr;
     });
 
-    // --- Print sorted bins ---
-
-    // 1) Compile failures first
+    // Print sorted bins
     if (!compile_failures.empty()) {
         out << "Compile Failures (sorted alphabetically):" << "\n";
         print_row_header();
         for (const auto* r_ptr : compile_failures) {
-            const record_t& r = *r_ptr;
+            const benchmark_record& r = *r_ptr;
             out << std::left << std::setw(10) << "compile"
                 << "  " << std::setw((int)max_ulp_len_mexce_comp) << format_ulp_value(r.ulp_mexce_vs_compiler)
                 << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
@@ -1764,12 +1143,11 @@ int main(int argc, char* argv[])
         out << "\n";
     }
 
-    // 2) Evaluation failures next
     if (!eval_failures.empty()) {
         out << "Evaluation Failures (sorted alphabetically):" << "\n";
         print_row_header();
         for (const auto* r_ptr : eval_failures) {
-            const record_t& r = *r_ptr;
+            const benchmark_record& r = *r_ptr;
             out << std::left << std::setw(10) << "eval"
                 << "  " << std::setw((int)max_ulp_len_mexce_comp) << format_ulp_value(r.ulp_mexce_vs_compiler)
                 << "  " << std::setw((int)max_ulp_len_mexce_ref) << format_ulp_value(r.ulp_mexce_vs_reference)
@@ -1786,13 +1164,12 @@ int main(int argc, char* argv[])
         out << "\n";
     }
 
-    // 3) Passed cases
     if (!passed.empty()) {
         out << "Passed (sorted by Speedup [Native/Mexce] ASC - Problematic regressions first):" << "\n";
         print_row_header();
         auto ulp_exceeds = [](uint64_t value) { return value != UINT64_MAX && value > 8192; };
         for (const auto* r_ptr : passed) {
-            const record_t& r = *r_ptr;
+            const benchmark_record& r = *r_ptr;
 
             const bool highlight = ulp_exceeds(r.ulp_mexce_vs_reference) ||
                 ulp_exceeds(r.ulp_mexce_vs_compiler) ||
@@ -1835,5 +1212,331 @@ int main(int argc, char* argv[])
         }
     }
 
-    return (compile_fail_count == 0 && eval_fail_count == 0) ? 0 : 1;
+    return (result.compile_fail_count == 0 && result.eval_fail_count == 0) ? 0 : 1;
+}
+
+static int run_comprehensive_benchmark(const benchmark_config& config)
+{
+    // Set up output stream (file or stdout)
+    std::ofstream file_output;
+    std::ostream* output_stream = &std::cout;
+    if (!config.output_path.empty()) {
+        file_output.open(config.output_path.c_str());
+        if (!file_output) {
+            std::cerr << "Failed to open output file: " << config.output_path << std::endl;
+            return 1;
+        }
+        output_stream = &file_output;
+        std::cout << "Results will be written to " << resolve_full_path(config.output_path) << std::endl;
+    }
+    std::ostream& out = *output_stream;
+
+    const std::string line(78, '=');
+
+    out << "\n" << line << "\n";
+    out << "COMPREHENSIVE CONFIGURATION COMPARISON\n";
+    out << line << "\n\n";
+
+#ifdef BENCHMARK_COMPILER
+    out << "Compiler: " << BENCHMARK_COMPILER << "\n";
+#endif
+#ifdef BENCHMARK_COMPILER_FLAGS
+    out << "Compiler flags: " << BENCHMARK_COMPILER_FLAGS << "\n";
+#endif
+
+    out << "Iterations per expression: " << config.iterations << "\n";
+    out << "Total expressions: " << mexce::benchmark_data::kExpressionCount << "\n\n";
+
+    // Define configurations to test (same configs used in both modes)
+    std::vector<mexce_config> configs = {
+        {"SSE2",            false, false},
+        {"SSE2+fast-math",  false, true},
+        {"x87",             true,  false},
+        {"x87+fast-math",   true,  true}
+    };
+
+    std::vector<benchmark_result> results;
+    results.reserve(configs.size());
+
+    // Run all mexce configurations using the same core benchmark function
+    for (const auto& cfg : configs) {
+        results.push_back(run_benchmark(cfg, config.iterations, std::cout));
+    }
+
+    // ========== TIMING COMPARISON ==========
+    out << "\n" << line << "\n";
+    out << "TIMING COMPARISON\n";
+    out << line << "\n\n";
+
+    // Find column widths
+    size_t name_width = std::string("Configuration").size();
+    for (const auto& r : results) {
+        name_width = std::max(name_width, r.config_name.size());
+    }
+    name_width = std::max(name_width, std::string("Native").size());
+
+    const size_t col_width = 15;
+
+    out << std::left << std::setw((int)name_width) << "Configuration" << "  "
+        << std::setw((int)col_width) << "Avg Compile" << "  "
+        << std::setw((int)col_width) << "Avg Eval" << "  "
+        << std::setw((int)col_width) << "Total Eval" << "\n";
+
+    out << std::string(name_width, '-') << "  "
+        << std::string(col_width, '-') << "  "
+        << std::string(col_width, '-') << "  "
+        << std::string(col_width, '-') << "\n";
+
+    // Print native results first (from the first result's native timing)
+    if (!results.empty() && results[0].benchmarked_native_count > 0) {
+        uint64_t native_avg_eval_ns = (uint64_t)((double)results[0].total_native_ns /
+            ((double)results[0].benchmarked_native_count * (double)config.iterations) + 0.5);
+        out << std::left << std::setw((int)name_width) << "Native" << "  "
+            << std::setw((int)col_width) << "-" << "  "
+            << std::setw((int)col_width) << format_ns(native_avg_eval_ns) << "  "
+            << std::setw((int)col_width) << format_ns((uint64_t)results[0].total_native_ns) << "\n";
+    }
+
+    for (const auto& r : results) {
+        out << std::left << std::setw((int)name_width) << r.config_name << "  "
+            << std::setw((int)col_width) << format_ns(r.avg_compile_ns) << "  "
+            << std::setw((int)col_width) << format_ns(r.avg_eval_ns) << "  "
+            << std::setw((int)col_width) << format_ns((uint64_t)r.total_eval_ns) << "\n";
+    }
+
+    // Find fastest
+    if (!results.empty()) {
+        auto fastest_it = std::min_element(results.begin(), results.end(),
+            [](const benchmark_result& a, const benchmark_result& b) {
+                return a.avg_eval_ns < b.avg_eval_ns;
+            });
+        out << "\nFastest: " << fastest_it->config_name
+            << " (" << format_ns(fastest_it->avg_eval_ns) << " per call)\n";
+    }
+
+    // ========== PRECISION COMPARISON ==========
+    out << "\n" << line << "\n";
+    out << "PRECISION COMPARISON (ULP vs Reference)\n";
+    out << line << "\n\n";
+
+    // Build row labels
+    std::vector<std::string> row_labels;
+    row_labels.reserve(k_ulp_num_bins + 2);
+    row_labels.emplace_back("0 (exact)");
+    for (size_t bin_idx = 0; bin_idx < k_ulp_num_bins; ++bin_idx) {
+        char buf[32];
+        uint64_t lo = (bin_idx == 0 ? 1 : (k_ulp_bin_thresholds[bin_idx - 1] + 1));
+        uint64_t hi = k_ulp_bin_thresholds[bin_idx];
+        std::snprintf(buf, sizeof(buf), "%llu-%llu", (unsigned long long)lo, (unsigned long long)hi);
+        row_labels.emplace_back(buf);
+    }
+    row_labels.emplace_back(">65536");
+
+    // Find label width
+    size_t label_width = std::string("ULP Range").size();
+    for (const auto& label : row_labels) {
+        label_width = std::max(label_width, label.size());
+    }
+
+    // Build column values (include Native as first column from comp_ref stats)
+    size_t num_columns = results.size() + 1;  // +1 for Native
+    std::vector<std::vector<std::string>> column_values(num_columns);
+    std::vector<size_t> column_widths(num_columns);
+    std::vector<std::string> column_names(num_columns);
+
+    // Native column (using compiler vs reference ULP from first result)
+    column_names[0] = "Native";
+    if (!results.empty()) {
+        column_values[0].emplace_back(std::to_string(results[0].exact_zero_count_comp_ref));
+        for (size_t bin_idx = 0; bin_idx < k_ulp_num_bins; ++bin_idx) {
+            column_values[0].emplace_back(std::to_string(results[0].ulp_bins_comp_ref[bin_idx]));
+        }
+        column_values[0].emplace_back(std::to_string(results[0].ulp_bins_comp_ref[k_ulp_num_bins]));
+    }
+    column_widths[0] = column_names[0].size();
+    for (const std::string& value : column_values[0]) {
+        column_widths[0] = std::max(column_widths[0], value.size());
+    }
+
+    // Mexce config columns (using mexce vs reference ULP)
+    for (size_t col = 0; col < results.size(); ++col) {
+        const benchmark_result& r = results[col];
+        size_t col_idx = col + 1;
+        column_names[col_idx] = r.config_name;
+        std::vector<std::string>& values = column_values[col_idx];
+        values.reserve(row_labels.size());
+
+        values.emplace_back(std::to_string(r.exact_zero_count_mexce_ref));
+        for (size_t bin_idx = 0; bin_idx < k_ulp_num_bins; ++bin_idx) {
+            values.emplace_back(std::to_string(r.ulp_bins_mexce_ref[bin_idx]));
+        }
+        values.emplace_back(std::to_string(r.ulp_bins_mexce_ref[k_ulp_num_bins]));
+
+        // Column width
+        column_widths[col_idx] = r.config_name.size();
+        for (const std::string& value : values) {
+            column_widths[col_idx] = std::max(column_widths[col_idx], value.size());
+        }
+    }
+
+    // Print header
+    out << std::left << std::setw((int)label_width) << "ULP Range" << "  ";
+    for (size_t col = 0; col < num_columns; ++col) {
+        out << std::setw((int)column_widths[col]) << column_names[col];
+        if (col + 1 != num_columns) out << "  ";
+    }
+    out << "\n";
+
+    // Print separator
+    out << std::string(label_width, '-') << "  ";
+    for (size_t col = 0; col < num_columns; ++col) {
+        out << std::string(column_widths[col], '-');
+        if (col + 1 != num_columns) out << "  ";
+    }
+    out << "\n";
+
+    // Print rows
+    for (size_t row = 0; row < row_labels.size(); ++row) {
+        out << std::left << std::setw((int)label_width) << row_labels[row] << "  ";
+        for (size_t col = 0; col < num_columns; ++col) {
+            out << std::setw((int)column_widths[col]) << column_values[col][row];
+            if (col + 1 != num_columns) out << "  ";
+        }
+        out << "\n";
+    }
+
+    // Print totals
+    out << "\n";
+    out << std::left << std::setw((int)label_width) << "Total ULP sum" << "  ";
+    // Native ULP sum
+    if (!results.empty()) {
+        std::string sum_str = to_decimal_u128(results[0].ulp_sum_comp_ref.hi, results[0].ulp_sum_comp_ref.lo);
+        out << std::setw((int)column_widths[0]) << sum_str << "  ";
+    }
+    for (size_t col = 0; col < results.size(); ++col) {
+        std::string sum_str = to_decimal_u128(results[col].ulp_sum_mexce_ref.hi, results[col].ulp_sum_mexce_ref.lo);
+        out << std::setw((int)column_widths[col + 1]) << sum_str;
+        if (col + 1 != results.size()) out << "  ";
+    }
+    out << "\n";
+
+    out << std::left << std::setw((int)label_width) << "Evaluated" << "  ";
+    // Native evaluated count
+    if (!results.empty()) {
+        out << std::setw((int)column_widths[0]) << results[0].comparisons_comp_ref << "  ";
+    }
+    for (size_t col = 0; col < results.size(); ++col) {
+        out << std::setw((int)column_widths[col + 1]) << results[col].eval_count;
+        if (col + 1 != results.size()) out << "  ";
+    }
+    out << "\n";
+
+    // Find most precise (lowest total ULP among mexce configs)
+    if (!results.empty()) {
+        auto most_precise_it = std::min_element(results.begin(), results.end(),
+            [](const benchmark_result& a, const benchmark_result& b) {
+                if (a.ulp_sum_mexce_ref.hi != b.ulp_sum_mexce_ref.hi)
+                    return a.ulp_sum_mexce_ref.hi < b.ulp_sum_mexce_ref.hi;
+                return a.ulp_sum_mexce_ref.lo < b.ulp_sum_mexce_ref.lo;
+            });
+        out << "\nMost precise: " << most_precise_it->config_name
+            << " (total ULP: " << to_decimal_u128(most_precise_it->ulp_sum_mexce_ref.hi,
+                                                   most_precise_it->ulp_sum_mexce_ref.lo) << ")\n";
+    }
+
+    out << "\n" << line << "\n";
+    out << "Notes:\n";
+    out << "  Native:    Compiler-generated code (baseline for comparison)\n";
+    out << "  SSE2:      Uses SSE2 for basic arithmetic, libm for transcendentals\n";
+    out << "  x87:       Uses x87 FPU for all operations (80-bit internal precision)\n";
+    out << "  fast-math: Enables algebraic simplifications (x-x=0, x/x=1, etc.)\n";
+    out << line << "\n";
+
+    // ========== DETAILED PER-EXPRESSION REPORTS FOR ALL CONFIGURATIONS ==========
+    // Use the records already collected during the benchmark run
+    for (const auto& result : results) {
+        print_detailed_report(result, out);
+    }
+
+    out << "\n" << line << "\n";
+    out << "END OF COMPREHENSIVE BENCHMARK REPORT\n";
+    out << line << "\n";
+
+    return 0;
+}
+
+int main(int argc, char* argv[])
+{
+    benchmark_config config;
+    if (!parse_args(argc, argv, config)) {
+        return 1;
+    }
+
+    if (config.comprehensive) {
+        return run_comprehensive_benchmark(config);
+    }
+
+    // Single-mode benchmark: run one configuration using the shared run_benchmark function
+
+    // Build configuration name
+    std::string config_name;
+    bool prefer_x87 = config.force_x87;
+    if (!config.force_x87 && !config.force_sse2) {
+        prefer_x87 = false;  // Default to SSE2
+    }
+
+    if (prefer_x87) {
+        config_name = config.fast_math ? "x87+fast-math" : "x87";
+    } else {
+        config_name = config.fast_math ? "SSE2+fast-math" : "SSE2";
+    }
+
+    const std::string resolved_output = config.output_path.empty() ? std::string() : resolve_full_path(config.output_path);
+
+    if (argc == 1) {
+        std::cout << "No commandline arguments provided." << std::endl;
+    }
+    std::cout << "Running " << config.iterations << " iterations." << std::endl;
+    if (!config.output_path.empty()) {
+        std::cout << "Results will be written to " << resolved_output << std::endl;
+    }
+    else {
+        std::cout << "Results will be written to standard output" << std::endl;
+    }
+
+    std::cout << "Configuration:" << std::endl;
+    std::cout << "  Backend: " << (prefer_x87 ? "x87" : "SSE2") << std::endl;
+    std::cout << "  Fast-math: " << (config.fast_math ? "enabled" : "disabled") << std::endl;
+
+    // Set up output stream
+    std::ofstream file_output;
+    std::ostream* output_stream = &std::cout;
+    if (!config.output_path.empty()) {
+        file_output.open(config.output_path.c_str());
+        if (!file_output) {
+            std::cerr << "Failed to open output file: " << config.output_path << std::endl;
+            return 1;
+        }
+        output_stream = &file_output;
+    }
+    std::ostream& out = *output_stream;
+
+#ifdef BENCHMARK_COMPILER
+    out << "Compiler: " << BENCHMARK_COMPILER << std::endl;
+#endif
+#ifdef BENCHMARK_COMPILER_FLAGS
+    out << "Compiler flags: " << BENCHMARK_COMPILER_FLAGS << std::endl;
+#endif
+
+    if (mexce::benchmark_data::kExpressionCount == 0) {
+        out << "No expressions available for benchmarking." << std::endl;
+        return 0;
+    }
+
+    // Create config and run the shared benchmark function
+    mexce_config cfg{config_name, prefer_x87, config.fast_math};
+    benchmark_result result = run_benchmark(cfg, config.iterations, std::cout);
+
+    // Print the single-mode report
+    return print_single_mode_report(result, config.iterations, out);
 }
