@@ -397,11 +397,17 @@ struct benchmark_result {
     // (excludes expressions that fell back to a different backend)
     long long total_eval_ns_actual_backend = 0;
     size_t eval_count_actual_backend = 0;
+
+    // Native timing for expressions that used the actual requested backend AND have native
+    // This enables fair 1:1 comparison between mexce and native for the same expression set
+    long long total_native_ns_actual_backend = 0;
+    size_t native_count_actual_backend = 0;
+
     uint64_t compile_min_ns = std::numeric_limits<uint64_t>::max();
     uint64_t compile_max_ns = 0;
     std::vector<uint64_t> compile_times;
 
-    // Native timing
+    // Native timing (all native expressions, for reference)
     long long total_native_ns = 0;
     size_t benchmarked_native_count = 0;
 
@@ -608,8 +614,8 @@ static benchmark_result run_benchmark(
         result.records.push_back(rec);
     }
 
-    // Separate pass for native timing - covers ALL native expressions regardless of mexce compilation
-    // This ensures native baseline is independent of mexce capabilities
+    // Separate pass for native timing - covers ALL native expressions
+    // Also tracks which native expressions correspond to the "actual backend" set for 1:1 comparison
     const size_t native_count = mexce::benchmark_data::kNativeExpressionsCount;
     for (size_t idx = 0; idx < native_count; ++idx) {
         native_ctx.a = 1.1; native_ctx.b = 2.2; native_ctx.c = 3.3;
@@ -631,10 +637,20 @@ static benchmark_result run_benchmark(
         result.total_native_ns += native_dur;
         result.benchmarked_native_count++;
 
-        // Update the record if it exists and has native data
+        // Update the record if it exists
         if (idx < result.records.size()) {
             result.records[idx].native_dur_ns = native_dur;
             result.records[idx].native_avg_ns = (uint64_t)((long double)native_dur / (long double)iterations_u + 0.5L);
+
+            // Check if this expression used the actual requested backend
+            // If so, include its native timing in the 1:1 comparison set
+            const auto& rec = result.records[idx];
+            bool used_requested_backend = (cfg.prefer_x87 && rec.backend_used == mexce::backend_type::x87) ||
+                                          (!cfg.prefer_x87 && rec.backend_used == mexce::backend_type::sse2);
+            if (used_requested_backend && rec.native_available) {
+                result.total_native_ns_actual_backend += native_dur;
+                result.native_count_actual_backend++;
+            }
         }
     }
 
@@ -1331,7 +1347,7 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     out << std::left << std::setw((int)name_width) << "Configuration" << "  "
         << std::setw((int)col_width) << "Avg Compile" << "  "
         << std::setw((int)col_width) << "Avg Eval" << "  "
-        << std::setw((int)col_width) << "Total Eval" << "  "
+        << std::setw((int)col_width) << "Avg Native" << "  "
         << std::setw((int)col_width) << "Expressions" << "\n";
 
     out << std::string(name_width, '-') << "  "
@@ -1339,17 +1355,6 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
         << std::string(col_width, '-') << "  "
         << std::string(col_width, '-') << "  "
         << std::string(col_width, '-') << "\n";
-
-    // Print native results first (from the first result's native timing)
-    if (!results.empty() && results[0].benchmarked_native_count > 0) {
-        uint64_t native_avg_eval_ns = (uint64_t)((double)results[0].total_native_ns /
-            ((double)results[0].benchmarked_native_count * (double)config.iterations) + 0.5);
-        out << std::left << std::setw((int)name_width) << "Native" << "  "
-            << std::setw((int)col_width) << "-" << "  "
-            << std::setw((int)col_width) << format_ns(native_avg_eval_ns) << "  "
-            << std::setw((int)col_width) << format_ns((uint64_t)results[0].total_native_ns) << "  "
-            << results[0].benchmarked_native_count << "\n";
-    }
 
     for (const auto& r : results) {
         // Calculate average eval time using only expressions that used the actual requested backend
@@ -1359,12 +1364,20 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
                 ((double)r.eval_count_actual_backend * (double)config.iterations);
         }
 
+        // Calculate average native time for the SAME set of expressions (1:1 comparison)
+        double avg_native_actual = 0.0;
+        if (r.native_count_actual_backend > 0) {
+            avg_native_actual = (double)r.total_native_ns_actual_backend /
+                ((double)r.native_count_actual_backend * (double)config.iterations);
+        }
+
         // Show timing for expressions that actually used the requested backend
+        // Native column shows timing for the SAME expressions (fair 1:1 comparison)
         out << std::left << std::setw((int)name_width) << r.config_name << "  "
             << std::setw((int)col_width) << format_ns(r.avg_compile_ns) << "  "
             << std::setw((int)col_width) << format_ns(avg_eval_actual) << "  "
-            << std::setw((int)col_width) << format_ns((uint64_t)r.total_eval_ns_actual_backend) << "  "
-            << r.eval_count_actual_backend << "\n";
+            << std::setw((int)col_width) << format_ns(avg_native_actual) << "  "
+            << r.native_count_actual_backend << "\n";
     }
 
     // Find fastest (using actual backend timing)
