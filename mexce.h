@@ -568,7 +568,8 @@ struct Function
 
     bool                force_not_constant = false;
     string              debug_desc;
-    string              cse_store_suffix;  // CSE store code to emit after function code
+    string              cse_store_suffix;  // CSE store code to emit after function code (x87)
+    double*             cse_store_addr = nullptr;  // CSE temp address for backend-agnostic store
 
     Function(
         uint64_t    i,
@@ -2325,6 +2326,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             auto f_opt = make_shared<Function>(ev->m_next_element_id++, optimized_name, 0, 0, final_s.buf.size(), cc, nullptr);
             f_opt->debug_desc = debug_desc;
             f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
+            f_opt->cse_store_addr = f->cse_store_addr;      // Preserve CSE temp address
 
             if (optimized_name == "sqrt" || optimized_name == "inv_sqrt" || optimized_name == "pow_int") {
                 ev->m_power_terms[f_opt->id] = std::make_pair(std::move(base_chunk), v_d);
@@ -2364,6 +2366,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             f_opt->args[0] = f->args[0];
             f_opt->args[1] = f->args[1];
             f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
+            f_opt->cse_store_addr = f->cse_store_addr;      // Preserve CSE temp address
             *it = Element(f_opt);
         }
     }
@@ -2916,6 +2919,61 @@ struct elist_comparison {
         return false; // they are equal
     }
 };
+
+
+// Normalize operand order for commutative operations (add, mul).
+// This enables CSE to detect equivalent expressions like a*b and b*a,
+// and puts simpler operands in a consistent position for pattern matching.
+// For efficiency: larger (more complex) operands first in postfix order,
+// so they're computed while the stack is emptier.
+inline
+void normalize_commutative_operands(elist_t& elist)
+{
+    elist_comparison comp;
+    
+    for (auto it = elist.begin(); it != elist.end(); ++it) {
+        if (it->type != Element_type::CFUNC) continue;
+        
+        auto f = it->f;
+        if (f->num_args != 2) continue;
+        
+        // Only normalize commutative operations
+        bool is_commutative = (f->name == "add" || f->name == "mul");
+        if (!is_commutative) continue;
+        
+        // Get the dependent chunks for both arguments
+        // args[0] = second operand (top of stack), args[1] = first operand (computed first)
+        auto chunk0 = get_dependent_chunk(f->args[0]);
+        auto chunk1 = get_dependent_chunk(f->args[1]);
+        
+        // Create temporary lists to compare (elist_comparison expects elist_t)
+        elist_t temp0(chunk0.first, chunk0.second);
+        elist_t temp1(chunk1.first, chunk1.second);
+        
+        // Canonical order: larger/more complex chunk should be in args[1] (computed first)
+        // This improves stack efficiency (compute complex while stack is emptier)
+        // and provides consistent ordering for CSE.
+        // comp returns true if first arg is "greater" (larger size, higher type, lower id)
+        if (comp(temp0, temp1)) {
+            // chunk0 is "greater", should be in args[1] position - need to swap
+            // Swap by splicing: move chunk1 to after chunk0 (before the function node)
+            // After swap: [..., chunk0_elements, chunk1_elements, func]
+            
+            // Save the positions before modifying
+            auto chunk0_start = chunk0.first;
+            auto chunk1_start = chunk1.first;
+            auto chunk1_end = chunk1.second;  // This is where chunk0 starts
+            auto func_pos = it;
+            
+            // Move chunk1 to right before the function node (after chunk0)
+            // splice(pos, list, first, last) inserts [first, last) before pos
+            elist.splice(func_pos, elist, chunk1_start, chunk1_end);
+        }
+    }
+    
+    // Re-link arguments after reordering
+    link_arguments(elist);
+}
 
 
 template <uint8_t OP>
@@ -3997,7 +4055,20 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                     rax_cached = nullptr;  // RAX clobbered by call
                     --depth;
                 }
-                // Note: CSE store suffix is not emitted in SSE2 path as CSE uses x87 instructions
+                // Emit CSE store if this function has a temp address
+                // After function execution, result is in xmm[depth-1]
+                if (tf->cse_store_addr != nullptr) {
+                    // mov rax, addr
+                    emit_load_address_rax(code_buffer, (void*)tf->cse_store_addr);
+                    rax_cached = (void*)tf->cse_store_addr;
+                    // movsd [rax], xmm[depth-1]
+                    int reg = depth - 1;
+                    if (reg >= 8) {
+                        code_buffer < 0xF2 < 0x44 < 0x0F < 0x11 < (uint8_t)((reg - 8) * 8);  // movsd [rax], xmm8-15
+                    } else {
+                        code_buffer < 0xF2 < 0x0F < 0x11 < (uint8_t)(reg * 8);  // movsd [rax], xmm0-7
+                    }
+                }
                 break;
             }
         }
@@ -4406,6 +4477,18 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             }
         }
 
+        // Transfer CSE store info to the last function in result (if any)
+        // The last function produces the final value that needs to be stored
+        if (f->cse_store_addr != nullptr) {
+            for (auto rit = result.rbegin(); rit != result.rend(); ++rit) {
+                if (rit->type == Element_type::CFUNC) {
+                    rit->f->cse_store_addr = f->cse_store_addr;
+                    rit->f->cse_store_suffix = f->cse_store_suffix;
+                    break;
+                }
+            }
+        }
+
         // Replace current function node with the simplified elist
         // First, erase the current node, then insert result elements
         auto insert_pos = elist->erase(it);
@@ -4579,6 +4662,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.buf.size(), cc, nullptr);
     f_opt->debug_desc = "(" + debug_ss.str() + ")";
     f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
+    f_opt->cse_store_addr = f->cse_store_addr;      // Preserve CSE temp address
 
     *it = Element(f_opt);
 }
@@ -4948,6 +5032,7 @@ void run_cse(evaluator* ev, elist_t& elist)
             // Set the CSE store suffix on the source function.
             // This will be emitted after the function's code during compilation.
             source->f->cse_store_suffix = store_code.str();
+            source->f->cse_store_addr = temp_addr;  // For SSE2 backend
 
             // Shared temp variable for all subsequent replacements in this group.
             const uint64_t temp_var_id = ev->m_next_element_id++;
@@ -5517,6 +5602,11 @@ void evaluator::set_expression(std::string e)
     // link functions to their arguments (1)
     link_arguments(m_elist);
 
+    // Normalize operand order for commutative operations (add, mul)
+    // This enables CSE to match equivalent expressions like a*b and b*a,
+    // and improves stack efficiency by computing larger operands first.
+    normalize_commutative_operands(m_elist);
+
     // Run Common Subexpression Elimination (CSE)
     // This must run before destructive optimizers (asmd, pow) to catch
     // identical subtrees like div(2.2, y).
@@ -5599,6 +5689,56 @@ void evaluator::set_expression(std::string e)
                             y = y_next;
                             continue;
                         }
+                    }
+                    // Check for division of zero: 0 / x → 0
+                    if (f->name == "div") {
+                        bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
+                        if (arg1_is_zero) {
+                            // Erase both argument subtrees and replace function with 0
+                            auto arg0_chunk = get_dependent_chunk(f->args[0]);
+                            auto arg1_chunk = get_dependent_chunk(f->args[1]);
+                            m_elist.erase(arg1_chunk.first, arg1_chunk.second);
+                            arg0_chunk = get_dependent_chunk(f->args[0]);
+                            m_elist.erase(arg0_chunk.first, arg0_chunk.second);
+                            *y = Element(make_intermediate_constant(this, 0.0));
+                            modified = true;
+                            y = y_next;
+                            continue;
+                        }
+                    }
+                    // Identity simplifications: keep one argument, remove the other
+                    // Helper to replace op(a, b) with just one argument
+                    auto replace_with_arg = [&](int keep_arg) {
+                        int remove_arg = 1 - keep_arg;
+                        auto remove_chunk = get_dependent_chunk(f->args[remove_arg]);
+                        m_elist.erase(remove_chunk.first, remove_chunk.second);
+                        // The kept argument chunk is already in place, just remove the function node
+                        m_elist.erase(y);
+                        modified = true;
+                    };
+                    // 0 + x → x, x + 0 → x
+                    if (f->name == "add") {
+                        bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
+                        bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
+                        if (arg0_is_zero) { replace_with_arg(1); y = y_next; continue; }
+                        if (arg1_is_zero) { replace_with_arg(0); y = y_next; continue; }
+                    }
+                    // 1 * x → x, x * 1 → x
+                    if (f->name == "mul") {
+                        bool arg0_is_one = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 1.0);
+                        bool arg1_is_one = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 1.0);
+                        if (arg0_is_one) { replace_with_arg(1); y = y_next; continue; }
+                        if (arg1_is_one) { replace_with_arg(0); y = y_next; continue; }
+                    }
+                    // x - 0 → x
+                    if (f->name == "sub") {
+                        bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
+                        if (arg0_is_zero) { replace_with_arg(1); y = y_next; continue; }
+                    }
+                    // x / 1 → x
+                    if (f->name == "div") {
+                        bool arg0_is_one = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 1.0);
+                        if (arg0_is_one) { replace_with_arg(1); y = y_next; continue; }
                     }
                 }
             }
