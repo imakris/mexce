@@ -8,7 +8,7 @@ A single-header, dependency-free JIT compiler for mathematical expressions.
 
 ## Overview
 
-`mexce` is a runtime compiler for scalar mathematical expressions written in C++. It parses standard C-like expressions and compiles them directly into x86/x86-64 machine code that utilizes the x87 FPU.
+`mexce` is a runtime compiler for scalar mathematical expressions written in C++. It parses standard C-like expressions and compiles them directly into x86 or x86-64 machine code. On 64-bit systems, it uses **SSE2 instructions** for basic arithmetic and calls **C standard library** math functions for transcendentals. On 32-bit systems, or when higher internal precision is desired, the **x87 FPU** backend is used.
 
 Once an expression is compiled, subsequent evaluations are direct function calls, which avoids parsing and interpretation overhead. This makes `mexce` well-suited for applications that repeatedly evaluate the same formula with different inputs, such as numerical simulations, data processing kernels, or graphics.
 
@@ -16,7 +16,7 @@ The library is contained in a single header file (`mexce.h`) with no external de
 
 ### Requirements
 *   **Platforms:** Windows, Linux
-*   **Architectures:** x86, x86-64 (other architectures are not supported)
+*   **Architectures:** x86, x86-64 (SSE2 backend requires x86-64; x87 backend works on both)
 *   **Compiler:** Requires a C++11 compliant compiler.
 
 ## Installation
@@ -101,6 +101,33 @@ Executes the expression most recently compiled by `set_expression()`.
 Compiles and executes an expression for a single use without replacing the default expression.
 *   **Signature:** `double evaluate(const std::string& expression);`
 
+#### `opts()`
+Returns a mutable reference to the evaluator's options. Changes take effect on the next `set_expression()` call.
+*   **Signature:** `options& opts();`
+*   **Example:** `eval.opts().fast_math = true;`
+
+#### `get_options() / set_options()`
+Get or set the evaluator's options.
+*   **Signatures:** `const options& get_options() const;`, `void set_options(const options& opts);`
+
+## Runtime Options
+
+Options can be configured before calling `set_expression()` to control code generation behavior:
+
+```cpp
+mexce::evaluator eval;
+eval.enable_fast_math();           // Enable algebraic simplifications
+eval.use_x87_backend();            // Use x87 FPU instead of SSE2
+eval.enable_cse();                 // Enable common subexpression elimination
+eval.set_expression("x + y");      // Options take effect here
+```
+
+| Method | Description |
+| :--- | :--- |
+| `enable_fast_math()` | Enables algebraic simplifications that may change results for special values (NaN, Inf). Examples: `x-x → 0`, `x/x → 1`, `0*x → 0`. |
+| `use_x87_backend()` | Forces the x87 FPU backend instead of SSE2. The x87 backend uses 80-bit internal precision. On 32-bit x86, this backend is always used. |
+| `enable_cse()` | Enables Common Subexpression Elimination. Repeated identical subexpressions are computed once and reused. Only works with the x87 backend. |
+
 ## Expression Syntax
 
 `mexce` supports standard mathematical notation.
@@ -138,7 +165,7 @@ Compiles and executes an expression for a single use without replacing the defau
 | `log2(x)`, `log10(x)` | Base-2 and Base-10 logarithms. |
 | `logb(base, value)` | Logarithm with a custom base. |
 | `ylog2(y, x)` | Computes `y * log2(x)`. |
-| `ceil(x)`, `floor(x)`, `round(x)`, `int(x)` | Rounding functions. |
+| `ceil(x)`, `floor(x)`, `round(x)`, `trunc(x)`, `int(x)` | Rounding functions. |
 | `sign(x)` | Returns `-1.0` for negative `x`, `1.0` otherwise. |
 | `signp(x)` | Returns `1.0` for positive `x`, `0.0` otherwise. |
 | `bnd(x, period)` | Wraps `x` to the interval `[0, period)`. |
@@ -146,57 +173,61 @@ Compiles and executes an expression for a single use without replacing the defau
 | `expn(x)` | Returns the exponent part of `x`. |
 | `sfc(x)` | Returns the significand (fractional part) of `x`. |
 
-### Configuration
-*   **`MEXCE_ACCURACY`:** Define this macro before including `mexce.h` to enable higher-precision polynomial refinements for `sin()` and `cos()`, trading a small runtime cost for improved accuracy.
+## Backends
+
+`mexce` provides two code generation backends:
+
+### SSE2 Backend (Default on x86-64)
+*   Uses SSE2 scalar instructions (`addsd`, `mulsd`, etc.) for basic arithmetic
+*   Uses SSE4.1 `roundsd` instruction for rounding functions (`floor`, `ceil`, `round`, `trunc`)
+*   Calls C standard library math functions for transcendentals (`sin`, `cos`, `exp`, `log`, etc.)
+*   Faster on modern CPUs due to better pipelining and avoiding x87 state transitions
+*   Results in XMM0 register (standard x64 ABI return convention)
+
+### x87 Backend (Default on 32-bit x86)
+*   Uses x87 FPU instructions with 80-bit internal precision
+*   All operations (including transcendentals) use native x87 instructions
+*   Stack-based architecture can be more compact for certain expression patterns
+*   Required for Common Subexpression Elimination (CSE) feature
+*   On x86-64, enable with `eval.use_x87_backend();`
 
 ## Performance Analysis
 
-`mexce` is designed to produce code with performance comparable to a statically optimizing compiler. Its efficiency was measured using a benchmark suite of 44,229 expressions.
+`mexce` is designed to produce code with performance comparable to a statically optimizing compiler. Its efficiency was measured using a benchmark suite of 44,229 expressions on GitHub Actions CI (Ubuntu runner).
 
-### Benchmark Methodology
-*   **System:** AMD Ryzen 7 7840U CPU
-*   **Compiler:** GNU GCC 13.1.0 with flags `-O3 -DNDEBUG -Wall -Wextra -Wpedantic`.
-*   **Reference Standard:** A high-precision "golden reference" for each expression was generated using Python's **SymPy** library with arbitrary-precision rationals.
-*   **Accuracy Metric (ULP):** **Units in the Last Place (ULP)** measures the distance between two floating-point numbers by counting how many representable values exist between them. A ULP of 0 means the numbers are identical. The ULP is computed via a monotonic mapping of floating-point values to integers and finding their absolute difference.
+### Benchmark Results
 
-### Speed
+| Configuration | Avg Compile | Avg Eval | Total Eval |
+| :--- | ---: | ---: | ---: |
+| **Native (baseline)** | — | 7.0 ns | 32.7 ms |
+| **SSE2** | 174 μs | **6.0 ns** | 27.2 ms |
+| **SSE2 + fast-math** | 177 μs | **6.0 ns** | 26.8 ms |
+| **x87** | 135 μs | 8.0 ns | 34.8 ms |
+| **x87 + fast-math** | 138 μs | 8.0 ns | 34.7 ms |
 
-The benchmark measures the average time per evaluation. For this scalar workload, `mexce`'s JIT-compiled code performed favorably against statically compiled C++ functions.
-
-| Metric | Mexce | Native Compiler |
-| :--- | :--- | :--- |
-| **Functions Benchmarked** | 44,229 | 44,229 |
-| **Average Runtime per Function** | **4.0 ns** | 5.0 ns |
-| **Total Execution Time** | 19.50 sec | 21.34 sec |
-
-The performance characteristics are attributed to the code generation strategy. For sequential scalar floating-point math, the x87 FPU's stack-based architecture can be more compact and efficient than the register-to-register operations of SSE/AVX instruction sets.
+**Key observations:**
+*   The SSE2 backend performs on par with or faster than native compiler-generated code
+*   The SSE2 backend is faster than the x87 backend due to better pipelining on modern CPUs
+*   The `fast_math` option provides modest improvement through algebraic simplification
+*   Compilation time is in the microsecond range, negligible for most use cases
 
 ### Accuracy
 
-`mexce`'s accuracy is comparable to that of the native compiler.
+Both backends produce results comparable to the native compiler. The table below shows accuracy measured in **Units in the Last Place (ULP)** against a high-precision reference computed with SymPy.
 
-#### Accuracy Distribution (ULP)
+| ULP Range | Native | SSE2 | x87 |
+| :--- | ---: | ---: | ---: |
+| 0 (exact) | 16,636 | 17,103 | 20,323 |
+| 1–16 | 26,871 | 26,254 | 23,347 |
+| 17–32 | 279 | 246 | 182 |
+| 33–64 | 152 | 154 | 138 |
+| 65–128 | 96 | 88 | 62 |
+| >128 | 195 | 139 | 177 |
 
-| ULP Range      | Mexce vs Reference | Compiler vs Reference | Mexce vs Compiler |
-|----------------|--------------------|-----------------------|-------------------|
-| 0 (exact)      | 20,164             | 16,636                | 24,183            |
-| 1–16           | 23,494             | 26,870                | 19,537            |
-| 17–32          | 198                | 279                   | 181               |
-| 33–64          | 136                | 152                   | 116               |
-| 65–128         | 60                 | 97                    | 59                |
-| 129–256        | 33                 | 50                    | 31                |
-| 257–512        | 66                 | 31                    | 38                |
-| 513–1024       | 13                 | 25                    | 17                |
-| 1025–2048      | 13                 | 19                    | 11                |
-| 2049–4096      | 21                 | 8                     | 12                |
-| 4097–8192      | 6                  | 13                    | 12                |
-| 8193–16,384    | 7                  | 8                     | 3                 |
-| 16,385–32,768  | 1                  | 2                     | 2                 |
-| 32,769–65,536  | 2                  | 1                     | 1                 |
-| >65,536        | 15                 | 31                    | 19                |
-
-#### Analysis of Large Deviations
-The few cases with very large ULP deviations occur where the mathematically correct result is infinity. The symbolic reference engine correctly returns `inf`. However, finite-precision floating-point hardware correctly handles this by overflowing to a very large finite number. This is the expected behavior emulated by both `mexce` and the native compiler.
+**Notes:**
+*   The x87 backend produces more exact results due to 80-bit internal precision
+*   Large ULP deviations occur in edge cases involving infinity or very large numbers
+*   Both backends match the native compiler's handling of special values
 
 ## Building the Benchmarks
 
@@ -213,7 +244,6 @@ ctest --test-dir build
 # Run the full performance benchmark
 cmake --build build --target run_benchmarks
 ```
-*   The benchmark harness requires **OpenMP** for its timer; this is not a dependency of the `mexce` library itself.
 
 ## License
 

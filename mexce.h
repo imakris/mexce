@@ -301,6 +301,23 @@ public:
      */
     options& opts() { return m_options; }
 
+    // --- Fluent option setters ---
+    // These methods provide a cleaner API for setting individual options.
+    // All return *this to allow method chaining.
+
+    /** Enable algebraic simplifications (x-x→0, x/x→1, 0*x→0). May change results for NaN/Inf. */
+    evaluator& enable_fast_math() { m_options.fast_math = true; return *this; }
+    evaluator& disable_fast_math() { m_options.fast_math = false; return *this; }
+
+    /** Enable common subexpression elimination (requires x87 backend). */
+    evaluator& enable_cse() { m_options.enable_cse = true; return *this; }
+    evaluator& disable_cse() { m_options.enable_cse = false; return *this; }
+
+    /** Use x87 FPU backend instead of SSE2 (always used on 32-bit x86). */
+    evaluator& use_x87_backend() { m_options.prefer_x87 = true; return *this; }
+    /** Use SSE2 backend (default on x86-64, not available on 32-bit x86). */
+    evaluator& use_sse2_backend() { m_options.prefer_x87 = false; return *this; }
+
 private:
     options                 m_options;
 
