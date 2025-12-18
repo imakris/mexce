@@ -2958,16 +2958,10 @@ void normalize_commutative_operands(elist_t& elist)
             // chunk0 is "greater", should be in args[1] position - need to swap
             // Swap by splicing: move chunk1 to after chunk0 (before the function node)
             // After swap: [..., chunk0_elements, chunk1_elements, func]
-            
-            // Save the positions before modifying
-            auto chunk0_start = chunk0.first;
-            auto chunk1_start = chunk1.first;
-            auto chunk1_end = chunk1.second;  // This is where chunk0 starts
-            auto func_pos = it;
-            
+
             // Move chunk1 to right before the function node (after chunk0)
             // splice(pos, list, first, last) inserts [first, last) before pos
-            elist.splice(func_pos, elist, chunk1_start, chunk1_end);
+            elist.splice(it, elist, chunk1.first, chunk1.second);
         }
     }
     
@@ -5647,107 +5641,100 @@ void evaluator::set_expression(std::string e)
             return true;
         };
 
-        // Need to re-link arguments after any modifications
-        bool modified = false;
-        for (auto y = m_elist.begin(); y != m_elist.end(); ) {
-            auto y_next = next(y);
-            if (y->type == Element_type::CFUNC) {
+        // Apply fast-math simplifications iteratively
+        // After each modification, we re-link arguments and restart the loop
+        // because erasing elements invalidates other functions' args pointers
+        bool modified;
+        do {
+            modified = false;
+            for (auto y = m_elist.begin(); y != m_elist.end(); ++y) {
+                if (y->type != Element_type::CFUNC) continue;
                 auto f = y->f;
-                if (f->num_args == 2) {
-                    // Check for self-canceling patterns: x - x → 0, x / x → 1
-                    if (f->name == "sub" || f->name == "div") {
-                        auto arg0_chunk = get_dependent_chunk(f->args[0]);
-                        auto arg1_chunk = get_dependent_chunk(f->args[1]);
-                        if (chunks_equal(arg0_chunk.first, arg0_chunk.second,
-                                         arg1_chunk.first, arg1_chunk.second)) {
-                            // x - x → 0, x / x → 1
-                            double result = (f->name == "sub") ? 0.0 : 1.0;
-                            // Erase both argument subtrees and replace function with constant
-                            m_elist.erase(arg1_chunk.first, arg1_chunk.second);
-                            // Re-get arg0 chunk after erasing arg1 (iterators may have shifted)
-                            arg0_chunk = get_dependent_chunk(f->args[0]);
-                            m_elist.erase(arg0_chunk.first, arg0_chunk.second);
-                            *y = Element(make_intermediate_constant(this, result));
-                            modified = true;
-                            y = y_next;
-                            continue;
-                        }
-                    }
-                    // Check for multiplication by zero: 0 * x → 0, x * 0 → 0
-                    if (f->name == "mul") {
-                        bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
-                        bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
-                        if (arg0_is_zero || arg1_is_zero) {
-                            // Erase both argument subtrees and replace function with 0
-                            auto arg0_chunk = get_dependent_chunk(f->args[0]);
-                            auto arg1_chunk = get_dependent_chunk(f->args[1]);
-                            m_elist.erase(arg1_chunk.first, arg1_chunk.second);
-                            arg0_chunk = get_dependent_chunk(f->args[0]);
-                            m_elist.erase(arg0_chunk.first, arg0_chunk.second);
-                            *y = Element(make_intermediate_constant(this, 0.0));
-                            modified = true;
-                            y = y_next;
-                            continue;
-                        }
-                    }
-                    // Check for division of zero: 0 / x → 0
-                    if (f->name == "div") {
-                        bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
-                        if (arg1_is_zero) {
-                            // Erase both argument subtrees and replace function with 0
-                            auto arg0_chunk = get_dependent_chunk(f->args[0]);
-                            auto arg1_chunk = get_dependent_chunk(f->args[1]);
-                            m_elist.erase(arg1_chunk.first, arg1_chunk.second);
-                            arg0_chunk = get_dependent_chunk(f->args[0]);
-                            m_elist.erase(arg0_chunk.first, arg0_chunk.second);
-                            *y = Element(make_intermediate_constant(this, 0.0));
-                            modified = true;
-                            y = y_next;
-                            continue;
-                        }
-                    }
-                    // Identity simplifications: keep one argument, remove the other
-                    // Helper to replace op(a, b) with just one argument
-                    auto replace_with_arg = [&](int keep_arg) {
-                        int remove_arg = 1 - keep_arg;
-                        auto remove_chunk = get_dependent_chunk(f->args[remove_arg]);
-                        m_elist.erase(remove_chunk.first, remove_chunk.second);
-                        // The kept argument chunk is already in place, just remove the function node
-                        m_elist.erase(y);
+                if (f->num_args != 2) continue;
+
+                // Check for self-canceling patterns: x - x → 0, x / x → 1
+                if (f->name == "sub" || f->name == "div") {
+                    auto arg0_chunk = get_dependent_chunk(f->args[0]);
+                    auto arg1_chunk = get_dependent_chunk(f->args[1]);
+                    if (chunks_equal(arg0_chunk.first, arg0_chunk.second,
+                                     arg1_chunk.first, arg1_chunk.second)) {
+                        double result = (f->name == "sub") ? 0.0 : 1.0;
+                        m_elist.erase(arg1_chunk.first, arg1_chunk.second);
+                        arg0_chunk = get_dependent_chunk(f->args[0]);
+                        m_elist.erase(arg0_chunk.first, arg0_chunk.second);
+                        *y = Element(make_intermediate_constant(this, result));
                         modified = true;
-                    };
-                    // 0 + x → x, x + 0 → x
-                    if (f->name == "add") {
-                        bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
-                        bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
-                        if (arg0_is_zero) { replace_with_arg(1); y = y_next; continue; }
-                        if (arg1_is_zero) { replace_with_arg(0); y = y_next; continue; }
-                    }
-                    // 1 * x → x, x * 1 → x
-                    if (f->name == "mul") {
-                        bool arg0_is_one = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 1.0);
-                        bool arg1_is_one = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 1.0);
-                        if (arg0_is_one) { replace_with_arg(1); y = y_next; continue; }
-                        if (arg1_is_one) { replace_with_arg(0); y = y_next; continue; }
-                    }
-                    // x - 0 → x
-                    if (f->name == "sub") {
-                        bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
-                        if (arg0_is_zero) { replace_with_arg(1); y = y_next; continue; }
-                    }
-                    // x / 1 → x
-                    if (f->name == "div") {
-                        bool arg0_is_one = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 1.0);
-                        if (arg0_is_one) { replace_with_arg(1); y = y_next; continue; }
+                        break;
                     }
                 }
+                // Check for multiplication by zero: 0 * x → 0, x * 0 → 0
+                if (f->name == "mul") {
+                    bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
+                    bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
+                    if (arg0_is_zero || arg1_is_zero) {
+                        auto arg0_chunk = get_dependent_chunk(f->args[0]);
+                        auto arg1_chunk = get_dependent_chunk(f->args[1]);
+                        m_elist.erase(arg1_chunk.first, arg1_chunk.second);
+                        arg0_chunk = get_dependent_chunk(f->args[0]);
+                        m_elist.erase(arg0_chunk.first, arg0_chunk.second);
+                        *y = Element(make_intermediate_constant(this, 0.0));
+                        modified = true;
+                        break;
+                    }
+                }
+                // Check for division of zero: 0 / x → 0
+                if (f->name == "div") {
+                    bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
+                    if (arg1_is_zero) {
+                        auto arg0_chunk = get_dependent_chunk(f->args[0]);
+                        auto arg1_chunk = get_dependent_chunk(f->args[1]);
+                        m_elist.erase(arg1_chunk.first, arg1_chunk.second);
+                        arg0_chunk = get_dependent_chunk(f->args[0]);
+                        m_elist.erase(arg0_chunk.first, arg0_chunk.second);
+                        *y = Element(make_intermediate_constant(this, 0.0));
+                        modified = true;
+                        break;
+                    }
+                }
+                // Identity simplifications: keep one argument, remove the other
+                auto try_replace_with_arg = [&](int keep_arg) -> bool {
+                    int remove_arg = 1 - keep_arg;
+                    auto remove_chunk = get_dependent_chunk(f->args[remove_arg]);
+                    m_elist.erase(remove_chunk.first, remove_chunk.second);
+                    m_elist.erase(y);
+                    modified = true;
+                    return true;
+                };
+                // 0 + x → x, x + 0 → x
+                if (f->name == "add") {
+                    bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
+                    bool arg1_is_zero = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 0.0);
+                    if (arg0_is_zero && try_replace_with_arg(1)) break;
+                    if (arg1_is_zero && try_replace_with_arg(0)) break;
+                }
+                // 1 * x → x, x * 1 → x
+                if (f->name == "mul") {
+                    bool arg0_is_one = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 1.0);
+                    bool arg1_is_one = (f->args[1]->type == Element_type::CCONST && f->args[1]->c->value == 1.0);
+                    if (arg0_is_one && try_replace_with_arg(1)) break;
+                    if (arg1_is_one && try_replace_with_arg(0)) break;
+                }
+                // x - 0 → x
+                if (f->name == "sub") {
+                    bool arg0_is_zero = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 0.0);
+                    if (arg0_is_zero && try_replace_with_arg(1)) break;
+                }
+                // x / 1 → x
+                if (f->name == "div") {
+                    bool arg0_is_one = (f->args[0]->type == Element_type::CCONST && f->args[0]->c->value == 1.0);
+                    if (arg0_is_one && try_replace_with_arg(1)) break;
+                }
             }
-            y = y_next;
-        }
-        // Re-link arguments after fast-math modifications
-        if (modified) {
-            link_arguments(m_elist);
-        }
+            // Re-link arguments after each modification
+            if (modified) {
+                link_arguments(m_elist);
+            }
+        } while (modified);
     }
 
     // choose more suitable functions, where applicable
