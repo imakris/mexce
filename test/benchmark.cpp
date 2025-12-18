@@ -370,6 +370,7 @@ struct benchmark_record {
     uint64_t native_avg_ns = 0;
     long long native_dur_ns = 0;
     std::string error;
+    mexce::backend_type backend_used = mexce::backend_type::none;
 };
 
 // Results for a single configuration (summary statistics)
@@ -383,17 +384,30 @@ struct benchmark_result {
     size_t eval_count = 0;
     size_t compile_fail_count = 0;
     size_t eval_fail_count = 0;
+    size_t sse2_backend_count = 0;  // Expressions that actually used SSE2 backend
+    size_t x87_backend_count = 0;   // Expressions that actually used x87 backend
 
     // Timing stats
     long long total_compile_ns = 0;
     long long total_eval_ns = 0;
     double avg_compile_ns = 0.0;
     double avg_eval_ns = 0.0;
+
+    // Timing stats for expressions using the actual requested backend only
+    // (excludes expressions that fell back to a different backend)
+    long long total_eval_ns_actual_backend = 0;
+    size_t eval_count_actual_backend = 0;
+
+    // Native timing for expressions that used the actual requested backend AND have native
+    // This enables fair 1:1 comparison between mexce and native for the same expression set
+    long long total_native_ns_actual_backend = 0;
+    size_t native_count_actual_backend = 0;
+
     uint64_t compile_min_ns = std::numeric_limits<uint64_t>::max();
     uint64_t compile_max_ns = 0;
     std::vector<uint64_t> compile_times;
 
-    // Native timing
+    // Native timing (all native expressions, for reference)
     long long total_native_ns = 0;
     size_t benchmarked_native_count = 0;
 
@@ -517,12 +531,20 @@ static benchmark_result run_benchmark(
             rec.optimized_expr = eval.get_optimized_expression();
             rec.bytes_expr = eval.get_byte_representation();
             rec.compiled = true;
+            rec.backend_used = eval.get_backend();
 
             result.compiled_count++;
             result.total_compile_ns += (long long)rec.compile_ns;
             result.compile_min_ns = std::min(result.compile_min_ns, rec.compile_ns);
             result.compile_max_ns = std::max(result.compile_max_ns, rec.compile_ns);
             result.compile_times.push_back(rec.compile_ns);
+
+            // Track which backend was actually used
+            if (rec.backend_used == mexce::backend_type::sse2) {
+                result.sse2_backend_count++;
+            } else if (rec.backend_used == mexce::backend_type::x87) {
+                result.x87_backend_count++;
+            }
         }
         catch (const std::exception& e) {
             rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
@@ -580,27 +602,56 @@ static benchmark_result run_benchmark(
 
         result.total_eval_ns += rec.dur_ns;
 
-        // Timing benchmark for native
-        if (rec.native_eval_ok) {
-            native_timing_samples.clear();
-            for (int trial = 0; trial < timing_trials; ++trial) {
-                mexce::stopwatch timer;
-                for (size_t i = 0; i < iterations_u; ++i) {
-                    (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
-                }
-                native_timing_samples.push_back(timer.elapsed_nanoseconds());
-            }
-            std::nth_element(native_timing_samples.begin(),
-                             native_timing_samples.begin() + native_timing_samples.size() / 2,
-                             native_timing_samples.end());
-            rec.native_dur_ns = native_timing_samples[native_timing_samples.size() / 2];
-            rec.native_avg_ns = (uint64_t)((long double)rec.native_dur_ns / (long double)iterations_u + 0.5L);
-
-            result.total_native_ns += rec.native_dur_ns;
-            result.benchmarked_native_count++;
+        // Track timing for expressions that used the actual requested backend
+        // (i.e., SSE2 timing only includes expressions that actually used SSE2)
+        bool used_requested_backend = (cfg.prefer_x87 && rec.backend_used == mexce::backend_type::x87) ||
+                                      (!cfg.prefer_x87 && rec.backend_used == mexce::backend_type::sse2);
+        if (used_requested_backend) {
+            result.total_eval_ns_actual_backend += rec.dur_ns;
+            result.eval_count_actual_backend++;
         }
 
         result.records.push_back(rec);
+    }
+
+    // Separate pass for native timing - covers ALL native expressions
+    // Also tracks which native expressions correspond to the "actual backend" set for 1:1 comparison
+    const size_t native_count = mexce::benchmark_data::kNativeExpressionsCount;
+    for (size_t idx = 0; idx < native_count; ++idx) {
+        native_ctx.a = 1.1; native_ctx.b = 2.2; native_ctx.c = 3.3;
+        native_ctx.x = 4.4; native_ctx.y = 5.5; native_ctx.z = 6.6; native_ctx.w = 7.7;
+
+        native_timing_samples.clear();
+        for (int trial = 0; trial < timing_trials; ++trial) {
+            mexce::stopwatch timer;
+            for (size_t i = 0; i < iterations_u; ++i) {
+                (void)mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+            }
+            native_timing_samples.push_back(timer.elapsed_nanoseconds());
+        }
+        std::nth_element(native_timing_samples.begin(),
+                         native_timing_samples.begin() + native_timing_samples.size() / 2,
+                         native_timing_samples.end());
+        long long native_dur = native_timing_samples[native_timing_samples.size() / 2];
+
+        result.total_native_ns += native_dur;
+        result.benchmarked_native_count++;
+
+        // Update the record if it exists
+        if (idx < result.records.size()) {
+            result.records[idx].native_dur_ns = native_dur;
+            result.records[idx].native_avg_ns = (uint64_t)((long double)native_dur / (long double)iterations_u + 0.5L);
+
+            // Check if this expression used the actual requested backend
+            // If so, include its native timing in the 1:1 comparison set
+            const auto& rec = result.records[idx];
+            bool used_requested_backend = (cfg.prefer_x87 && rec.backend_used == mexce::backend_type::x87) ||
+                                          (!cfg.prefer_x87 && rec.backend_used == mexce::backend_type::sse2);
+            if (used_requested_backend && rec.native_available) {
+                result.total_native_ns_actual_backend += native_dur;
+                result.native_count_actual_backend++;
+            }
+        }
     }
 
     // Compute averages
@@ -613,7 +664,16 @@ static benchmark_result run_benchmark(
             ((double)result.eval_count * (double)iterations);
     }
 
-    progress_out << " done (" << result.compiled_count << "/" << total_expressions << " compiled)\n";
+    // Show compilation stats including backend breakdown
+    progress_out << " done (" << result.compiled_count << "/" << total_expressions << " compiled";
+    if (result.sse2_backend_count > 0 && result.x87_backend_count > 0) {
+        progress_out << ": " << result.sse2_backend_count << " SSE2, " << result.x87_backend_count << " x87";
+    } else if (result.sse2_backend_count > 0) {
+        progress_out << ", all SSE2";
+    } else if (result.x87_backend_count > 0) {
+        progress_out << ", all x87";
+    }
+    progress_out << ")\n";
     return result;
 }
 
@@ -1275,6 +1335,61 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     out << "TIMING COMPARISON\n";
     out << line << "\n\n";
 
+    // Find the intersection of expressions that work for ALL backends
+    // This ensures a fair 1:1 comparison across Native and all mexce configs
+    const size_t total_expr = results.empty() ? 0 : results[0].records.size();
+    std::vector<bool> in_intersection(total_expr, false);
+    size_t intersection_count = 0;
+
+    for (size_t idx = 0; idx < total_expr; ++idx) {
+        // Must have native available
+        if (!results[0].records[idx].native_available) continue;
+
+        // Must have compiled successfully in ALL configs
+        bool all_compiled = true;
+        for (const auto& r : results) {
+            if (idx >= r.records.size() || !r.records[idx].compiled) {
+                all_compiled = false;
+                break;
+            }
+        }
+        if (!all_compiled) continue;
+
+        in_intersection[idx] = true;
+        intersection_count++;
+    }
+
+    // Compute timing for the intersection set only
+    struct intersection_timing {
+        long long total_eval_ns = 0;
+        long long total_native_ns = 0;
+        long long total_compile_ns = 0;
+        size_t count = 0;
+    };
+
+    // Native timing for intersection
+    long long native_total_ns = 0;
+    for (size_t idx = 0; idx < total_expr && idx < results[0].records.size(); ++idx) {
+        if (in_intersection[idx]) {
+            native_total_ns += results[0].records[idx].native_dur_ns;
+        }
+    }
+
+    // Per-config timing for intersection
+    std::vector<intersection_timing> intersection_timings(results.size());
+    for (size_t cfg_idx = 0; cfg_idx < results.size(); ++cfg_idx) {
+        const auto& r = results[cfg_idx];
+        auto& timing = intersection_timings[cfg_idx];
+        for (size_t idx = 0; idx < total_expr && idx < r.records.size(); ++idx) {
+            if (in_intersection[idx]) {
+                timing.total_eval_ns += r.records[idx].dur_ns;
+                timing.total_native_ns += r.records[idx].native_dur_ns;
+                timing.total_compile_ns += (long long)r.records[idx].compile_ns;
+                timing.count++;
+            }
+        }
+    }
+
     // Find column widths
     size_t name_width = std::string("Configuration").size();
     for (const auto& r : results) {
@@ -1294,31 +1409,45 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
         << std::string(col_width, '-') << "  "
         << std::string(col_width, '-') << "\n";
 
-    // Print native results first (from the first result's native timing)
-    if (!results.empty() && results[0].benchmarked_native_count > 0) {
-        uint64_t native_avg_eval_ns = (uint64_t)((double)results[0].total_native_ns /
-            ((double)results[0].benchmarked_native_count * (double)config.iterations) + 0.5);
+    // Print Native row first
+    if (intersection_count > 0) {
+        double native_avg = (double)native_total_ns / ((double)intersection_count * (double)config.iterations);
         out << std::left << std::setw((int)name_width) << "Native" << "  "
             << std::setw((int)col_width) << "-" << "  "
-            << std::setw((int)col_width) << format_ns(native_avg_eval_ns) << "  "
-            << std::setw((int)col_width) << format_ns((uint64_t)results[0].total_native_ns) << "\n";
+            << std::setw((int)col_width) << format_ns(native_avg) << "  "
+            << std::setw((int)col_width) << format_ns((uint64_t)native_total_ns) << "\n";
     }
 
-    for (const auto& r : results) {
+    // Print each mexce config
+    for (size_t cfg_idx = 0; cfg_idx < results.size(); ++cfg_idx) {
+        const auto& r = results[cfg_idx];
+        const auto& timing = intersection_timings[cfg_idx];
+
+        double avg_compile = (timing.count > 0) ? (double)timing.total_compile_ns / (double)timing.count : 0.0;
+        double avg_eval = (timing.count > 0) ? (double)timing.total_eval_ns / ((double)timing.count * (double)config.iterations) : 0.0;
+
         out << std::left << std::setw((int)name_width) << r.config_name << "  "
-            << std::setw((int)col_width) << format_ns(r.avg_compile_ns) << "  "
-            << std::setw((int)col_width) << format_ns(r.avg_eval_ns) << "  "
-            << std::setw((int)col_width) << format_ns((uint64_t)r.total_eval_ns) << "\n";
+            << std::setw((int)col_width) << format_ns(avg_compile) << "  "
+            << std::setw((int)col_width) << format_ns(avg_eval) << "  "
+            << std::setw((int)col_width) << format_ns((uint64_t)timing.total_eval_ns) << "\n";
     }
 
-    // Find fastest
-    if (!results.empty()) {
-        auto fastest_it = std::min_element(results.begin(), results.end(),
-            [](const benchmark_result& a, const benchmark_result& b) {
-                return a.avg_eval_ns < b.avg_eval_ns;
-            });
-        out << "\nFastest: " << fastest_it->config_name
-            << " (" << format_ns(fastest_it->avg_eval_ns) << " per call)\n";
+    out << "\nExpressions in intersection: " << intersection_count << " (of " << total_expr << " total)\n";
+
+    // Find fastest mexce config (using intersection timing)
+    if (!intersection_timings.empty() && intersection_count > 0) {
+        size_t fastest_idx = 0;
+        double fastest_avg = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < intersection_timings.size(); ++i) {
+            double avg = (double)intersection_timings[i].total_eval_ns /
+                ((double)intersection_count * (double)config.iterations);
+            if (avg < fastest_avg) {
+                fastest_avg = avg;
+                fastest_idx = i;
+            }
+        }
+        out << "\nFastest: " << results[fastest_idx].config_name
+            << " (" << format_ns(fastest_avg) << " per call)\n";
     }
 
     // ========== PRECISION COMPARISON ==========

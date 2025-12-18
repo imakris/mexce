@@ -246,6 +246,13 @@ namespace impl {
 
 
 
+/** Backend type used for code generation. */
+enum class backend_type {
+    none,   ///< No expression compiled yet
+    sse2,   ///< SSE2 scalar backend (x86-64 only)
+    x87     ///< x87 FPU backend (default on 32-bit, fallback on 64-bit)
+};
+
 class evaluator
 {
 public:
@@ -318,12 +325,19 @@ public:
     /** Use SSE2 backend (default on x86-64, not available on 32-bit x86). */
     evaluator& use_sse2_backend() { m_options.prefer_x87 = false; return *this; }
 
+    /**
+     * @brief Returns which backend was actually used for the current expression.
+     * This may differ from the requested backend if fallback was needed.
+     */
+    backend_type get_backend() const { return m_backend_used; }
+
 private:
     options                 m_options;
 
     bool                    is_constant_expression      = false;
     double                  constant_expression_value   = 0.0;
     bool                    m_sse2_simplify_mode        = false;  // When true, asmd_optimizer reconstructs elist instead of x87 code
+    backend_type            m_backend_used              = backend_type::none;
     size_t                  m_buffer_size               = 0;
     std::string             m_expression;
     impl::elist_t           m_elist;
@@ -5511,6 +5525,15 @@ void evaluator::set_expression(std::string e)
     // but we want it to output a simplified elist instead of x87 code.
     m_sse2_simplify_mode = is_sse2_compatible(m_elist.begin(), m_elist.end(), m_options.prefer_x87);
 
+    // Save elist state before optimization for potential fallback.
+    // If we run in SSE2 mode but the optimizer produces an elist that's too deep,
+    // we need to restore and re-run in x87 mode.
+    elist_t elist_backup;
+    bool need_fallback_check = m_sse2_simplify_mode;
+    if (need_fallback_check) {
+        elist_backup = m_elist;
+    }
+
     // Fast-math algebraic simplifications - run in a SEPARATE PASS before any optimizer
     // modifies the expression structure. This must happen before asmd_optimizer which
     // transforms the elist in ways that would confuse the chunk comparison.
@@ -5640,6 +5663,28 @@ void evaluator::set_expression(std::string e)
         y = y_next;
     }
 
+    // Check if SSE2 optimization produced an elist that's no longer SSE2-compatible.
+    // This can happen when asmd_optimizer flattens chains into too many parallel terms.
+    // If so, restore the pre-optimization elist and re-run in x87 mode.
+    if (need_fallback_check && !is_sse2_compatible(m_elist.begin(), m_elist.end(), false)) {
+        // Restore elist and re-run optimization in x87 mode
+        m_elist = std::move(elist_backup);
+        m_sse2_simplify_mode = false;
+        link_arguments(m_elist);
+
+        // Re-run the optimizer loop in x87 mode
+        for (auto y = m_elist.begin(); y != m_elist.end(); ) {
+            auto y_next = next(y);
+            if (y->type == Element_type::CFUNC) {
+                auto f = y->f;
+                if (f->optimizer != 0) {
+                    f->optimizer(y, this, &m_elist);
+                }
+            }
+            y = y_next;
+        }
+    }
+
     is_constant_expression = m_elist.size()==1 && m_elist.back().type == Element_type::CCONST;
     if (is_constant_expression) {
         constant_expression_value = m_elist.back().c->value;
@@ -5716,6 +5761,7 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 
         memcpy(buffer, code_buffer.buf.data(), m_buffer_size);
         evaluate_fptr = lock_executable_buffer(buffer, m_buffer_size);
+        m_backend_used = backend_type::sse2;
         return;
     }
 
@@ -5816,6 +5862,7 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     memcpy(buffer, code_buffer.buf.data(), m_buffer_size);
 
     evaluate_fptr = lock_executable_buffer(buffer, m_buffer_size);
+    m_backend_used = backend_type::x87;
 }
 
 } // mexce
