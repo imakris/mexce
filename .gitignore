@@ -12,3 +12,5 @@ Makefile
 # Benchmark output
 bench_expr_results.txt
 bench_expr_all_results.txt
+benchmark_results.txt
+benchmark_test.txt
