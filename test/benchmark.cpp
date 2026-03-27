@@ -23,6 +23,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -455,16 +456,28 @@ static void update_ulp_bins(uint64_t ulp, size_t& exact_zero_count, std::vector<
     ++bins[bin_idx];
 }
 
+static long long select_representative_timing(std::vector<long long> samples)
+{
+    if (samples.empty()) {
+        return 0;
+    }
+
+    auto median_it = samples.begin() + samples.size() / 2;
+    std::nth_element(samples.begin(), median_it, samples.end());
+    return *median_it;
+}
+
 // Run benchmark for a single configuration with full per-expression records
 // This is the core benchmark function used by both single and comprehensive modes
 //
 // Noise reduction strategy: Round-robin timing
 // Instead of running all timing trials for one expression back-to-back (where a
-// single VM/container scheduling hiccup can inflate ALL samples), we spread timing
-// across multiple rounds. In each round, every expression is timed once. Between
-// rounds, significant wall time passes (processing all other expressions), so a
-// hiccup in one round only affects that round's measurement. The minimum across
-// rounds is taken as the result, since noise only adds latency, never removes it.
+// single VM/container scheduling hiccup can inflate all samples), we spread timing
+// across multiple rounds. In each round, every expression in the current chunk is
+// timed once using the same precompiled evaluator instance that produced the
+// recorded metadata and correctness result. The median across rounds is used as
+// the reported time to reject sporadic slow samples without biasing toward the
+// single luckiest run.
 static benchmark_result run_benchmark(
     const mexce_config& cfg,
     int iterations,
@@ -473,12 +486,7 @@ static benchmark_result run_benchmark(
     benchmark_result result;
     result.config_name = cfg.name;
 
-    mexce::evaluator eval;
-    eval.opts().prefer_x87 = cfg.prefer_x87;
-    eval.opts().fast_math = cfg.fast_math;
-
     double a = 1.1, b = 2.2, c = 3.3, x = 4.4, y = 5.5, z = 6.6, w = 7.7;
-    eval.bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
     mexce::benchmark_data::NativeContext native_ctx{};
 
     const size_t total_expressions = mexce::benchmark_data::kExpressionCount;
@@ -488,160 +496,160 @@ static benchmark_result run_benchmark(
     const int num_rounds =
         (iterations >= 10000) ? 3 :
         (iterations >= 1000)  ? 5 : 7;
+    const size_t timing_chunk_size = 1024;
 
     result.records.reserve(total_expressions);
     result.compile_times.reserve(total_expressions);
 
     progress_out << "  Testing " << cfg.name << "..." << std::flush;
 
-    // ===== Phase 1: Compilation + Precision (single pass) =====
-    // Compile each expression, evaluate once for correctness/precision.
-    // No timing here - that's done in Phase 2 with round-robin.
+    // ===== Phase 1 + 2: Compile/evaluate in chunks, then time those same compiled evaluators =====
+    // Keeping a whole-repo set of compiled evaluators would be too memory-heavy, so
+    // we retain only a chunk at a time. Within each chunk, round-robin timing still
+    // spreads samples across many different expressions and avoids back-to-back trials.
+    for (size_t chunk_begin = 0; chunk_begin < total_expressions; chunk_begin += timing_chunk_size) {
+        const size_t chunk_end = std::min(total_expressions, chunk_begin + timing_chunk_size);
+        const size_t chunk_size = chunk_end - chunk_begin;
 
-    for (size_t idx = 0; idx < total_expressions; ++idx) {
-        const std::string expr = mexce::benchmark_data::kExpressions[idx];
-        const long double golden = mexce::benchmark_data::kGoldenResults[idx];
-        const double golden_d = static_cast<double>(golden);
+        std::vector<benchmark_record> chunk_records(chunk_size);
+        std::vector<std::unique_ptr<mexce::evaluator>> chunk_evals(chunk_size);
+        std::vector<size_t> timing_indices;
+        timing_indices.reserve(chunk_size);
 
-        a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
+        for (size_t offset = 0; offset < chunk_size; ++offset) {
+            const size_t idx = chunk_begin + offset;
+            const std::string expr = mexce::benchmark_data::kExpressions[idx];
+            const long double golden = mexce::benchmark_data::kGoldenResults[idx];
+            const double golden_d = static_cast<double>(golden);
 
-        benchmark_record rec;
-        rec.expr = expr;
-        rec.expected = golden;
-        rec.native_available = idx < mexce::benchmark_data::kNativeExpressionsCount;
-        rec.mexce_result = std::numeric_limits<double>::quiet_NaN();
-        rec.native_result = std::numeric_limits<double>::quiet_NaN();
-
-        result.expressions_tested++;
-
-        // Native evaluation (for comparison)
-        if (rec.native_available) {
-            native_ctx.a = a; native_ctx.b = b; native_ctx.c = c;
-            native_ctx.x = x; native_ctx.y = y; native_ctx.z = z; native_ctx.w = w;
-
-            rec.native_result = mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
-            rec.native_eval_ok = true;
-
-            const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
-            const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
-            rec.ulp_compiler_vs_reference = (native_zero && golden_zero) ? 0 : ulp_distance(rec.native_result, golden_d);
-
-            result.ulp_sum_comp_ref.add(rec.ulp_compiler_vs_reference);
-            update_ulp_bins(rec.ulp_compiler_vs_reference, result.exact_zero_count_comp_ref,
-                           result.ulp_bins_comp_ref, result.comparisons_comp_ref);
-        }
-
-        // Mexce compilation
-        mexce::stopwatch compile_timer;
-        try {
-            eval.set_expression(expr);
-            rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
-            rec.optimized_expr = eval.get_optimized_expression();
-            rec.bytes_expr = eval.get_byte_representation();
-            rec.compiled = true;
-            rec.backend_used = eval.get_backend();
-
-            result.compiled_count++;
-            result.total_compile_ns += (long long)rec.compile_ns;
-            result.compile_min_ns = std::min(result.compile_min_ns, rec.compile_ns);
-            result.compile_max_ns = std::max(result.compile_max_ns, rec.compile_ns);
-            result.compile_times.push_back(rec.compile_ns);
-
-            // Track which backend was actually used
-            if (rec.backend_used == mexce::backend_type::sse2) {
-                result.sse2_backend_count++;
-            } else if (rec.backend_used == mexce::backend_type::x87) {
-                result.x87_backend_count++;
-            }
-        }
-        catch (const std::exception& e) {
-            rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
-            result.compile_fail_count++;
-            rec.error = std::string("compile: ") + e.what();
-            result.records.push_back(rec);
-            continue;
-        }
-
-        // Mexce evaluation (once for precision)
-        try {
-            rec.mexce_result = eval.evaluate();
-            rec.eval_ok = true;
-            result.eval_count++;
-        }
-        catch (const std::exception& e) {
-            result.eval_fail_count++;
-            rec.error = std::string("evaluate: ") + e.what();
-            result.records.push_back(rec);
-            continue;
-        }
-
-        // ULP calculations
-        const bool mexce_zero = std::fabs(rec.mexce_result) <= (double)k_zero_abs_tol;
-        const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
-        rec.ulp_mexce_vs_reference = (mexce_zero && golden_zero) ? 0 : ulp_distance(rec.mexce_result, golden_d);
-
-        result.ulp_sum_mexce_ref.add(rec.ulp_mexce_vs_reference);
-        update_ulp_bins(rec.ulp_mexce_vs_reference, result.exact_zero_count_mexce_ref,
-                       result.ulp_bins_mexce_ref, result.comparisons_mexce_ref);
-
-        if (rec.native_eval_ok) {
-            const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
-            rec.ulp_mexce_vs_compiler = (mexce_zero && native_zero) ? 0 : ulp_distance(rec.mexce_result, rec.native_result);
-
-            result.ulp_sum_mexce_comp.add(rec.ulp_mexce_vs_compiler);
-            update_ulp_bins(rec.ulp_mexce_vs_compiler, result.exact_zero_count_mexce_comp,
-                           result.ulp_bins_mexce_comp, result.comparisons_mexce_comp);
-        }
-
-        result.records.push_back(rec);
-    }
-
-    // ===== Phase 2: Round-robin timing for mexce =====
-    // Collect indices of expressions that compiled and evaluated successfully
-    std::vector<size_t> timing_indices;
-    timing_indices.reserve(result.eval_count);
-    for (size_t idx = 0; idx < result.records.size(); ++idx) {
-        if (result.records[idx].compiled && result.records[idx].eval_ok) {
-            timing_indices.push_back(idx);
-        }
-    }
-
-    // Per-expression timing samples across rounds
-    std::vector<std::vector<long long>> round_timings(result.records.size());
-    for (size_t idx : timing_indices) {
-        round_timings[idx].reserve(static_cast<size_t>(num_rounds));
-    }
-
-    for (int round = 0; round < num_rounds; ++round) {
-        for (size_t idx : timing_indices) {
             a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
-            eval.set_expression(result.records[idx].expr);
 
-            mexce::stopwatch timer;
-            for (size_t i = 0; i < iterations_u; ++i) {
-                (void)eval.evaluate();
+            benchmark_record& rec = chunk_records[offset];
+            rec.expr = expr;
+            rec.expected = golden;
+            rec.native_available = idx < mexce::benchmark_data::kNativeExpressionsCount;
+            rec.mexce_result = std::numeric_limits<double>::quiet_NaN();
+            rec.native_result = std::numeric_limits<double>::quiet_NaN();
+
+            result.expressions_tested++;
+
+            if (rec.native_available) {
+                native_ctx.a = a; native_ctx.b = b; native_ctx.c = c;
+                native_ctx.x = x; native_ctx.y = y; native_ctx.z = z; native_ctx.w = w;
+
+                rec.native_result = mexce::benchmark_data::kNativeExpressions[idx](native_ctx);
+                rec.native_eval_ok = true;
+
+                const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
+                const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
+                rec.ulp_compiler_vs_reference = (native_zero && golden_zero) ? 0 : ulp_distance(rec.native_result, golden_d);
+
+                result.ulp_sum_comp_ref.add(rec.ulp_compiler_vs_reference);
+                update_ulp_bins(rec.ulp_compiler_vs_reference, result.exact_zero_count_comp_ref,
+                               result.ulp_bins_comp_ref, result.comparisons_comp_ref);
             }
-            round_timings[idx].push_back(timer.elapsed_nanoseconds());
+
+            std::unique_ptr<mexce::evaluator> timed_eval(new mexce::evaluator());
+            timed_eval->opts().prefer_x87 = cfg.prefer_x87;
+            timed_eval->opts().fast_math = cfg.fast_math;
+            timed_eval->bind(a, "a", b, "b", c, "c", x, "x", y, "y", z, "z", w, "w");
+
+            mexce::stopwatch compile_timer;
+            try {
+                timed_eval->set_expression(expr);
+                rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
+                rec.optimized_expr = timed_eval->get_optimized_expression();
+                rec.bytes_expr = timed_eval->get_byte_representation();
+                rec.compiled = true;
+                rec.backend_used = timed_eval->get_backend();
+
+                result.compiled_count++;
+                result.total_compile_ns += (long long)rec.compile_ns;
+                result.compile_min_ns = std::min(result.compile_min_ns, rec.compile_ns);
+                result.compile_max_ns = std::max(result.compile_max_ns, rec.compile_ns);
+                result.compile_times.push_back(rec.compile_ns);
+
+                if (rec.backend_used == mexce::backend_type::sse2) {
+                    result.sse2_backend_count++;
+                } else if (rec.backend_used == mexce::backend_type::x87) {
+                    result.x87_backend_count++;
+                }
+            }
+            catch (const std::exception& e) {
+                rec.compile_ns = (uint64_t)compile_timer.elapsed_nanoseconds();
+                result.compile_fail_count++;
+                rec.error = std::string("compile: ") + e.what();
+                continue;
+            }
+
+            try {
+                rec.mexce_result = timed_eval->evaluate();
+                rec.eval_ok = true;
+                result.eval_count++;
+            }
+            catch (const std::exception& e) {
+                result.eval_fail_count++;
+                rec.error = std::string("evaluate: ") + e.what();
+                continue;
+            }
+
+            const bool mexce_zero = std::fabs(rec.mexce_result) <= (double)k_zero_abs_tol;
+            const bool golden_zero = std::abs(golden) <= k_zero_abs_tol;
+            rec.ulp_mexce_vs_reference = (mexce_zero && golden_zero) ? 0 : ulp_distance(rec.mexce_result, golden_d);
+
+            result.ulp_sum_mexce_ref.add(rec.ulp_mexce_vs_reference);
+            update_ulp_bins(rec.ulp_mexce_vs_reference, result.exact_zero_count_mexce_ref,
+                           result.ulp_bins_mexce_ref, result.comparisons_mexce_ref);
+
+            if (rec.native_eval_ok) {
+                const bool native_zero = std::fabs(rec.native_result) <= (double)k_zero_abs_tol;
+                rec.ulp_mexce_vs_compiler = (mexce_zero && native_zero) ? 0 : ulp_distance(rec.mexce_result, rec.native_result);
+
+                result.ulp_sum_mexce_comp.add(rec.ulp_mexce_vs_compiler);
+                update_ulp_bins(rec.ulp_mexce_vs_compiler, result.exact_zero_count_mexce_comp,
+                               result.ulp_bins_mexce_comp, result.comparisons_mexce_comp);
+            }
+
+            timing_indices.push_back(offset);
+            chunk_evals[offset] = std::move(timed_eval);
         }
-    }
 
-    // Select best timing: take the minimum across rounds.
-    // Noise (scheduling, interrupts, cache misses) only adds latency, so the
-    // fastest observed run is the closest to the true execution time.
-    for (size_t idx : timing_indices) {
-        long long best = *std::min_element(round_timings[idx].begin(),
-                                           round_timings[idx].end());
+        std::vector<std::vector<long long>> round_timings(chunk_size);
+        for (size_t offset : timing_indices) {
+            round_timings[offset].reserve(static_cast<size_t>(num_rounds));
+        }
 
-        result.records[idx].dur_ns = best;
-        result.records[idx].avg_ns = (uint64_t)((long double)best / (long double)iterations_u + 0.5L);
+        for (int round = 0; round < num_rounds; ++round) {
+            for (size_t offset : timing_indices) {
+                a = 1.1; b = 2.2; c = 3.3; x = 4.4; y = 5.5; z = 6.6; w = 7.7;
 
-        result.total_eval_ns += best;
+                mexce::stopwatch timer;
+                for (size_t i = 0; i < iterations_u; ++i) {
+                    (void)chunk_evals[offset]->evaluate();
+                }
+                round_timings[offset].push_back(timer.elapsed_nanoseconds());
+            }
+        }
 
-        bool used_requested_backend = (cfg.prefer_x87 && result.records[idx].backend_used == mexce::backend_type::x87) ||
-                                      (!cfg.prefer_x87 && result.records[idx].backend_used == mexce::backend_type::sse2);
-        if (used_requested_backend) {
-            result.total_eval_ns_actual_backend += best;
-            result.eval_count_actual_backend++;
+        for (size_t offset : timing_indices) {
+            benchmark_record& rec = chunk_records[offset];
+            long long representative = select_representative_timing(round_timings[offset]);
+
+            rec.dur_ns = representative;
+            rec.avg_ns = (uint64_t)((long double)representative / (long double)iterations_u + 0.5L);
+
+            result.total_eval_ns += representative;
+
+            bool used_requested_backend = (cfg.prefer_x87 && rec.backend_used == mexce::backend_type::x87) ||
+                                          (!cfg.prefer_x87 && rec.backend_used == mexce::backend_type::sse2);
+            if (used_requested_backend) {
+                result.total_eval_ns_actual_backend += representative;
+                result.eval_count_actual_backend++;
+            }
+        }
+
+        for (auto& rec : chunk_records) {
+            result.records.push_back(std::move(rec));
         }
     }
 
@@ -666,10 +674,9 @@ static benchmark_result run_benchmark(
         }
     }
 
-    // Select best native timing (minimum across rounds)
+    // Select representative native timing (median across rounds)
     for (size_t idx = 0; idx < native_count; ++idx) {
-        long long native_dur = *std::min_element(native_round_timings[idx].begin(),
-                                                  native_round_timings[idx].end());
+        long long native_dur = select_representative_timing(native_round_timings[idx]);
 
         result.total_native_ns += native_dur;
         result.benchmarked_native_count++;
@@ -707,7 +714,7 @@ static benchmark_result run_benchmark(
     } else if (result.x87_backend_count > 0) {
         progress_out << ", all x87";
     }
-    progress_out << ", " << num_rounds << " timing rounds)\n";
+    progress_out << ", " << num_rounds << " timing rounds, median-of-rounds)\n";
     return result;
 }
 
