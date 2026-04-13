@@ -472,6 +472,18 @@ void test_binding_name_conflicts(TestSuite& suite) {
 void test_mexce_parsing_exception_class(TestSuite& suite) {
     mexce::mexce_parsing_exception ex("custom message", 3);
     suite.expect_true("mexce_parsing_exception_message", std::string(ex.what()) == "custom message");
+    suite.expect_true("mexce_parsing_exception_position", ex.position() == 3);
+
+    // The position accessor should report the offset of the offending character
+    // when thrown by the parser.
+    try {
+        mexce::evaluator().set_expression("1 + ?");
+        suite.expect_true("mexce_parsing_exception_parser_throws", false);
+    }
+    catch (const mexce::mexce_parsing_exception& thrown) {
+        suite.expect_true("mexce_parsing_exception_parser_position_nonzero",
+            thrown.position() > 0);
+    }
 }
 
 void test_memory_management(TestSuite& suite) {
@@ -620,6 +632,36 @@ void test_parsing_errors(TestSuite& suite) {
     suite.expect_throw<mexce::mexce_parsing_exception>("unexpected_end_of_expression", [] {
         mexce::evaluator().set_expression("1+");
     }, "Unexpected end of expression");
+
+    // Nesting depth limit (DoS hardening).
+    {
+        std::string deep;
+        for (int i = 0; i < MEXCE_MAX_NESTING_DEPTH + 1; ++i) deep += "(";
+        deep += "1";
+        for (int i = 0; i < MEXCE_MAX_NESTING_DEPTH + 1; ++i) deep += ")";
+        suite.expect_throw<mexce::mexce_parsing_exception>("nesting_too_deep", [&] {
+            mexce::evaluator().set_expression(deep);
+        }, "Expression exceeds MEXCE_MAX_NESTING_DEPTH");
+    }
+
+    // Expressions below the nesting limit must still compile.
+    {
+        std::string ok;
+        const int d = 16;
+        for (int i = 0; i < d; ++i) ok += "(";
+        ok += "1";
+        for (int i = 0; i < d; ++i) ok += ")";
+        mexce::evaluator e;
+        e.set_expression(ok);
+        suite.expect_near("nesting_below_limit", e.evaluate(), 1.0);
+    }
+
+    // Numeric-literal overflow (atof silently produced Inf; strtod now throws).
+    // The tokenizer requires a sign after the exponent marker, so use an
+    // explicit sign here.
+    suite.expect_throw<mexce::mexce_parsing_exception>("numeric_literal_overflow", [] {
+        mexce::evaluator().set_expression("1e+400");
+    }, "Numeric literal out of range: \"1e+400\"");
 }
 
 void test_unbind_referenced_and_variadic(TestSuite& suite) {
@@ -704,6 +746,17 @@ void test_executable_buffer_failure_paths(TestSuite& suite)
         });
     }
 
+    // After a failed set_expression, evaluate() must not crash on dangling
+    // intermediate-constant pointers; it should raise a clear error instead.
+    suite.expect_throw<std::runtime_error>(
+        "evaluate_after_failed_set_expression_throws",
+        [&] { (void)eval.evaluate(); }
+    );
+
+    // Re-arming the evaluator with a valid expression must work.
+    eval.set_expression("x * 3");
+    suite.expect_near("recovery_after_failed_set_expression", eval.evaluate(), 3.0);
+
     {
         ScopedTestFlag force_mprotect_failure(mexce_test_overrides::force_mprotect_failure_flag(), true);
         suite.expect_throw<std::runtime_error>(
@@ -712,6 +765,12 @@ void test_executable_buffer_failure_paths(TestSuite& suite)
             "mprotect(PROT_READ|PROT_EXEC) failed"
         );
     }
+
+    // Same invariant after an mprotect failure.
+    suite.expect_throw<std::runtime_error>(
+        "evaluate_after_mprotect_failure_throws",
+        [&] { (void)eval.evaluate(); }
+    );
 }
 #endif
 
@@ -845,7 +904,7 @@ void test_trunc_function(TestSuite& suite) {
     suite.expect_near("trunc_neg_half", eval.evaluate(), 0.0);
 }
 
-// Test options API coverage (get_options, set_options, set_use_libm)
+// Test options API coverage (get_options, set_options)
 void test_options_api(TestSuite& suite) {
     mexce::evaluator eval;
 
@@ -866,26 +925,6 @@ void test_options_api(TestSuite& suite) {
     suite.expect_true("set_options_prefer_x87", updated.prefer_x87 == true);
     suite.expect_true("set_options_enable_cse", updated.enable_cse == true);
 
-    // Test set_use_libm convenience function
-    mexce::options libm_opts;
-    libm_opts.set_use_libm(false);
-    suite.expect_true("set_use_libm_sin", libm_opts.use_libm_sin == false);
-    suite.expect_true("set_use_libm_cos", libm_opts.use_libm_cos == false);
-    suite.expect_true("set_use_libm_tan", libm_opts.use_libm_tan == false);
-    suite.expect_true("set_use_libm_exp", libm_opts.use_libm_exp == false);
-    suite.expect_true("set_use_libm_log", libm_opts.use_libm_log == false);
-    suite.expect_true("set_use_libm_log10", libm_opts.use_libm_log10 == false);
-    suite.expect_true("set_use_libm_log2", libm_opts.use_libm_log2 == false);
-    suite.expect_true("set_use_libm_logb", libm_opts.use_libm_logb == false);
-    suite.expect_true("set_use_libm_ylog2", libm_opts.use_libm_ylog2 == false);
-    suite.expect_true("set_use_libm_generic_pow", libm_opts.use_libm_generic_pow == false);
-
-    // Test set_use_libm(true) sets all back
-    libm_opts.set_use_libm(true);
-    suite.expect_true("set_use_libm_true_sin", libm_opts.use_libm_sin == true);
-    suite.expect_true("set_use_libm_true_cos", libm_opts.use_libm_cos == true);
-    suite.expect_true("set_use_libm_true_tan", libm_opts.use_libm_tan == true);
-
     // Verify options affect compilation by testing prefer_x87
     mexce::evaluator eval2;
     double x = 2.0;
@@ -893,6 +932,18 @@ void test_options_api(TestSuite& suite) {
     eval2.use_x87_backend();
     eval2.set_expression("x + 1");
     suite.expect_near("options_affect_compilation", eval2.evaluate(), 3.0);
+
+    // Verify enable_cse forces the x87 backend (CSE is x87-only).
+    mexce::evaluator eval3;
+    double y = 3.0;
+    eval3.bind(y, "y");
+    eval3.enable_cse();
+    eval3.set_expression("y * y + y * y");
+    suite.expect_near("cse_forces_x87_value", eval3.evaluate(), 18.0);
+#ifdef MEXCE_64
+    suite.expect_true("cse_forces_x87_backend",
+        eval3.get_backend() == mexce::backend_type::x87);
+#endif
 }
 
 // Test Common Subexpression Elimination (CSE)

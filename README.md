@@ -15,7 +15,7 @@ Once an expression is compiled, subsequent evaluations are direct function calls
 The library is contained in a single header file (`mexce.h`) with no external dependencies.
 
 ### Requirements
-*   **Platforms:** Windows, Linux
+*   **Platforms:** Windows and POSIX (Linux, macOS Intel, FreeBSD, and the other BSDs). Other platforms are rejected at compile time with a clear error.
 *   **Architectures:** x86, x86-64 (SSE2 backend requires x86-64; x87 backend works on both)
 *   **Compiler:** Requires a C++11 compliant compiler.
 
@@ -126,7 +126,7 @@ eval.set_expression("x + y");      // Options take effect here
 | :--- | :--- |
 | `enable_fast_math()` | Enables algebraic simplifications that may change results for special values (NaN, Inf). Examples: `x-x → 0`, `x/x → 1`, `0*x → 0`. |
 | `use_x87_backend()` | Forces the x87 FPU backend instead of SSE2. The x87 backend uses 80-bit internal precision. On 32-bit x86, this backend is always used. |
-| `enable_cse()` | Enables Common Subexpression Elimination. Repeated identical subexpressions are computed once and reused. Only works with the x87 backend. |
+| `enable_cse()` | Enables Common Subexpression Elimination. Repeated identical subexpressions are computed once and reused. CSE is currently x87-only, so enabling it forces the x87 backend on the next compilation rather than being silently ignored on x86-64. |
 
 ## Expression Syntax
 

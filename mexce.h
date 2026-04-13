@@ -117,9 +117,11 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cerrno>
 #include <cinttypes>
 #include <cstdio>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <exception>
@@ -145,11 +147,29 @@
     #error Unknown CPU architecture
 #endif
 
-#ifdef _WIN32
+// --- Platform support ---
+//
+// mexce ships backends for Windows (x86/x64) and POSIX (x86/x64). On POSIX we
+// rely on mmap + mprotect for the executable buffer, which works identically
+// on Linux, macOS (Intel), and the BSDs. Any platform that does not match
+// these categories is rejected at compile time rather than silently emitting
+// non-functional code.
+#if defined(_WIN32)
+    #define MEXCE_PLATFORM_WIN
     #include <Windows.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__) || \
+      defined(__NetBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)
+    #define MEXCE_PLATFORM_POSIX
     #include <unistd.h>
     #include <sys/mman.h>
+    #ifndef MAP_ANONYMOUS
+        // macOS and some older systems spell it MAP_ANON.
+        #ifdef MAP_ANON
+            #define MAP_ANONYMOUS MAP_ANON
+        #endif
+    #endif
+#else
+    #error "mexce: unsupported platform (expected Windows or a POSIX system)"
 #endif
 
 
@@ -164,43 +184,23 @@ class evaluator;
 //
 // These options can be set at runtime before calling set_expression().
 // Changes take effect on the next expression compilation.
+//
+// Note: selection of libm vs inline x87 transcendentals is a compile-time
+// decision (see MEXCE_USE_LIBM_* macros below). It is intentionally not
+// exposed as a runtime option because the function bodies are assembled
+// once at static initialization.
 struct options {
-    // Algebraic simplifications (x-x→0, x/x→1, 0*x→0) ignoring IEEE corner cases
-    // Note: In strict IEEE mode, x-x is NaN when x is NaN; enable fast_math to simplify to 0
+    // Algebraic simplifications (x-x→0, x/x→1, 0*x→0) ignoring IEEE corner cases.
+    // Note: In strict IEEE mode, x-x is NaN when x is NaN; enable fast_math to simplify to 0.
     bool fast_math = false;
 
-    // Common subexpression elimination
+    // Common subexpression elimination. Currently implemented for the x87 backend
+    // only; enabling it also implies prefer_x87 so the setting is not silently
+    // dropped on x86-64.
     bool enable_cse = false;
 
-    // Force x87 backend even when SSE2 is available
+    // Force x87 backend even when SSE2 is available.
     bool prefer_x87 = false;
-
-    // Use libm functions instead of inline x87 assembly (currently compile-time only)
-    // These are included for completeness; runtime switching requires recompilation
-    bool use_libm_sin = true;
-    bool use_libm_cos = true;
-    bool use_libm_tan = true;
-    bool use_libm_exp = true;
-    bool use_libm_log = true;
-    bool use_libm_log10 = true;
-    bool use_libm_log2 = true;
-    bool use_libm_logb = true;
-    bool use_libm_ylog2 = true;
-    bool use_libm_generic_pow = true;
-
-    // Convenience: set all libm options at once
-    void set_use_libm(bool value) {
-        use_libm_sin = value;
-        use_libm_cos = value;
-        use_libm_tan = value;
-        use_libm_exp = value;
-        use_libm_log = value;
-        use_libm_log10 = value;
-        use_libm_log2 = value;
-        use_libm_logb = value;
-        use_libm_ylog2 = value;
-        use_libm_generic_pow = value;
-    }
 };
 
 
@@ -316,7 +316,13 @@ public:
     evaluator& enable_fast_math() { m_options.fast_math = true; return *this; }
     evaluator& disable_fast_math() { m_options.fast_math = false; return *this; }
 
-    /** Enable common subexpression elimination (requires x87 backend). */
+    /**
+     * Enable common subexpression elimination. CSE is currently implemented
+     * on the x87 backend only, so enabling it forces the x87 backend for the
+     * next compilation (on x86-64, this is equivalent to also calling
+     * use_x87_backend()). This behavior prevents silently dropping the option
+     * on platforms where SSE2 would otherwise be chosen.
+     */
     evaluator& enable_cse() { m_options.enable_cse = true; return *this; }
     evaluator& disable_cse() { m_options.enable_cse = false; return *this; }
 
@@ -379,6 +385,9 @@ public:
     virtual ~mexce_parsing_exception()  { }
     virtual const char* what() const throw() { return m_message.c_str(); }
 
+    /** Offset (in bytes) within the source expression where the parse error was detected. */
+    size_t position() const throw() { return m_position; }
+
 protected:
     std::string             m_message;
     size_t                  m_position;
@@ -388,8 +397,17 @@ protected:
 inline
 double evaluator::evaluate(const std::string& expression)
 {
+    // Single-shot convenience overload. Note that this allocates a fresh
+    // executable buffer on every call, which dominates its cost -- it is NOT
+    // suitable for tight loops. For repeated evaluations, call set_expression()
+    // once and evaluate() many times.
+    //
+    // Both the variable bindings *and* the current options are propagated to
+    // the temporary evaluator so that fast_math, prefer_x87, and enable_cse
+    // are not silently ignored (which was the historical behavior).
     evaluator ev;
     ev.m_variables = m_variables;
+    ev.m_options   = m_options;
     ev.set_expression(expression);
     return ev.evaluate();
 }
@@ -399,25 +417,57 @@ double evaluator::evaluate(const std::string& expression)
 namespace impl {
 
 
-#ifdef _WIN32
+// Portable page-size query. Cached after the first call. On 16KB / 64KB page
+// systems the old Linux-only path rounded sz implicitly via the kernel, but
+// mprotect/munmap took the caller's raw value; with proper rounding here the
+// sizes passed to both are always a multiple of the page size.
 inline
 size_t get_page_size()
 {
+#ifdef MEXCE_PLATFORM_WIN
     SYSTEM_INFO system_info;
     GetSystemInfo(&system_info);
-    return system_info.dwPageSize;
-}
+    return static_cast<size_t>(system_info.dwPageSize);
+#else
+    static const size_t cached = []() -> size_t {
+        long v = sysconf(_SC_PAGESIZE);
+        return (v > 0) ? static_cast<size_t>(v) : 4096u;
+    }();
+    return cached;
 #endif
+}
+
+
+inline
+size_t round_up_to_page(size_t sz)
+{
+    const size_t ps = get_page_size();
+    // Guard against overflow when sz is within one page of SIZE_MAX.
+    if (sz > (~static_cast<size_t>(0)) - (ps - 1)) {
+        return sz; // Will fail allocation downstream; avoid UB here.
+    }
+    return (sz + ps - 1) & ~(ps - 1);
+}
 
 
 inline
 uint8_t* get_executable_buffer(size_t sz)
 {
-#ifdef _WIN32
-    (void)sz; // prevent warning
+    if (sz == 0) {
+        return nullptr;
+    }
+#ifdef MEXCE_PLATFORM_WIN
+    // VirtualAlloc rounds up to the allocation granularity internally.
     return (uint8_t*)VirtualAlloc(0, sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-#elif defined(__linux__)
-    return (uint8_t*)mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#else
+    // Round sz up to a whole number of pages so mprotect/munmap receive a
+    // valid length on systems where the kernel enforces page alignment.
+    const size_t aligned = round_up_to_page(sz);
+    void* p = mmap(0, aligned, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        return nullptr;
+    }
+    return (uint8_t*)p;
 #endif
 }
 
@@ -428,16 +478,18 @@ double (*lock_executable_buffer(uint8_t* buffer, size_t sz))()
     if (sz == 0) {
         throw std::runtime_error("lock_executable_buffer requires a non-zero size");
     }
-#ifdef _WIN32
+#ifdef MEXCE_PLATFORM_WIN
     DWORD old_protect = 0;
     if (!VirtualProtect(buffer, sz, PAGE_EXECUTE_READ, &old_protect)) {
         VirtualFree((void*)buffer, 0, MEM_RELEASE);
         throw std::runtime_error("VirtualProtect(PAGE_EXECUTE_READ) failed");
     }
     FlushInstructionCache(GetCurrentProcess(), buffer, sz);
-#elif defined(__linux__)
-    if (mprotect((void*)buffer, sz, PROT_READ | PROT_EXEC) != 0) {
-        munmap((void*)buffer, sz);
+#else
+    // mprotect requires the length to be page-aligned on most systems.
+    const size_t aligned = round_up_to_page(sz);
+    if (mprotect((void*)buffer, aligned, PROT_READ | PROT_EXEC) != 0) {
+        munmap((void*)buffer, aligned);
         throw std::runtime_error("mprotect(PROT_READ|PROT_EXEC) failed");
     }
 #endif
@@ -451,13 +503,77 @@ void free_executable_buffer(double (*buffer)(), size_t sz)
     if (!buffer) {
         return;
     }
-#ifdef _WIN32
-    (void)sz; // prevent warning
+#ifdef MEXCE_PLATFORM_WIN
+    (void)sz; // VirtualFree with MEM_RELEASE requires size == 0
     VirtualFree( (void*) buffer, 0, MEM_RELEASE);
-#elif defined(__linux__)
-    munmap((void *) buffer, sz);
+#else
+    const size_t aligned = round_up_to_page(sz);
+    munmap((void *) buffer, aligned);
 #endif
 }
+
+
+// RAII wrapper for an executable-memory allocation. Frees the buffer in its
+// destructor, which allows exception-safe code generation: the buffer is
+// released automatically if anything between allocation and successful
+// installation into `evaluate_fptr` throws.
+class scoped_executable_buffer
+{
+public:
+    scoped_executable_buffer(): m_ptr(nullptr), m_size(0), m_locked(false) {}
+
+    explicit scoped_executable_buffer(size_t sz):
+        m_ptr(get_executable_buffer(sz)), m_size(sz), m_locked(false)
+    {}
+
+    ~scoped_executable_buffer()
+    {
+        if (!m_ptr) {
+            return;
+        }
+        if (m_locked) {
+            free_executable_buffer(reinterpret_cast<double(*)()>(m_ptr), m_size);
+        }
+        else {
+#ifdef MEXCE_PLATFORM_WIN
+            VirtualFree((void*)m_ptr, 0, MEM_RELEASE);
+#else
+            munmap((void*)m_ptr, round_up_to_page(m_size));
+#endif
+        }
+    }
+
+    scoped_executable_buffer(const scoped_executable_buffer&) = delete;
+    scoped_executable_buffer& operator=(const scoped_executable_buffer&) = delete;
+
+    uint8_t* get() const { return m_ptr; }
+    size_t   size() const { return m_size; }
+    bool     valid() const { return m_ptr != nullptr; }
+
+    // Transition to executable. On success the caller takes ownership of the
+    // resulting function pointer via release(); on failure the destructor
+    // still runs and frees nothing (lock_executable_buffer already munmap'd).
+    double (*lock())()
+    {
+        double (*fptr)() = lock_executable_buffer(m_ptr, m_size);
+        m_locked = true;
+        return fptr;
+    }
+
+    // Release ownership after a successful lock(). After this call the
+    // destructor will not free the buffer.
+    double (*release())()
+    {
+        double (*fptr)() = reinterpret_cast<double(*)()>(m_ptr);
+        m_ptr = nullptr;
+        return fptr;
+    }
+
+private:
+    uint8_t* m_ptr;
+    size_t   m_size;
+    bool     m_locked;
+};
 
 
 enum Numeric_data_type
@@ -522,7 +638,7 @@ struct Constant
     Numeric_data_type numeric_data_type;
 
     Constant(uint64_t i, string num, string n):
-        id(i), name(n), value(atof(num.data())),
+        id(i), name(n), value(std::strtod(num.c_str(), nullptr)),
         address((void*)&this->value), numeric_data_type(M64FP)
     {}
 
@@ -5189,6 +5305,15 @@ double evaluator::evaluate() {
     if (is_constant_expression) {
         return constant_expression_value;
     }
+    if (!evaluate_fptr) {
+        // Reachable only if a previous set_expression() threw. The old
+        // compiled program was invalidated to avoid dangling pointers into
+        // cleared intermediate state; the caller must set a new expression
+        // before calling evaluate().
+        throw std::runtime_error(
+            "mexce::evaluator::evaluate() called with no valid compiled expression "
+            "(a prior set_expression() failed)");
+    }
     return evaluate_fptr();
 }
 
@@ -5234,26 +5359,80 @@ void evaluator::set_expression(std::string e)
 
     deque<Token> tokens;
 
+    // Clearing the scratch state orphans the old compiled program's embedded
+    // pointers (intermediate constants live in m_intermediate_constants), so
+    // if anything between here and the successful install in
+    // compile_and_finalize_elist throws, the evaluator must be left in a
+    // clearly-invalid state rather than a silently-corrupt one. Previously
+    // the code freed evaluate_fptr eagerly on entry; we now defer that so a
+    // successful compile has the chance to atomically install the new
+    // program and free the old one (strong guarantee on the JIT buffer). If
+    // compilation throws, we invalidate evaluate_fptr in a catch handler so
+    // that a subsequent evaluate() fails loudly instead of dereferencing
+    // dangling pointers.
     m_intermediate_constants.clear();
     m_intermediate_code.clear();
     m_elist.clear();
     m_cse_temps.clear(); // Clear previous CSE temps
     m_power_terms.clear();
 
-    if (evaluate_fptr) {
-        free_executable_buffer(evaluate_fptr, m_buffer_size);
-        evaluate_fptr = nullptr;
-    }
-
     auto x = m_variables.begin();
     for (; x != m_variables.end(); x++)
         x->second->referenced = false;
 
-    if (e.length() == 0){
+    if (e.length() == 0) {
+        // Nothing was corrupted yet for the compiled program, but the
+        // scratch state above has been cleared. Invalidate the fptr so we
+        // don't execute a program whose intermediate constants are gone.
+        if (evaluate_fptr) {
+            free_executable_buffer(evaluate_fptr, m_buffer_size);
+            evaluate_fptr = nullptr;
+            m_buffer_size = 0;
+            is_constant_expression = false;
+            m_backend_used = backend_type::none;
+        }
         throw (std::logic_error("Expected an expression"));
     }
 
+    // Install an exception scope for the rest of the function. On any failure
+    // after this point we must discard the partially-built state and release
+    // the previous JIT buffer, because its embedded pointers into
+    // m_intermediate_constants (cleared above) are no longer valid.
+    struct InvalidateOnFailure {
+        evaluator* ev;
+        bool armed;
+        ~InvalidateOnFailure() {
+            if (!armed) return;
+            if (ev->evaluate_fptr) {
+                impl::free_executable_buffer(ev->evaluate_fptr, ev->m_buffer_size);
+                ev->evaluate_fptr = nullptr;
+            }
+            ev->m_buffer_size = 0;
+            ev->is_constant_expression = false;
+            ev->m_backend_used = backend_type::none;
+        }
+    } guard{ this, true };
+
     e += ' ';
+
+    // Cap expression size and parenthesis nesting to avoid accepting
+    // pathological inputs that would blow the stack or exhaust memory in the
+    // parser. The limits are intentionally generous; real expressions rarely
+    // come anywhere close.
+    //
+    // MEXCE_MAX_EXPRESSION_LENGTH can be overridden by the user at compile
+    // time for unusual workloads (e.g. generated code). MEXCE_MAX_NESTING_DEPTH
+    // likewise. The parser rejects input exceeding either limit with a
+    // mexce_parsing_exception pointing at the offending position.
+#ifndef MEXCE_MAX_EXPRESSION_LENGTH
+#   define MEXCE_MAX_EXPRESSION_LENGTH (size_t(1) << 20)   // 1 MiB
+#endif
+#ifndef MEXCE_MAX_NESTING_DEPTH
+#   define MEXCE_MAX_NESTING_DEPTH 256
+#endif
+    if (e.length() > MEXCE_MAX_EXPRESSION_LENGTH) {
+        throw (mpe("Expression exceeds MEXCE_MAX_EXPRESSION_LENGTH", e.length()));
+    }
 
     //stage 1: checking expression syntax
     Token temp;
@@ -5262,10 +5441,24 @@ void evaluator::set_expression(std::string e)
     int state = 0;
     size_t i = 0;
     int function_parentheses = 0;
+    int current_nesting_depth = 0;
+
+    auto push_nesting = [&](size_t position) {
+        ++current_nesting_depth;
+        if (current_nesting_depth > MEXCE_MAX_NESTING_DEPTH) {
+            throw (mpe("Expression exceeds MEXCE_MAX_NESTING_DEPTH", position));
+        }
+    };
+    auto pop_nesting = [&]() {
+        if (current_nesting_depth > 0) {
+            --current_nesting_depth;
+        }
+    };
     auto emit_closing_parenthesis = [&](size_t position) {
         if (bdarray.back().first > 0) {
             tokens.push_back(Token(RIGHT_PARENTHESIS, position, ')'));
             bdarray.back().first--;
+            pop_nesting();
             return;
         }
 
@@ -5279,6 +5472,7 @@ void evaluator::set_expression(std::string e)
         tokens.push_back(Token(FUNCTION_RIGHT_PARENTHESIS, position, ')'));
         function_parentheses--;
         bdarray.pop_back();
+        pop_nesting();
     };
 
     auto emit_argument_separator = [&](size_t position) {
@@ -5350,6 +5544,7 @@ void evaluator::set_expression(std::string e)
                     break;
                 }
                 if (e[i] == '(') {
+                    push_nesting(i);
                     tokens.push_back(Token(LEFT_PARENTHESIS, i, '('));
                     bdarray.back().first++;
                     state = 0;
@@ -5432,6 +5627,7 @@ void evaluator::set_expression(std::string e)
                         break;
                     }
                     if ((i_fnc = function_map().find(temp.content)) != function_map().end()) {
+                        push_nesting(i);
                         temp.type = FUNCTION_NAME;
                         tokens.push_back(temp);
                         tokens.push_back(Token(FUNCTION_LEFT_PARENTHESIS, i, '('));
@@ -5457,6 +5653,7 @@ void evaluator::set_expression(std::string e)
                     if ((i_fnc = function_map().find(temp.content)) == function_map().end()) {
                         throw (mpe(string(temp.content) + " is not a known function name", i));
                     }
+                    push_nesting(i);
                     temp.type = FUNCTION_NAME;
                     tokens.push_back(temp);
                     tokens.push_back(Token(FUNCTION_LEFT_PARENTHESIS, i, '('));
@@ -5620,7 +5817,21 @@ void evaluator::set_expression(std::string e)
                 }
                 break;
             case NUMERIC_LITERAL: {
-                double c_value = atof(temp.content.c_str());
+                // strtod gives us both a parse-failure signal (end pointer)
+                // and a range-overflow signal (errno == ERANGE). atof did
+                // neither and silently turned "1e400" into +Inf.
+                const char* src = temp.content.c_str();
+                char* end = nullptr;
+                errno = 0;
+                double c_value = std::strtod(src, &end);
+                if (end == src || *end != '\0') {
+                    throw (mpe("Malformed numeric literal: \"" + temp.content + "\"",
+                               temp.position));
+                }
+                if (errno == ERANGE && (c_value == HUGE_VAL || c_value == -HUGE_VAL)) {
+                    throw (mpe("Numeric literal out of range: \"" + temp.content + "\"",
+                               temp.position));
+                }
                 m_elist.push_back(Element(make_intermediate_constant(this, c_value)));
                 break;
             }
@@ -5656,7 +5867,12 @@ void evaluator::set_expression(std::string e)
     // Check if the expression is SSE2-compatible BEFORE running optimizers.
     // For SSE2, we still want the algebraic simplifications from asmd_optimizer,
     // but we want it to output a simplified elist instead of x87 code.
-    m_sse2_simplify_mode = is_sse2_compatible(m_elist.begin(), m_elist.end(), m_options.prefer_x87);
+    //
+    // CSE is only implemented on the x87 backend, so enable_cse implies prefer_x87.
+    // This avoids the historical footgun where enable_cse() was silently dropped
+    // on x86-64.
+    const bool force_x87 = m_options.prefer_x87 || m_options.enable_cse;
+    m_sse2_simplify_mode = is_sse2_compatible(m_elist.begin(), m_elist.end(), force_x87);
 
     // Track if we need to check for SSE2->x87 fallback after optimization.
     // We can't backup the elist because optimizers modify Function objects in place
@@ -5841,10 +6057,18 @@ void evaluator::set_expression(std::string e)
     // Note: We cannot simply restore the backup because the optimizer modifies Function
     // objects in place (shared via shared_ptr), corrupting the backup.
     if (need_fallback_check && !is_sse2_compatible(m_elist.begin(), m_elist.end(), false)) {
-        // Force x87 mode and re-parse the expression from scratch
+        // Force x87 mode and re-parse the expression from scratch. The recursive
+        // call installs its own guard and handles commit/rollback on its own.
+        guard.armed = false;
         bool original_prefer_x87 = m_options.prefer_x87;
         m_options.prefer_x87 = true;
-        set_expression(m_last_expression);
+        try {
+            set_expression(m_last_expression);
+        }
+        catch (...) {
+            m_options.prefer_x87 = original_prefer_x87;
+            throw;
+        }
         m_options.prefer_x87 = original_prefer_x87;
         return;
     }
@@ -5852,10 +6076,22 @@ void evaluator::set_expression(std::string e)
     is_constant_expression = m_elist.size()==1 && m_elist.back().type == Element_type::CCONST;
     if (is_constant_expression) {
         constant_expression_value = m_elist.back().c->value;
+        // A constant result supersedes any previous compiled program.
+        if (evaluate_fptr) {
+            free_executable_buffer(evaluate_fptr, m_buffer_size);
+            evaluate_fptr = nullptr;
+            m_buffer_size = 0;
+        }
+        m_backend_used = backend_type::none;
     }
     else {
         compile_and_finalize_elist(m_elist.begin(), m_elist.end());
     }
+
+    // All commit operations succeeded; disarm the rollback guard so the old
+    // program (already freed atomically above or inside
+    // compile_and_finalize_elist) stays freed.
+    guard.armed = false;
 }
 
 
@@ -5866,8 +6102,10 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     using namespace impl;
 
 #ifdef MEXCE_64
-    // Check if we can use the faster SSE2 backend
-    bool use_sse2 = is_sse2_compatible(first, last, m_options.prefer_x87);
+    // Check if we can use the faster SSE2 backend.
+    // enable_cse implies prefer_x87 (CSE is x87-only); keep this consistent with
+    // the earlier check in set_expression.
+    bool use_sse2 = is_sse2_compatible(first, last, m_options.prefer_x87 || m_options.enable_cse);
 
     if (use_sse2) {
         // SSE2 backend: simpler prologue/epilogue since result is already in xmm0
@@ -5910,23 +6148,28 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
         // Finalize RIP-relative constants: append constant data after ret and patch displacements
         finalize_rip_constants(code_buffer, pending_constants);
 
-        m_buffer_size = code_buffer.buf.size();
-        auto buffer = get_executable_buffer(m_buffer_size);
+        {
+            const size_t new_size = code_buffer.buf.size();
+            scoped_executable_buffer staging(new_size);
+            if (!staging.valid()) {
+                throw std::bad_alloc();
+            }
+            memcpy(staging.get(), code_buffer.buf.data(), new_size);
+            double (*new_fptr)() = staging.lock();
 
-#ifdef _WIN32
-        if (!buffer) {
-            throw std::bad_alloc();
+            // All fallible operations have now succeeded. Only now do we
+            // release the previous JIT buffer and install the new one; if any
+            // step above had thrown, the old fptr would still be the active
+            // program (strong exception guarantee).
+            if (evaluate_fptr) {
+                free_executable_buffer(evaluate_fptr, m_buffer_size);
+            }
+            evaluate_fptr = new_fptr;
+            m_buffer_size = new_size;
+            staging.release();
+            m_backend_used = backend_type::sse2;
+            return;
         }
-#elif defined(__linux__)
-        if (buffer == MAP_FAILED) {
-            throw std::bad_alloc();
-        }
-#endif
-
-        memcpy(buffer, code_buffer.buf.data(), m_buffer_size);
-        evaluate_fptr = lock_executable_buffer(buffer, m_buffer_size);
-        m_backend_used = backend_type::sse2;
-        return;
     }
 
     // x87 backend: If the expression contains any external calls (libm-backed transcendentals),
@@ -6010,23 +6253,25 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     // copy the return sequence
     code_buffer.buf.insert(code_buffer.buf.end(), return_sequence, return_sequence + return_sequence_size);
 
-    m_buffer_size = code_buffer.buf.size();
-    auto buffer = get_executable_buffer(m_buffer_size);
+    {
+        const size_t new_size = code_buffer.buf.size();
+        scoped_executable_buffer staging(new_size);
+        if (!staging.valid()) {
+            throw std::bad_alloc();
+        }
+        memcpy(staging.get(), code_buffer.buf.data(), new_size);
+        double (*new_fptr)() = staging.lock();
 
-#ifdef _WIN32
-    if (!buffer) {
-        throw std::bad_alloc();
+        // Strong exception guarantee: only after the new program is fully
+        // installed do we release the previous one.
+        if (evaluate_fptr) {
+            free_executable_buffer(evaluate_fptr, m_buffer_size);
+        }
+        evaluate_fptr = new_fptr;
+        m_buffer_size = new_size;
+        staging.release();
+        m_backend_used = backend_type::x87;
     }
-#elif defined(__linux__)
-    if (buffer == MAP_FAILED) {
-        throw std::bad_alloc();
-    }
-#endif
-
-    memcpy(buffer, code_buffer.buf.data(), m_buffer_size);
-
-    evaluate_fptr = lock_executable_buffer(buffer, m_buffer_size);
-    m_backend_used = backend_type::x87;
 }
 
 } // mexce

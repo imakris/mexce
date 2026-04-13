@@ -1,0 +1,61 @@
+name: sanitizers
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  asan-ubsan:
+    name: ASan + UBSan (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+
+    env:
+      BUILD_DIR: build
+      # Fail on the first ASan/UBSan diagnostic and print a stack trace.
+      ASAN_OPTIONS: halt_on_error=1:abort_on_error=1:detect_leaks=1
+      UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1:print_stacktrace=1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            sudo apt-get install -y gcc g++
+          else
+            sudo apt-get install -y clang llvm libomp-dev
+          fi
+
+      - name: Configure
+        run: |
+          SAN_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all -g -O1"
+          if [ "${{ matrix.compiler }}" = "gcc" ]; then
+            cmake -S . -B "$BUILD_DIR" \
+              -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_CXX_FLAGS="$SAN_FLAGS" \
+              -DCMAKE_C_FLAGS="$SAN_FLAGS" \
+              -DCMAKE_EXE_LINKER_FLAGS="$SAN_FLAGS"
+          else
+            cmake -S . -B "$BUILD_DIR" \
+              -DCMAKE_BUILD_TYPE=Debug \
+              -DCMAKE_C_COMPILER=clang \
+              -DCMAKE_CXX_COMPILER=clang++ \
+              -DCMAKE_CXX_FLAGS="$SAN_FLAGS" \
+              -DCMAKE_C_FLAGS="$SAN_FLAGS" \
+              -DCMAKE_EXE_LINKER_FLAGS="$SAN_FLAGS"
+          fi
+
+      - name: Build
+        run: cmake --build "$BUILD_DIR" -j
+
+      - name: Test under sanitizers
+        working-directory: ${{ env.BUILD_DIR }}
+        run: ctest --output-on-failure
