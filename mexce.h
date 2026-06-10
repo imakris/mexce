@@ -5817,6 +5817,13 @@ void evaluator::set_expression(std::string e)
                     std::advance(first_arg_it, -(int64_t)f->num_args);
                     compile_and_finalize_elist(first_arg_it, next(y));
                     double res = evaluate_fptr();
+                    // Constant folding uses a temporary JIT buffer.  Release it
+                    // immediately so repeated foldable subtrees do not leak one
+                    // executable page per fold before the final expression compile.
+                    free_executable_buffer(evaluate_fptr, m_buffer_size);
+                    evaluate_fptr = nullptr;
+                    m_buffer_size = 0;
+                    m_backend_used = backend_type::none;
                     m_elist.erase(first_arg_it, y);
                     *y = Element(make_intermediate_constant(this, res));
                     y = y_next;
