@@ -4899,7 +4899,7 @@ template <> inline Numeric_data_type get_ndt<int32_t>() { return M32INT; }
 template <> inline Numeric_data_type get_ndt<int64_t>() { return M64INT; }
 
 
-inline bool is_operator(  char c) { return  c=='+' || c=='-'  ||  c=='*' || c=='/'  || c=='^' || c=='<'; }
+inline bool is_operator(  char c) { return  c=='+' || c=='-'  ||  c=='*' || c=='/'  || c=='^' || c=='<' || c=='>'; }
 inline bool is_alphabetic(char c) { return (c>='A' && c<='Z') || (c>='a' && c<='z') || c=='_'; }
 inline bool is_numeric(   char c) { return  c>='0' && c<='9'; }
 

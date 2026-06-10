@@ -220,6 +220,8 @@ void test_sign_and_comparisons(TestSuite& suite) {
 
     suite.expect_equal("gt(3, 2) is true", eval.evaluate("gt(v, 2)"), 1.0);
     suite.expect_equal("gt(3, 4) is false", eval.evaluate("gt(v, 4)"), 0.0);
+    suite.expect_equal("infix gt(3 > 2) is true", eval.evaluate("v > 2"), 1.0);
+    suite.expect_equal("infix gt(3 > 4) is false", eval.evaluate("v > 4"), 0.0);
 
     suite.expect_equal("ge(3, 3) is true", eval.evaluate("ge(v, 3)"), 1.0);
     suite.expect_equal("ge(3, 2) is true", eval.evaluate("ge(v, 2)"), 1.0);
