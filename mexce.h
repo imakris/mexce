@@ -3474,6 +3474,28 @@ inline void emit_sse2_divsd(impl::mexce_charstream& s, int dst, int src)
 }
 
 
+// Emit scalar arithmetic with a double memory operand addressed by RAX:
+// op xmm[dst], qword ptr [rax]. Used to fuse a just-seen M64FP variable
+// as the RHS of add/sub/mul/div without first loading it into an XMM slot.
+template <uint8_t OPCODE>
+inline void emit_sse2_arithsd_rax_mem(impl::mexce_charstream& s, int dst)
+{
+#ifdef MEXCE_64
+    // F2 [REX.R] 0F OPCODE ModRM, with r/m=000 ([rax])
+    s < 0xF2;
+    if (dst >= 8) s < 0x44;
+    s < 0x0F < OPCODE < (uint8_t)((dst & 7) * 8);
+#else
+    (void)s; (void)dst;
+#endif
+}
+
+inline void emit_sse2_addsd_rax_mem(impl::mexce_charstream& s, int dst) { emit_sse2_arithsd_rax_mem<0x58>(s, dst); }
+inline void emit_sse2_subsd_rax_mem(impl::mexce_charstream& s, int dst) { emit_sse2_arithsd_rax_mem<0x5C>(s, dst); }
+inline void emit_sse2_mulsd_rax_mem(impl::mexce_charstream& s, int dst) { emit_sse2_arithsd_rax_mem<0x59>(s, dst); }
+inline void emit_sse2_divsd_rax_mem(impl::mexce_charstream& s, int dst) { emit_sse2_arithsd_rax_mem<0x5E>(s, dst); }
+
+
 // --- RIP-relative memory operand variants for arithmetic ---
 // These emit instructions like "addsd xmm, [rip+disp32]" with placeholder displacement
 // Returns the patch offset for the displacement
@@ -3815,10 +3837,11 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
         }
     };
 
-    // Memory operand fusion: track pending constant for binary operations
-    // When we see CCONST followed by add/sub/mul/div, we can skip the load
-    // and use a memory operand directly in the arithmetic instruction
-    bool has_pending_mem_operand = false;
+    // Memory operand fusion: track a just-seen RHS operand for binary add/sub/mul/div.
+    // When CCONST or an M64FP CVAR is immediately followed by add/sub/mul/div,
+    // skip pushing it onto the XMM stack and use it directly as a memory operand.
+    enum class pending_mem_operand_kind { none, rip_constant, rax_m64fp };
+    pending_mem_operand_kind pending_mem_kind = pending_mem_operand_kind::none;
     double pending_mem_value = 0.0;
 
     for (auto it = first; it != last; ++it) {
@@ -3845,7 +3868,25 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 // For non-double types, we need to convert. For simplicity, use x87 for conversion
                 // and then transfer to XMM. Actually, let's handle M64FP directly and fall back for others.
                 if (tn->numeric_data_type == M64FP) {
+                    // If this double variable is the RHS of an immediately following
+                    // arithmetic op, keep its address in RAX and let the op read [RAX]
+                    // directly instead of doing movsd xmm, [rax] first.
+                    auto next_it = it;
+                    ++next_it;
+                    bool can_fuse = false;
+                    if (depth > 0 && next_it != last && next_it->type == Element_type::CFUNC) {
+                        const string& next_fn = next_it->f->name;
+                        can_fuse = (next_fn == "add" || next_fn == "sub" ||
+                                    next_fn == "mul" || next_fn == "div");
+                    }
+
                     emit_load_rax_if_needed((void*)tn->address);
+                    if (can_fuse) {
+                        pending_mem_kind = pending_mem_operand_kind::rax_m64fp;
+                        // depth does NOT increase: the next binary op consumes [RAX].
+                        break;
+                    }
+
                     emit_sse2_load_from_rax(code_buffer, depth);
                 }
                 else
@@ -3909,7 +3950,7 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
 
                     if (can_fuse) {
                         // Don't emit load; store pending constant for the next binary op
-                        has_pending_mem_operand = true;
+                        pending_mem_kind = pending_mem_operand_kind::rip_constant;
                         pending_mem_value = v;
                         // Note: depth does NOT increase (we're not pushing to register stack)
                     }
@@ -3928,12 +3969,19 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 const string& fn = tf->name;
 
                 if (fn == "add") {
-                    if (has_pending_mem_operand) {
+                    if (pending_mem_kind == pending_mem_operand_kind::rip_constant) {
                         // Fused: addsd xmm[depth-1], [rip+const]
                         size_t patch_pos = emit_sse2_addsd_rip_placeholder(code_buffer, depth - 1);
                         pending_constants.push_back({patch_pos, pending_mem_value});
-                        has_pending_mem_operand = false;
+                        pending_mem_kind = pending_mem_operand_kind::none;
                         // depth stays the same (we didn't push the constant)
+                    }
+                    else
+                    if (pending_mem_kind == pending_mem_operand_kind::rax_m64fp) {
+                        // Fused: addsd xmm[depth-1], qword ptr [rax]
+                        emit_sse2_addsd_rax_mem(code_buffer, depth - 1);
+                        pending_mem_kind = pending_mem_operand_kind::none;
+                        // depth stays the same (we didn't push the variable)
                     }
                     else {
                         // xmm[depth-2] = xmm[depth-2] + xmm[depth-1]
@@ -3943,11 +3991,19 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 }
                 else
                 if (fn == "sub") {
-                    if (has_pending_mem_operand) {
+                    if (pending_mem_kind == pending_mem_operand_kind::rip_constant) {
                         // Fused: subsd xmm[depth-1], [rip+const]
                         size_t patch_pos = emit_sse2_subsd_rip_placeholder(code_buffer, depth - 1);
                         pending_constants.push_back({patch_pos, pending_mem_value});
-                        has_pending_mem_operand = false;
+                        pending_mem_kind = pending_mem_operand_kind::none;
+                        // depth stays the same (we didn't push the constant)
+                    }
+                    else
+                    if (pending_mem_kind == pending_mem_operand_kind::rax_m64fp) {
+                        // Fused: subsd xmm[depth-1], qword ptr [rax]
+                        emit_sse2_subsd_rax_mem(code_buffer, depth - 1);
+                        pending_mem_kind = pending_mem_operand_kind::none;
+                        // depth stays the same (we didn't push the variable)
                     }
                     else {
                         // xmm[depth-2] = xmm[depth-2] - xmm[depth-1]
@@ -3957,11 +4013,19 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 }
                 else
                 if (fn == "mul") {
-                    if (has_pending_mem_operand) {
+                    if (pending_mem_kind == pending_mem_operand_kind::rip_constant) {
                         // Fused: mulsd xmm[depth-1], [rip+const]
                         size_t patch_pos = emit_sse2_mulsd_rip_placeholder(code_buffer, depth - 1);
                         pending_constants.push_back({patch_pos, pending_mem_value});
-                        has_pending_mem_operand = false;
+                        pending_mem_kind = pending_mem_operand_kind::none;
+                        // depth stays the same (we didn't push the constant)
+                    }
+                    else
+                    if (pending_mem_kind == pending_mem_operand_kind::rax_m64fp) {
+                        // Fused: mulsd xmm[depth-1], qword ptr [rax]
+                        emit_sse2_mulsd_rax_mem(code_buffer, depth - 1);
+                        pending_mem_kind = pending_mem_operand_kind::none;
+                        // depth stays the same (we didn't push the variable)
                     }
                     else {
                         // xmm[depth-2] = xmm[depth-2] * xmm[depth-1]
@@ -3971,11 +4035,19 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
                 }
                 else
                 if (fn == "div") {
-                    if (has_pending_mem_operand) {
+                    if (pending_mem_kind == pending_mem_operand_kind::rip_constant) {
                         // Fused: divsd xmm[depth-1], [rip+const]
                         size_t patch_pos = emit_sse2_divsd_rip_placeholder(code_buffer, depth - 1);
                         pending_constants.push_back({patch_pos, pending_mem_value});
-                        has_pending_mem_operand = false;
+                        pending_mem_kind = pending_mem_operand_kind::none;
+                        // depth stays the same (we didn't push the constant)
+                    }
+                    else
+                    if (pending_mem_kind == pending_mem_operand_kind::rax_m64fp) {
+                        // Fused: divsd xmm[depth-1], qword ptr [rax]
+                        emit_sse2_divsd_rax_mem(code_buffer, depth - 1);
+                        pending_mem_kind = pending_mem_operand_kind::none;
+                        // depth stays the same (we didn't push the variable)
                     }
                     else {
                         // xmm[depth-2] = xmm[depth-2] / xmm[depth-1]
