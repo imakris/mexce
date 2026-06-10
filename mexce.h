@@ -3753,10 +3753,10 @@ inline void emit_sse2_libm_binary_call(impl::mexce_charstream& s, void* fn_ptr, 
     // Move arguments to XMM0 and XMM1
     // Be careful about order to avoid clobbering
     if (arg1_reg == 1) {
-        // arg1 is in XMM1, arg2 is in XMM2
-        // Move XMM2 to XMM1 first, then XMM1 to XMM0
+        // arg1 is in XMM1, arg2 is in XMM2. XMM0 has already been saved,
+        // so move arg1 out of XMM1 before overwriting XMM1 with arg2.
+        emit_sse2_mov_reg_reg(s, 0, arg1_reg);
         emit_sse2_mov_reg_reg(s, 1, arg2_reg);
-        emit_sse2_mov_reg_reg(s, 0, arg1_reg);  // arg1_reg is still 1, but we already saved it
     } else if (arg1_reg == 0) {
         // arg1 is in XMM0 (already correct), arg2 is in XMM1 (already correct or not)
         if (arg2_reg != 1) {

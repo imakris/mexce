@@ -981,6 +981,17 @@ void test_sse2_log_functions(TestSuite& suite) {
     x = 16.0;
     eval.set_expression("log2(x)");
     suite.expect_near("sse2_log2_16", eval.evaluate(), 4.0);
+
+    // Regression for emit_sse2_libm_binary_call when arg1 is already in XMM1.
+    // Before the fix, moving arg2 into XMM1 first clobbered arg1 for expressions
+    // such as: a, b, 2, x, logb, add, logb.
+    double a = 2.0;
+    double b = 4.0;
+    x = 8.0;
+    eval.bind(a, "a", b, "b");
+    eval.set_expression("logb(a, b + logb(2, x))");
+    const double expected = std::log(b + std::log(x) / std::log(2.0)) / std::log(a);
+    suite.expect_near("sse2_logb_depth3_arg_order", eval.evaluate(), expected);
 #else
     (void)suite;
 #endif
