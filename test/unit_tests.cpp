@@ -59,6 +59,7 @@ extern "C" int mexce_test_override_mprotect(void* addr, size_t len, int prot)
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
@@ -294,6 +295,32 @@ void test_rounding_functions(TestSuite& suite) {
 
     eval.set_expression("int(v)");
     suite.expect_near("int", eval.evaluate(), std::nearbyint(value));
+}
+
+void test_ieee_self_cancellation_default_mode(TestSuite& suite) {
+    // Default mode should preserve IEEE-visible self-cancellation effects.
+    // fast_math remains the opt-in path for x-x -> 0 and x/x -> 1.
+    double x = std::numeric_limits<double>::quiet_NaN();
+
+    mexce::evaluator strict_eval;
+    strict_eval.bind(x, "x");
+    strict_eval.set_expression("x - x");
+    suite.expect_true("default x-x with NaN stays NaN", std::isnan(strict_eval.evaluate()));
+
+    x = 0.0;
+    strict_eval.set_expression("x / x");
+    suite.expect_true("default x/x with zero stays NaN", std::isnan(strict_eval.evaluate()));
+
+    mexce::evaluator fast_eval;
+    fast_eval.enable_fast_math();
+    x = std::numeric_limits<double>::quiet_NaN();
+    fast_eval.bind(x, "x");
+    fast_eval.set_expression("x - x");
+    suite.expect_equal("fast_math x-x folds to zero", fast_eval.evaluate(), 0.0);
+
+    x = 0.0;
+    fast_eval.set_expression("x / x");
+    suite.expect_equal("fast_math x/x folds to one", fast_eval.evaluate(), 1.0);
 }
 
 void test_min_max_and_arithmetic(TestSuite& suite) {
@@ -1047,6 +1074,7 @@ int main() {
     test_exponent_and_significand(suite);
     test_logs_and_powers(suite);
     test_rounding_functions(suite);
+    test_ieee_self_cancellation_default_mode(suite);
     test_min_max_and_arithmetic(suite);
     test_constants_and_single_shot(suite);
     test_pow_optimizer_special_cases(suite);

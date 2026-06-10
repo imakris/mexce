@@ -4349,9 +4349,22 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     merged.reserve(terms.size());
     for (auto &term : terms) {
         if (!merged.empty() && !comp(term.chunk, merged.back().chunk) && !comp(merged.back().chunk, term.chunk)) {
-            merged.back().factor += term.factor;
-            if (merged.back().factor == 0) {
-                merged.pop_back();
+            // Combining opposite-sign/opposite-exponent copies can erase IEEE-visible
+            // effects: x-x is NaN for x=NaN and x/x is NaN for x=0.  Keep those
+            // cancellations explicit unless the caller opted into fast_math.
+            const bool would_cancel_or_cross_zero =
+                ((merged.back().factor > 0 && term.factor < 0) ||
+                 (merged.back().factor < 0 && term.factor > 0));
+            if (!ev->m_options.fast_math && would_cancel_or_cross_zero) {
+                if (term.factor != 0) {
+                    merged.push_back({std::move(term.chunk), term.factor});
+                }
+            }
+            else {
+                merged.back().factor += term.factor;
+                if (merged.back().factor == 0) {
+                    merged.pop_back();
+                }
             }
         }
         else
