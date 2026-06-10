@@ -3375,21 +3375,23 @@ inline void emit_sse2_load_from_rax(impl::mexce_charstream& s, int reg)
 }
 
 
-// Emit movsd xmm[dst], xmm[src] - copy between XMM registers
+// Emit movaps xmm[dst], xmm[src] - copy full XMM register.
+// This is preferable to scalar movsd for register copies: it is one byte
+// shorter, avoids movsd's merge dependency on the destination upper lane,
+// and is eligible for register-move elimination on modern CPUs.
 inline void emit_sse2_mov_reg_reg(impl::mexce_charstream& s, int dst, int src)
 {
 #ifdef MEXCE_64
-    // movsd xmm[dst], xmm[src]
-    // F2 [REX] 0F 10 ModRM
+    // movaps xmm[dst], xmm[src]
+    // [REX] 0F 28 ModRM
     // ModRM = (11 << 6) | (dst << 3) | src = 0xC0 + dst*8 + src
     uint8_t rex = 0;
     if (dst >= 8) rex |= 0x44;  // REX.R
     if (src >= 8) rex |= 0x41;  // REX.B
     int dst_enc = dst & 7;
     int src_enc = src & 7;
-    s < 0xF2;
     if (rex) s < rex;
-    s < 0x0F < 0x10 < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
+    s < 0x0F < 0x28 < (uint8_t)(0xC0 + dst_enc * 8 + src_enc);
 #else
     (void)s; (void)dst; (void)src;
 #endif
