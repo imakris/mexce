@@ -462,6 +462,13 @@ void test_binding_and_unbinding(TestSuite& suite) {
     suite.expect_throw<mexce::mexce_parsing_exception>("unbind_all_removes_variables", [&] {
         eval.set_expression("x");
     }, "x is not a known constant, variable or function name");
+
+    mexce::evaluator constant_eval;
+    double unused = 1.0;
+    constant_eval.bind(unused, "unused");
+    constant_eval.set_expression("3.25");
+    constant_eval.unbind_all();
+    suite.expect_near("unbind_all_preserves_unreferenced_expression", constant_eval.evaluate(), 3.25);
     
     mexce::evaluator unbind_eval;
     double y = 2.5;
@@ -1064,6 +1071,65 @@ void test_numeric_data_types(TestSuite& suite) {
     suite.expect_near("x87_mixed_types", eval.evaluate(), expected);
 }
 
+void test_protected_expression_compilation(TestSuite& suite) {
+#ifdef MEXCE_64
+    double x = 2.0;
+    mexce::evaluator eval;
+    eval.bind(x, "x");
+
+    std::string source = "x * x + 3";
+    eval.set_protected_expression(source);
+
+    suite.expect_true("protected_expression_uses_sse2",
+                      eval.get_backend() == mexce::backend_type::sse2);
+    suite.expect_near("protected_expression_evaluates", eval.evaluate(), 7.0);
+    x = 4.0;
+    suite.expect_near("protected_expression_reuses_jit", eval.evaluate(), 19.0);
+
+    source = "sin(x) + log(x) + sqrt(x)";
+    eval.set_protected_expression(source);
+    suite.expect_near(
+        "protected_expression_libm",
+        eval.evaluate(),
+        std::sin(x) + std::log(x) + std::sqrt(x));
+    suite.expect_throw<std::logic_error>("protected_expression_hides_ir", [&] {
+        (void)eval.get_optimized_expression();
+    }, "Protected expression introspection is disabled");
+    suite.expect_throw<std::logic_error>("protected_expression_hides_bytes", [&] {
+        (void)eval.get_byte_representation();
+    }, "Protected expression introspection is disabled");
+
+    eval.unbind_all();
+    suite.expect_near("protected_expression_unbind_all_resets", eval.evaluate(), 0.0);
+
+    eval.use_x87_backend();
+    std::string rejected_source = "x + 1";
+    suite.expect_throw<std::logic_error>("protected_expression_rejects_x87", [&] {
+        eval.set_protected_expression(rejected_source);
+    }, "Protected expression compilation failed");
+    suite.expect_throw<std::logic_error>("protected_expression_failure_invalidates_evaluator", [&] {
+        (void)eval.evaluate();
+    }, "No expression has been compiled");
+#else
+    mexce::evaluator eval;
+    std::string source = "2 + 3";
+    suite.expect_throw<std::logic_error>("protected_expression_rejects_x86", [&] {
+        eval.set_protected_expression(source);
+    }, "Protected expression compilation failed");
+#endif
+}
+
+void test_failed_compilation_invalidates_evaluator(TestSuite& suite) {
+    mexce::evaluator eval;
+    eval.set_expression("8.5");
+    suite.expect_throw<mexce::mexce_parsing_exception>("replacement_parse_failure", [&] {
+        eval.set_expression("unknown_identifier");
+    });
+    suite.expect_throw<std::logic_error>("replacement_parse_failure_invalidates_evaluator", [&] {
+        (void)eval.evaluate();
+    }, "No expression has been compiled");
+}
+
 } // namespace
 
 int main() {
@@ -1102,6 +1168,8 @@ int main() {
     test_sse2_neg_abs(suite);
     test_sse2_log_functions(suite);
     test_numeric_data_types(suite);
+    test_protected_expression_compilation(suite);
+    test_failed_compilation_invalidates_evaluator(suite);
 
     if (!suite.failures.empty()) {
         std::cerr << "mexce unit tests failed (" << suite.failures.size() << ")" << std::endl;

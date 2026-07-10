@@ -235,6 +235,43 @@ namespace impl {
     using elist_it_t        = elist_t::iterator;
     using elist_const_it_t  = elist_t::const_iterator;
 
+    inline void secure_erase_string(std::string& value)
+    {
+        volatile char* data = value.empty() ? nullptr : &value[0];
+        for (size_t i = 0; i < value.size(); ++i) {
+            data[i] = 0;
+        }
+        value.clear();
+    }
+
+    inline void secure_erase_memory(void* data, size_t size)
+    {
+        volatile uint8_t* bytes = static_cast<volatile uint8_t*>(data);
+        for (size_t i = 0; i < size; ++i) {
+            bytes[i] = 0;
+        }
+    }
+
+    template <typename T>
+    class sensitive_vector_guard
+    {
+    public:
+        sensitive_vector_guard(std::vector<T>& value, bool enabled)
+            : m_value(value), m_enabled(enabled)
+        {}
+
+        ~sensitive_vector_guard()
+        {
+            if (m_enabled && !m_value.empty()) {
+                secure_erase_memory(m_value.data(), m_value.size() * sizeof(T));
+            }
+        }
+
+    private:
+        std::vector<T>& m_value;
+        bool m_enabled;
+    };
+
     shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v);
     uint8_t* push_intermediate_code(evaluator* ev, const std::string& s);
     shared_ptr<Function> make_function(evaluator* ev, const string& name);
@@ -273,6 +310,14 @@ public:
     void unbind_all();
 
     void set_expression(std::string);
+
+    /**
+     * @brief Compiles sensitive source and discards reconstructable compiler state.
+     *
+     * Protected compilation is available only with the x64 SSE2 backend.
+     * Source is copied into a scrubbed working buffer and is not retained.
+     */
+    void set_protected_expression(const std::string&);
 
     double evaluate();
 
@@ -336,11 +381,10 @@ private:
 
     bool                    is_constant_expression      = false;
     double                  constant_expression_value   = 0.0;
+    bool                    m_protected_expression      = false;
     bool                    m_sse2_simplify_mode        = false;  // When true, asmd_optimizer reconstructs elist instead of x87 code
     backend_type            m_backend_used              = backend_type::none;
     size_t                  m_buffer_size               = 0;
-    std::string             m_expression;
-    std::string             m_last_expression;          // Saved for potential SSE2->x87 fallback re-parsing
     impl::elist_t           m_elist;
     std::list<std::string>  m_intermediate_code;
     impl::constant_map_t    m_intermediate_constants;  // produced during expression simplification
@@ -352,7 +396,10 @@ private:
 
     double                (*evaluate_fptr)()            = nullptr;
 
+    void compile_expression(std::string& expression, bool protected_expression);
     void compile_and_finalize_elist(impl::elist_const_it_t first, impl::elist_const_it_t last);
+    void reset_compiled_expression();
+    void discard_compiler_state();
 
     // Grant friend access to helpers that need private state.
     friend std::shared_ptr<impl::Constant> impl::make_intermediate_constant(evaluator* ev, double v);
@@ -376,7 +423,7 @@ public:
         m_position(position)
     {}
 
-    virtual ~mexce_parsing_exception()  { }
+    virtual ~mexce_parsing_exception()  { impl::secure_erase_string(m_message); }
     virtual const char* what() const throw() { return m_message.c_str(); }
 
 protected:
@@ -2306,21 +2353,22 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             compile_elist(final_s, base_chunk.begin(), base_chunk.end());
             final_s.write((const char*)s.buf.data(), s.buf.size());
 
-            // Generate correct debug string
-            string base_str = elist_to_string(base_chunk);
-            stringstream ss;
-            if (optimized_name == "sqrt") {
-                ss << "sqrt(" << base_str << ")";
+            if (!ev->m_protected_expression) {
+                string base_str = elist_to_string(base_chunk);
+                stringstream ss;
+                if (optimized_name == "sqrt") {
+                    ss << "sqrt(" << base_str << ")";
+                }
+                else
+                if (optimized_name == "inv_sqrt") {
+                    ss << "inv_sqrt(" << base_str << ")";
+                }
+                else
+                if (optimized_name == "pow_int") {
+                    ss << "pow_int(" << base_str << ", " << static_cast<int64_t>(v_d) << ")";
+                }
+                debug_desc = ss.str();
             }
-            else
-            if (optimized_name == "inv_sqrt") {
-                ss << "inv_sqrt(" << base_str << ")";
-            }
-            else
-            if (optimized_name == "pow_int") {
-                ss << "pow_int(" << base_str << ", " << static_cast<int64_t>(v_d) << ")";
-            }
-            debug_desc = ss.str();
 
             uint8_t* cc = push_intermediate_code(ev, final_s.str());
             auto f_opt = make_shared<Function>(ev->m_next_element_id++, optimized_name, 0, 0, final_s.buf.size(), cc, nullptr);
@@ -3337,8 +3385,6 @@ inline void finalize_rip_constants(impl::mexce_charstream& s, std::vector<Pendin
         int32_t disp = (int32_t)(const_offset - (pc.patch_offset + 4));
         std::memcpy(s.buf.data() + pc.patch_offset, &disp, sizeof(disp));
     }
-
-    pending.clear();
 #else
     (void)s; (void)pending;
 #endif
@@ -4450,45 +4496,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     // === SSE2 simplification: reconstruct simplified elist ===
     // Instead of generating x87 code, build a new elist from the simplified terms.
     if (ev->m_sse2_simplify_mode) {
-        // Build debug string for get_optimized_expression()
-        stringstream debug_ss;
-        bool debug_first = true;
-        if (fclass == 1) {
-            if (ac_final != neutral) { debug_ss << double_to_pretty_string(ac_final); debug_first = false; }
-            for (auto &term : merged) {
-                string term_str = "(" + elist_to_string(term.chunk) + ")";
-                if (term.factor > 0) {
-                    if (!debug_first) debug_ss << "+";
-                    if (term.factor != 1) debug_ss << term.factor << "*";
-                    debug_ss << term_str;
-                } else {
-                    debug_ss << "-";
-                    if (term.factor != -1) debug_ss << abs(term.factor) << "*";
-                    debug_ss << term_str;
-                }
-                debug_first = false;
-            }
-        }
-        else {
-            if (ac_final != neutral) { debug_ss << double_to_pretty_string(ac_final); debug_first = false; }
-            for (auto &term : merged) {
-                string term_str = "(" + elist_to_string(term.chunk) + ")";
-                if (term.factor > 0) {
-                    if (!debug_first) debug_ss << "*";
-                    debug_ss << term_str;
-                    if (term.factor != 1) debug_ss << "^" << term.factor;
-                }
-                else {
-                    if (debug_first) debug_ss << "1";
-                    debug_ss << "/";
-                    debug_ss << term_str;
-                    if (term.factor != -1) debug_ss << "^" << abs(term.factor);
-                }
-                debug_first = false;
-            }
-        }
-        if (debug_first) debug_ss << double_to_pretty_string(ac_final);
-
         // Reconstruct elist in postfix order
         elist_t result;
 
@@ -4959,7 +4966,7 @@ struct Token
     string          content;
 
     Token() = default;
-    ~Token() = default;
+    ~Token() { secure_erase_string(content); }
     Token(const Token& other) = default;
     Token(Token&& other) noexcept = default;
     Token& operator=(const Token& other) = default;
@@ -5229,6 +5236,35 @@ evaluator::~evaluator()
 }
 
 
+inline
+void evaluator::discard_compiler_state()
+{
+    m_intermediate_constants.clear();
+    m_intermediate_code.clear();
+    m_elist.clear();
+    m_cse_temps.clear();
+    m_power_terms.clear();
+    m_sse2_simplify_mode = false;
+}
+
+
+inline
+void evaluator::reset_compiled_expression()
+{
+    impl::free_executable_buffer(evaluate_fptr, m_buffer_size);
+    evaluate_fptr = nullptr;
+    m_buffer_size = 0;
+    is_constant_expression = false;
+    constant_expression_value = 0.0;
+    m_protected_expression = false;
+    m_backend_used = backend_type::none;
+    discard_compiler_state();
+    for (auto& variable : m_variables) {
+        variable.second->referenced = false;
+    }
+}
+
+
 template <typename T, typename ...Args>
 void evaluator::bind(T& v, const std::string& s, Args&... args)
 {
@@ -5267,12 +5303,24 @@ void evaluator::unbind(const std::string& s, Args&... args)
 inline
 void evaluator::unbind_all()
 {
+    const bool has_referenced_variable = std::any_of(
+        m_variables.begin(),
+        m_variables.end(),
+        [](const impl::variable_map_t::value_type& variable) {
+            return variable.second->referenced;
+        });
+    if (has_referenced_variable) {
+        set_expression("0");
+    }
     m_variables.clear();
 }
 
 
 inline
 double evaluator::evaluate() {
+    if (!is_constant_expression && evaluate_fptr == nullptr) {
+        throw std::logic_error("No expression has been compiled");
+    }
     if (is_constant_expression) {
         return constant_expression_value;
     }
@@ -5282,12 +5330,18 @@ double evaluator::evaluate() {
 
 inline
 std::string evaluator::get_optimized_expression() const {
+    if (m_protected_expression) {
+        throw std::logic_error("Protected expression introspection is disabled");
+    }
     return impl::elist_to_string(m_elist);
 }
 
 
 inline
 std::string evaluator::get_byte_representation() const {
+    if (m_protected_expression) {
+        throw std::logic_error("Protected expression introspection is disabled");
+    }
     if (is_constant_expression || !evaluate_fptr || m_buffer_size == 0) {
         return std::string();
     }
@@ -5311,30 +5365,67 @@ std::string evaluator::get_byte_representation() const {
 
 
 inline
-void evaluator::set_expression(std::string e)
+void evaluator::set_expression(std::string expression)
+{
+    try {
+        compile_expression(expression, false);
+    }
+    catch (...) {
+        reset_compiled_expression();
+        throw;
+    }
+}
+
+
+inline
+void evaluator::set_protected_expression(const std::string& expression)
+{
+    std::string working_source;
+    try {
+#ifndef MEXCE_64
+        throw std::logic_error("Protected expressions require x64");
+#endif
+        if (m_options.prefer_x87 || m_options.enable_cse) {
+            throw std::logic_error("Protected expressions require the SSE2 backend without CSE");
+        }
+        if (expression.empty()) {
+            throw std::logic_error("Expected an expression");
+        }
+
+        working_source.reserve(expression.size() + 1);
+        working_source.assign(expression.data(), expression.size());
+        compile_expression(working_source, true);
+        if (!is_constant_expression && m_backend_used != backend_type::sse2) {
+            throw std::logic_error("Protected expression is not SSE2-compatible");
+        }
+
+        discard_compiler_state();
+        m_protected_expression = true;
+        impl::secure_erase_string(working_source);
+    }
+    catch (const std::bad_alloc&) {
+        impl::secure_erase_string(working_source);
+        reset_compiled_expression();
+        throw;
+    }
+    catch (...) {
+        impl::secure_erase_string(working_source);
+        reset_compiled_expression();
+        throw std::logic_error("Protected expression compilation failed");
+    }
+}
+
+
+inline
+void evaluator::compile_expression(std::string& e, bool protected_expression)
 {
     using namespace impl;
     using mpe = mexce_parsing_exception;
 
-    // Save for potential fallback re-parsing (SSE2->x87)
-    m_last_expression = e;
-
     deque<Token> tokens;
 
-    m_intermediate_constants.clear();
-    m_intermediate_code.clear();
-    m_elist.clear();
-    m_cse_temps.clear(); // Clear previous CSE temps
-    m_power_terms.clear();
-
-    if (evaluate_fptr) {
-        free_executable_buffer(evaluate_fptr, m_buffer_size);
-        evaluate_fptr = nullptr;
-    }
-
-    auto x = m_variables.begin();
-    for (; x != m_variables.end(); x++)
-        x->second->referenced = false;
+    reset_compiled_expression();
+    m_protected_expression = protected_expression;
 
     if (e.length() == 0){
         throw (std::logic_error("Expected an expression"));
@@ -5744,10 +5835,13 @@ void evaluator::set_expression(std::string e)
     // For SSE2, we still want the algebraic simplifications from asmd_optimizer,
     // but we want it to output a simplified elist instead of x87 code.
     m_sse2_simplify_mode = is_sse2_compatible(m_elist.begin(), m_elist.end(), m_options.prefer_x87);
+    if (protected_expression && !m_sse2_simplify_mode) {
+        throw std::logic_error("Protected expression is not SSE2-compatible");
+    }
 
     // Track if we need to check for SSE2->x87 fallback after optimization.
-    // We can't backup the elist because optimizers modify Function objects in place
-    // (shared via shared_ptr), so instead we re-parse from m_last_expression if needed.
+    // We cannot back up the elist because optimizers modify Function objects in place,
+    // so reuse the caller-owned source if an x87 fallback is needed.
     bool need_fallback_check = m_sse2_simplify_mode;
 
     // Fast-math algebraic simplifications - run in a SEPARATE PASS before any optimizer
@@ -5935,10 +6029,20 @@ void evaluator::set_expression(std::string e)
     // Note: We cannot simply restore the backup because the optimizer modifies Function
     // objects in place (shared via shared_ptr), corrupting the backup.
     if (need_fallback_check && !is_sse2_compatible(m_elist.begin(), m_elist.end(), false)) {
-        // Force x87 mode and re-parse the expression from scratch
+        if (protected_expression) {
+            throw std::logic_error("Protected expression is not SSE2-compatible");
+        }
+        // Force x87 mode and re-parse the expression from the same local source.
         bool original_prefer_x87 = m_options.prefer_x87;
         m_options.prefer_x87 = true;
-        set_expression(m_last_expression);
+        e.pop_back();
+        try {
+            compile_expression(e, protected_expression);
+        }
+        catch (...) {
+            m_options.prefer_x87 = original_prefer_x87;
+            throw;
+        }
         m_options.prefer_x87 = original_prefer_x87;
         return;
     }
@@ -5966,7 +6070,11 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     if (use_sse2) {
         // SSE2 backend: simpler prologue/epilogue since result is already in xmm0
         mexce_charstream code_buffer;
+        sensitive_vector_guard<uint8_t> code_guard(code_buffer.buf, m_protected_expression);
         std::vector<PendingRipConstant> pending_constants;
+        sensitive_vector_guard<PendingRipConstant> constants_guard(
+            pending_constants,
+            m_protected_expression);
         bool needs_libm = sse2_needs_libm_calls(first, last);
 
         // Reserve buffer space (more if libm calls are present)
@@ -6073,6 +6181,7 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 #endif
 
     mexce_charstream code_buffer;
+    sensitive_vector_guard<uint8_t> code_guard(code_buffer.buf, m_protected_expression);
     // Reduce vector growth reallocations during compilation (helps when compiling many
     // expressions and also when compiling small chunks during constant folding).
     {

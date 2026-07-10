@@ -93,6 +93,15 @@ Compiles an expression, making it the default for `evaluate()`.
     *   Throws `mexce_parsing_exception` on syntax errors, providing the position of the error.
     *   Throws `std::logic_error` if the expression string is empty.
 
+#### `set_protected_expression()`
+Compiles sensitive source supplied by an authenticated formula producer.
+*   **Signature:** `void set_protected_expression(const std::string& expression);`
+*   **Behavior:**
+    *   Compiles through the x64 SSE2 backend using a scrubbed working buffer and discards live reconstructable compiler state.
+    *   Does not retain the caller-owned source; the caller remains responsible for its lifetime and erasure.
+    *   Rejects x87 and CSE options and disables expression and byte-code introspection for the compiled formula.
+    *   Allocator remnants and generated machine code can still reveal the formula to a debugger; this API reduces plaintext residency but does not prevent extraction by code running in the same process.
+
 #### `evaluate()`
 Executes the expression most recently compiled by `set_expression()`.
 *   **Signature:** `double evaluate();`
