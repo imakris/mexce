@@ -1,35 +1,17 @@
 cmake_minimum_required(VERSION 3.16)
-project(mexce_benchmark LANGUAGES CXX)
+project(mexce VERSION 1.0.1 LANGUAGES CXX)
+
+include(CTest)
+include(CMakePackageConfigHelpers)
+include(GNUInstallDirs)
 
 option(ENABLE_COVERAGE "Build with coverage instrumentation" OFF)
 option(MEXCE_ENABLE_PROTECTED_EXPRESSIONS "Build protected-expression targets" OFF)
 
-if(ENABLE_COVERAGE)
-  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-O0 -g)
-
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-      add_compile_options(--coverage)
-      add_link_options(--coverage)
-    else()
-      add_compile_options(-fprofile-instr-generate -fcoverage-mapping)
-      add_link_options(-fprofile-instr-generate)
-    endif()
-  endif()
-endif()
-
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(benchmark test/benchmark.cpp)
-target_include_directories(benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-find_package(OpenMP REQUIRED)
-target_link_libraries(benchmark PRIVATE OpenMP::OpenMP_CXX)
-
-# Define optimization flags explicitly - these are what matter for performance
-# This ensures flags are unambiguous and consistently reported
-if (MSVC)
+if(MSVC)
     set(MEXCE_OPTIMIZATION_FLAGS /O2)
     set(MEXCE_WARNING_FLAGS /W4 /permissive- /bigobj)
 else()
@@ -37,170 +19,208 @@ else()
     set(MEXCE_WARNING_FLAGS -Wall -Wextra -Wpedantic)
 endif()
 
-# Apply optimization flags only when coverage is disabled
-if(NOT ENABLE_COVERAGE)
-    target_compile_options(benchmark PRIVATE ${MEXCE_OPTIMIZATION_FLAGS})
-endif()
-target_compile_options(benchmark PRIVATE ${MEXCE_WARNING_FLAGS})
-
-add_executable(unit_tests test/unit_tests.cpp)
-target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(unit_tests PRIVATE ${MEXCE_WARNING_FLAGS})
-
 add_library(mexce INTERFACE)
 add_library(mexce::mexce ALIAS mexce)
-target_include_directories(mexce INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
-
-add_executable(ordinary_no_sodium_test test/ordinary_no_sodium_test.cpp)
-target_link_libraries(ordinary_no_sodium_test PRIVATE mexce)
-target_compile_options(ordinary_no_sodium_test PRIVATE ${MEXCE_WARNING_FLAGS})
+set_target_properties(mexce PROPERTIES EXPORT_NAME mexce)
+target_include_directories(mexce INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
-    set(MEXCE_SODIUM_TARGET "")
-    find_package(libsodium 1.0.22 EXACT CONFIG QUIET)
-    if(TARGET libsodium::libsodium)
-        set(MEXCE_SODIUM_TARGET libsodium::libsodium)
-    else()
-        find_package(unofficial-sodium 1.0.22 EXACT CONFIG QUIET)
+    if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+        message(FATAL_ERROR "MEXCE protected expressions support x64 targets only")
     endif()
-    if(TARGET unofficial-sodium::sodium)
-        set(MEXCE_SODIUM_TARGET unofficial-sodium::sodium)
-    elseif(NOT MEXCE_SODIUM_TARGET)
-        find_package(PkgConfig QUIET)
-        if(PkgConfig_FOUND)
-            pkg_check_modules(MEXCE_SODIUM QUIET IMPORTED_TARGET libsodium=1.0.22)
-        endif()
-        if(TARGET PkgConfig::MEXCE_SODIUM)
-            set(MEXCE_SODIUM_TARGET PkgConfig::MEXCE_SODIUM)
-        else()
-            message(FATAL_ERROR "MEXCE protected expressions require libsodium 1.0.22")
-        endif()
-    endif()
+
+    include(cmake/mexce-sodium.cmake)
+    mexce_find_sodium(mexce::_sodium)
 
     add_library(mexce_protected INTERFACE)
     add_library(mexce::protected ALIAS mexce_protected)
-    target_link_libraries(mexce_protected INTERFACE mexce ${MEXCE_SODIUM_TARGET})
+    set_target_properties(mexce_protected PROPERTIES EXPORT_NAME protected)
+    target_link_libraries(mexce_protected INTERFACE mexce mexce::_sodium)
+endif()
 
-    set(MEXCE_PROTECTED_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
-    add_executable(protected_codec_tests test/protected_codec_tests.cpp)
-    target_link_libraries(protected_codec_tests PRIVATE mexce_protected)
-    target_compile_definitions(protected_codec_tests PRIVATE
-        MEXCE_PROTECTED_TESTING
-        MEXCE_PROTECTED_FIXTURE_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.bin"
-        MEXCE_PROTECTED_FIXTURE_MANIFEST_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.manifest.txt")
-    target_compile_options(protected_codec_tests PRIVATE ${MEXCE_WARNING_FLAGS})
+if(BUILD_TESTING)
+    if(ENABLE_COVERAGE)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            add_compile_options(-O0 -g)
 
-    add_executable(protected_fixture_generator EXCLUDE_FROM_ALL
-        test/protected_fixture_generator.cpp)
-    target_link_libraries(protected_fixture_generator PRIVATE ${MEXCE_SODIUM_TARGET})
-    target_compile_options(protected_fixture_generator PRIVATE ${MEXCE_WARNING_FLAGS})
-
-    add_executable(protected_sodium_init_failure_test
-        test/protected_sodium_init_failure_test.cpp)
-    target_link_libraries(protected_sodium_init_failure_test PRIVATE mexce_protected)
-    target_compile_definitions(protected_sodium_init_failure_test PRIVATE
-        MEXCE_PROTECTED_TESTING)
-    target_compile_options(protected_sodium_init_failure_test PRIVATE ${MEXCE_WARNING_FLAGS})
-
-    add_executable(protected_runtime_tests test/protected_runtime_tests.cpp)
-    target_link_libraries(protected_runtime_tests PRIVATE mexce_protected)
-    target_compile_definitions(protected_runtime_tests PRIVATE
-        MEXCE_PROTECTED_TESTING
-        MEXCE_PROTECTED_FIXTURE_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.bin")
-    target_compile_options(protected_runtime_tests PRIVATE ${MEXCE_WARNING_FLAGS})
-
-    add_executable(mixed_tu_test
-        test/mixed_tu_test.cpp
-        test/mixed_tu_ordinary.cpp
-        test/mixed_tu_protected.cpp)
-    target_link_libraries(mixed_tu_test PRIVATE mexce_protected)
-    target_compile_definitions(mixed_tu_test PRIVATE
-        MEXCE_PROTECTED_FIXTURE_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.bin")
-    target_compile_options(mixed_tu_test PRIVATE ${MEXCE_WARNING_FLAGS})
-
-    add_executable(protected_benchmark test/protected_benchmark.cpp)
-    target_link_libraries(protected_benchmark PRIVATE mexce_protected)
-    if(WIN32)
-        target_link_libraries(protected_benchmark PRIVATE Psapi)
+            if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+                add_compile_options(--coverage)
+                add_link_options(--coverage)
+            else()
+                add_compile_options(-fprofile-instr-generate -fcoverage-mapping)
+                add_link_options(-fprofile-instr-generate)
+            endif()
+        endif()
     endif()
+
+    add_executable(benchmark test/benchmark.cpp)
+    target_include_directories(benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    find_package(OpenMP REQUIRED)
+    target_link_libraries(benchmark PRIVATE OpenMP::OpenMP_CXX)
     if(NOT ENABLE_COVERAGE)
-        target_compile_options(protected_benchmark PRIVATE ${MEXCE_OPTIMIZATION_FLAGS})
+        target_compile_options(benchmark PRIVATE ${MEXCE_OPTIMIZATION_FLAGS})
     endif()
-    target_compile_options(protected_benchmark PRIVATE ${MEXCE_WARNING_FLAGS})
+    target_compile_options(benchmark PRIVATE ${MEXCE_WARNING_FLAGS})
 
-    add_executable(protected_decoder_fuzz_smoke test/protected_decoder_fuzz.cpp)
-    target_link_libraries(protected_decoder_fuzz_smoke PRIVATE mexce_protected)
-    target_compile_definitions(protected_decoder_fuzz_smoke PRIVATE
-        MEXCE_FUZZ_SMOKE_MAIN
-        MEXCE_PROTECTED_FIXTURE_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.bin")
-    target_compile_options(protected_decoder_fuzz_smoke PRIVATE ${MEXCE_WARNING_FLAGS})
+    add_executable(unit_tests test/unit_tests.cpp)
+    target_include_directories(unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_options(unit_tests PRIVATE ${MEXCE_WARNING_FLAGS})
 
-    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND UNIX)
-        add_executable(protected_decoder_fuzz EXCLUDE_FROM_ALL
-            test/protected_decoder_fuzz.cpp)
-        target_link_libraries(protected_decoder_fuzz PRIVATE mexce_protected)
-        target_compile_options(protected_decoder_fuzz PRIVATE
-            -fsanitize=fuzzer,address,undefined
-            -fno-omit-frame-pointer)
-        target_link_options(protected_decoder_fuzz PRIVATE
-            -fsanitize=fuzzer,address,undefined)
+    add_executable(ordinary_no_sodium_test test/ordinary_no_sodium_test.cpp)
+    target_link_libraries(ordinary_no_sodium_test PRIVATE mexce)
+    target_compile_options(ordinary_no_sodium_test PRIVATE ${MEXCE_WARNING_FLAGS})
+
+    if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
+        set(MEXCE_PROTECTED_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+
+        add_executable(protected_codec_tests test/protected_codec_tests.cpp)
+        target_link_libraries(protected_codec_tests PRIVATE mexce_protected)
+        target_compile_definitions(protected_codec_tests PRIVATE
+            MEXCE_PROTECTED_TESTING
+            MEXCE_PROTECTED_FIXTURE_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.bin"
+            MEXCE_PROTECTED_FIXTURE_MANIFEST_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.manifest.txt")
+        target_compile_options(protected_codec_tests PRIVATE ${MEXCE_WARNING_FLAGS})
+
+        add_executable(protected_fixture_generator EXCLUDE_FROM_ALL
+            test/protected_fixture_generator.cpp)
+        target_link_libraries(protected_fixture_generator PRIVATE mexce::_sodium)
+        target_compile_options(protected_fixture_generator PRIVATE ${MEXCE_WARNING_FLAGS})
+
+        add_executable(protected_sodium_init_failure_test
+            test/protected_sodium_init_failure_test.cpp)
+        target_link_libraries(protected_sodium_init_failure_test PRIVATE mexce_protected)
+        target_compile_definitions(protected_sodium_init_failure_test PRIVATE
+            MEXCE_PROTECTED_TESTING)
+        target_compile_options(protected_sodium_init_failure_test PRIVATE ${MEXCE_WARNING_FLAGS})
+
+        add_executable(protected_runtime_tests test/protected_runtime_tests.cpp)
+        target_link_libraries(protected_runtime_tests PRIVATE mexce_protected)
+        target_compile_definitions(protected_runtime_tests PRIVATE
+            MEXCE_PROTECTED_TESTING
+            MEXCE_PROTECTED_FIXTURE_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.bin")
+        target_compile_options(protected_runtime_tests PRIVATE ${MEXCE_WARNING_FLAGS})
+
+        add_executable(mixed_tu_test
+            test/mixed_tu_test.cpp
+            test/mixed_tu_ordinary.cpp
+            test/mixed_tu_protected.cpp)
+        target_link_libraries(mixed_tu_test PRIVATE mexce_protected)
+        target_compile_definitions(mixed_tu_test PRIVATE
+            MEXCE_PROTECTED_FIXTURE_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.bin")
+        target_compile_options(mixed_tu_test PRIVATE ${MEXCE_WARNING_FLAGS})
+
+        add_executable(protected_benchmark test/protected_benchmark.cpp)
+        target_link_libraries(protected_benchmark PRIVATE mexce_protected)
+        if(WIN32)
+            target_link_libraries(protected_benchmark PRIVATE Psapi)
+        endif()
+        if(NOT ENABLE_COVERAGE)
+            target_compile_options(protected_benchmark PRIVATE ${MEXCE_OPTIMIZATION_FLAGS})
+        endif()
+        target_compile_options(protected_benchmark PRIVATE ${MEXCE_WARNING_FLAGS})
+
+        add_executable(protected_decoder_fuzz_smoke test/protected_decoder_fuzz.cpp)
+        target_link_libraries(protected_decoder_fuzz_smoke PRIVATE mexce_protected)
+        target_compile_definitions(protected_decoder_fuzz_smoke PRIVATE
+            MEXCE_FUZZ_SMOKE_MAIN
+            MEXCE_PROTECTED_FIXTURE_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.bin")
+        target_compile_options(protected_decoder_fuzz_smoke PRIVATE ${MEXCE_WARNING_FLAGS})
+
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND UNIX)
+            add_executable(protected_decoder_fuzz EXCLUDE_FROM_ALL
+                test/protected_decoder_fuzz.cpp)
+            target_link_libraries(protected_decoder_fuzz PRIVATE mexce_protected)
+            target_compile_options(protected_decoder_fuzz PRIVATE
+                -fsanitize=fuzzer,address,undefined
+                -fno-omit-frame-pointer)
+            target_link_options(protected_decoder_fuzz PRIVATE
+                -fsanitize=fuzzer,address,undefined)
+        endif()
     endif()
+
+    set(MEXCE_BENCHMARK_COMPILER "${CMAKE_CXX_COMPILER_ID}")
+    if(CMAKE_CXX_COMPILER_VERSION)
+        string(APPEND MEXCE_BENCHMARK_COMPILER " ${CMAKE_CXX_COMPILER_VERSION}")
+    endif()
+
+    if(ENABLE_COVERAGE)
+        set(MEXCE_BENCHMARK_FLAGS "-O0 -g")
+    else()
+        list(JOIN MEXCE_OPTIMIZATION_FLAGS " " MEXCE_BENCHMARK_FLAGS)
+    endif()
+    list(JOIN MEXCE_WARNING_FLAGS " " MEXCE_WARNING_FLAGS_STR)
+    string(APPEND MEXCE_BENCHMARK_FLAGS " ${MEXCE_WARNING_FLAGS_STR}")
+
+    foreach(variable MEXCE_BENCHMARK_COMPILER MEXCE_BENCHMARK_FLAGS)
+        string(REPLACE "\\" "\\\\" ${variable} "${${variable}}")
+        string(REPLACE "\"" "\\\"" ${variable} "${${variable}}")
+    endforeach()
+
+    target_compile_definitions(benchmark PRIVATE
+        BENCHMARK_COMPILER="${MEXCE_BENCHMARK_COMPILER}"
+        BENCHMARK_COMPILER_FLAGS="${MEXCE_BENCHMARK_FLAGS}")
+
+    add_test(NAME mexce_unit_tests COMMAND unit_tests)
+    add_test(NAME mexce_ordinary_no_sodium COMMAND ordinary_no_sodium_test)
+    if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
+        add_test(NAME mexce_protected_codec_tests COMMAND protected_codec_tests)
+        add_test(NAME mexce_protected_sodium_init_failure
+            COMMAND protected_sodium_init_failure_test)
+        add_test(NAME mexce_protected_runtime COMMAND protected_runtime_tests)
+        add_test(NAME mexce_mixed_translation_units COMMAND mixed_tu_test)
+        add_test(NAME mexce_protected_decoder_fuzz_smoke
+            COMMAND protected_decoder_fuzz_smoke)
+        add_test(NAME mexce_protected_benchmark COMMAND protected_benchmark)
+        add_test(NAME mexce_protected_maximum_valid
+            COMMAND protected_benchmark maximum-valid)
+        add_test(NAME mexce_protected_late_invalid
+            COMMAND protected_benchmark late-invalid)
+    endif()
+    add_test(NAME benchmark_quick
+        COMMAND benchmark 5 ${CMAKE_BINARY_DIR}/benchmark_quick_results.txt)
+    add_test(NAME benchmark_output_first
+        COMMAND benchmark ${CMAKE_BINARY_DIR}/benchmark_output_first.txt 5)
+
+    add_custom_target(run_benchmarks
+        COMMAND ${CMAKE_COMMAND} -E echo "Running benchmark with 100 iterations"
+        COMMAND $<TARGET_FILE:benchmark> 100 ${CMAKE_BINARY_DIR}/benchmark_results.txt
+        COMMENT "Executing mexce benchmarks"
+        USES_TERMINAL)
 endif()
 
-# Capture compiler info for benchmark output
-set(MEXCE_BENCHMARK_COMPILER "${CMAKE_CXX_COMPILER_ID}")
-if (CMAKE_CXX_COMPILER_VERSION)
-    string(APPEND MEXCE_BENCHMARK_COMPILER " ${CMAKE_CXX_COMPILER_VERSION}")
-endif()
-
-# Build the flags string from our explicitly defined flags
-# This ensures what's reported matches exactly what's applied
-if(ENABLE_COVERAGE)
-    # Coverage mode uses -O0 -g instead of optimization flags
-    set(MEXCE_BENCHMARK_FLAGS "-O0 -g")
-else()
-    list(JOIN MEXCE_OPTIMIZATION_FLAGS " " MEXCE_BENCHMARK_FLAGS)
-endif()
-
-# Append warning flags
-list(JOIN MEXCE_WARNING_FLAGS " " MEXCE_WARNING_FLAGS_STR)
-string(APPEND MEXCE_BENCHMARK_FLAGS " ${MEXCE_WARNING_FLAGS_STR}")
-
-# Escape special characters for C++ string literals
-foreach(_var MEXCE_BENCHMARK_COMPILER MEXCE_BENCHMARK_FLAGS)
-    string(REPLACE "\\" "\\\\" ${_var} "${${_var}}")
-    string(REPLACE "\"" "\\\"" ${_var} "${${_var}}")
-endforeach()
-
-target_compile_definitions(benchmark PRIVATE
-    BENCHMARK_COMPILER="${MEXCE_BENCHMARK_COMPILER}"
-    BENCHMARK_COMPILER_FLAGS="${MEXCE_BENCHMARK_FLAGS}"
-)
-
-enable_testing()
-add_test(NAME mexce_unit_tests COMMAND unit_tests)
-add_test(NAME mexce_ordinary_no_sodium COMMAND ordinary_no_sodium_test)
+set(mexce_install_targets mexce)
 if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
-    add_test(NAME mexce_protected_codec_tests COMMAND protected_codec_tests)
-    add_test(NAME mexce_protected_sodium_init_failure
-        COMMAND protected_sodium_init_failure_test)
-    add_test(NAME mexce_protected_runtime COMMAND protected_runtime_tests)
-    add_test(NAME mexce_mixed_translation_units COMMAND mixed_tu_test)
-    add_test(NAME mexce_protected_decoder_fuzz_smoke
-        COMMAND protected_decoder_fuzz_smoke)
-    add_test(NAME mexce_protected_benchmark COMMAND protected_benchmark)
-    add_test(NAME mexce_protected_maximum_valid
-        COMMAND protected_benchmark maximum-valid)
-    add_test(NAME mexce_protected_late_invalid
-        COMMAND protected_benchmark late-invalid)
+    list(APPEND mexce_install_targets mexce_protected)
 endif()
-add_test(NAME benchmark_quick
-         COMMAND benchmark 5 ${CMAKE_BINARY_DIR}/benchmark_quick_results.txt)
-add_test(NAME benchmark_output_first
-         COMMAND benchmark ${CMAKE_BINARY_DIR}/benchmark_output_first.txt 5)
+install(TARGETS ${mexce_install_targets} EXPORT mexce_targets)
+install(EXPORT mexce_targets
+    FILE mexce-targets.cmake
+    NAMESPACE mexce::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mexce)
 
-add_custom_target(run_benchmarks
-    COMMAND ${CMAKE_COMMAND} -E echo "Running benchmark with 100 iterations"
-    COMMAND $<TARGET_FILE:benchmark> 100 ${CMAKE_BINARY_DIR}/benchmark_results.txt
-    COMMENT "Executing mexce benchmarks"
-    USES_TERMINAL)
+install(FILES mexce.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
+    install(FILES
+        mexce_protected.h
+        mexce_protected_encoder.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES cmake/mexce-sodium.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mexce)
+endif()
+install(FILES LICENSE.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/mexce)
+
+set(MEXCE_CONFIG_HAS_PROTECTED ${MEXCE_ENABLE_PROTECTED_EXPRESSIONS})
+configure_package_config_file(
+    cmake/mexce-config.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/mexce-config.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mexce)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/mexce-config-version.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/mexce-config.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/mexce-config-version.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mexce)

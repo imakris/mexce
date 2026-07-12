@@ -1,0 +1,9 @@
+@PACKAGE_INIT@
+
+if(@MEXCE_CONFIG_HAS_PROTECTED@)
+    include("${CMAKE_CURRENT_LIST_DIR}/mexce-sodium.cmake")
+    mexce_find_sodium(mexce::_sodium)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/mexce-targets.cmake")
+check_required_components(mexce)
