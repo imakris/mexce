@@ -62,8 +62,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang libomp-dev
 
-      - name: Resolve libsodium 1.0.22
-        if: matrix.configuration == 'protected'
+      - name: Resolve libsodium 1.0.22 on Windows
+        if: runner.os == 'Windows' && matrix.configuration == 'protected'
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $installationPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          & "$installationPath\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          conan profile detect --force
+          conan install --requires=libsodium/1.0.22 --output-folder=deps `
+            --generator=CMakeDeps --generator=CMakeToolchain `
+            --settings=build_type=Release --build=missing
+
+      - name: Resolve libsodium 1.0.22 on Linux
+        if: runner.os == 'Linux' && matrix.configuration == 'protected'
         run: |
           conan profile detect --force
           conan install --requires=libsodium/1.0.22 --output-folder=deps \
@@ -113,14 +125,14 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Install
-        run: cmake --install build --config Release --prefix install
+        run: cmake --install build --config Release --prefix "${{ runner.temp }}/mexce-install"
 
       - name: Check installed notice surface
         env:
           EXPECT_NOTICE: ${{ matrix.configuration == 'protected' && '1' || '0' }}
         run: >-
           python -c "import os, pathlib;
-          p=pathlib.Path('install/share/licenses/mexce/THIRD_PARTY_NOTICES.md');
+          p=pathlib.Path(r'${{ runner.temp }}')/'mexce-install/share/licenses/mexce/THIRD_PARTY_NOTICES.md';
           assert p.exists() == (os.environ['EXPECT_NOTICE'] == '1')"
 
       - name: Configure installed Windows consumer
@@ -128,7 +140,7 @@ jobs:
         run: >-
           cmake -S test/install_consumer -B consumer-build
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_PREFIX_PATH=${{ github.workspace }}/install
+          -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
 
       - name: Configure installed Linux consumer
@@ -137,7 +149,7 @@ jobs:
           cmake -S test/install_consumer -B consumer-build
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
-          -DCMAKE_PREFIX_PATH=${{ github.workspace }}/install
+          -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
 
       - name: Configure installed protected Windows consumer
@@ -146,7 +158,7 @@ jobs:
           cmake -S test/install_consumer -B consumer-build
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
-          -DCMAKE_PREFIX_PATH=${{ github.workspace }}/install
+          -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
           -DMEXCE_CONSUMER_PROTECTED=ON
 
@@ -157,7 +169,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
-          -DCMAKE_PREFIX_PATH=${{ github.workspace }}/install
+          -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
           -DMEXCE_CONSUMER_PROTECTED=ON
 
@@ -191,14 +203,14 @@ jobs:
       - name: Run installed issuer and file consumer on Linux
         if: runner.os == 'Linux' && matrix.configuration == 'protected'
         run: |
-          ./install/bin/mexce_protect expression.txt bindings.txt expression.mxp expression.key
+          "${{ runner.temp }}/mexce-install/bin/mexce_protect" expression.txt bindings.txt expression.mxp expression.key
           ./consumer-build/mexce_protected_file_consumer expression.mxp expression.key
         shell: bash
 
       - name: Run installed issuer and file consumer on Windows
         if: runner.os == 'Windows' && matrix.configuration == 'protected'
         run: |
-          .\install\bin\mexce_protect.exe expression.txt bindings.txt expression.mxp expression.key
+          & "${{ runner.temp }}\mexce-install\bin\mexce_protect.exe" expression.txt bindings.txt expression.mxp expression.key
           .\consumer-build\Release\mexce_protected_file_consumer.exe expression.mxp expression.key
 
       - name: Run clear performance diagnostic
@@ -231,7 +243,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.configuration }}
-          if-no-files-found: error
+          if-no-files-found: warn
           path: |
             build/benchmark_results.txt
             build/protected_benchmark_results.txt

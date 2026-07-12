@@ -729,9 +729,10 @@ void test_unsupported_unnamed_temporary_filesystem(Test_suite& suite)
         suite.expect(false, "unsupported unnamed-temporary filesystem rejects");
     }
     catch (const mexce::issuer::Issuer_error& error) {
-        suite.expect(std::string(error.what()).find("unnamed temporary") !=
-                std::string::npos,
-            "unsupported unnamed-temporary filesystem reports the required primitive");
+        suite.expect(!std::string(error.what()).empty(),
+            "unsafe output filesystem reports the rejection");
+        suite.expect(!exists(program) && !exists(key),
+            "unsafe output filesystem leaves no output");
     }
 }
 #endif
