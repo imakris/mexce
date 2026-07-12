@@ -12,7 +12,9 @@ A single-header, dependency-free JIT compiler for mathematical expressions.
 
 Once an expression is compiled, subsequent evaluations are direct function calls, which avoids parsing and interpretation overhead. This makes `mexce` well-suited for applications that repeatedly evaluate the same formula with different inputs, such as numerical simulations, data processing kernels, or graphics.
 
-The library is contained in a single header file (`mexce.h`) with no external dependencies.
+The ordinary library is contained in a single header file (`mexce.h`) with no
+external dependencies. An opt-in protected-expression surface uses libsodium
+1.0.22 to load authenticated, encrypted semantic programs.
 
 ### Requirements
 *   **Platforms:** Windows, Linux
@@ -191,6 +193,91 @@ eval.set_expression("x + y");      // Options take effect here
 *   Required for Common Subexpression Elimination (CSE) feature
 *   On x86-64, enable with `eval.use_x87_backend();`
 
+## Protected Expressions
+
+Protected expressions let an application distribute a formula without shipping
+its original expression text. The `mexce_protect` tool turns the formula into
+an encrypted, authenticated `.mxp` program and a 32-byte key. The application
+loads that pair, binds values by numeric slot, and evaluates the formula through
+the usual `mexce::evaluator` interface.
+
+This feature is optional, available on x64, and uses libsodium 1.0.22. Ordinary
+users can continue to include only `mexce.h` with no external dependency.
+
+### Build and install
+
+Make libsodium 1.0.22 available through Conan, vcpkg, or pkg-config. For
+example, with Conan:
+
+```sh
+conan install --requires=libsodium/1.0.22 --output-folder=deps \
+  --generator=CMakeDeps --generator=CMakeToolchain \
+  --settings=build_type=Release --build=missing
+cmake -S . -B build \
+  -DCMAKE_TOOLCHAIN_FILE=deps/conan_toolchain.cmake \
+  -DBUILD_TESTING=OFF \
+  -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON \
+  -DMEXCE_BUILD_ISSUER_TOOLS=ON
+cmake --build build --config Release
+cmake --install build --config Release --prefix install
+```
+
+Protected consumers link `mexce::protected`. The `MEXCE_BUILD_ISSUER_TOOLS`
+option builds and installs the `mexce_protect` command used to create programs.
+
+### Creating a protected program
+
+Create an expression file, for example `expression.txt`:
+
+```text
+value+1
+```
+
+Then assign each variable a numeric runtime slot in `bindings.txt`:
+
+```text
+value=0
+```
+
+```sh
+mexce_protect expression.txt bindings.txt expression.mxp expression.key
+```
+
+The command writes `expression.mxp` and `expression.key`. The two output paths
+must be different and must not exist; remove an orphaned key before retrying an
+interrupted run. Keep the key separate from the program and import it into the
+application's key-delivery system. The slot schema must list every variable
+exactly once, using consecutive slots from zero. The command uses strict math
+semantics; applications that need fast-math semantics can use the encoder API
+directly.
+
+### Loading a protected program
+
+At runtime, bind application values to the same slots and load the program:
+
+```cpp
+const std::vector<uint8_t> program = read_file("expression.mxp");
+std::vector<uint8_t> raw_key = obtain_unwrapped_key_from_host();
+Raw_key_wipe_guard raw_key_wipe(raw_key); // Defined in protected_example.cpp.
+auto key = mexce::Protected_expression_key::from_bytes(
+    raw_key.data(), raw_key.size());
+
+double value = 2.0;
+mexce::evaluator evaluator;
+evaluator.bind_protected(value, 0);
+evaluator.set_protected_expression(
+    program.data(), program.size(), std::move(key));
+const double result = evaluator.evaluate();
+```
+
+`set_protected_expression` verifies and compiles the program, then consumes the
+move-only key. The `.mxp` file keeps the formula encrypted and detects
+modification when it is loaded. A failed load leaves the evaluator without an
+executable expression. The application process supplies the key and is the
+trusted endpoint. The complete
+[`protected_example.cpp`](protected_example.cpp) includes file loading and a
+reusable key-wiping guard.
+
 ## Performance Analysis
 
 `mexce` is designed to produce code with performance comparable to a statically optimizing compiler. Its efficiency was measured using a benchmark suite of 44,229 expressions on GitHub Actions CI (Ubuntu runner).
@@ -210,6 +297,23 @@ eval.set_expression("x + y");      // Options take effect here
 *   The SSE2 backend is faster than the x87 backend due to better pipelining on modern CPUs
 *   The `fast_math` option provides modest improvement through algebraic simplification
 *   Compilation time is in the microsecond range, negligible for most use cases
+
+### Protected-expression overhead
+
+Protected programs add work when they are created and loaded, but execute the
+same generated code as clear expressions after compilation. Release benchmarks
+measured six representative formulas on x64 with MSVC, GCC, and Clang. Each
+phase ran in an isolated process, with seven retained runs per formula.
+
+| Phase | Observed median range |
+| :--- | ---: |
+| Create protected program | 17.1-66.3 us per expression |
+| Load and compile | 1.32-2.65x clear compilation |
+| Repeated evaluation | 0.94-1.03x clear evaluation |
+
+The cost is therefore concentrated at program creation and startup. No material
+steady-state evaluation penalty appeared in the retained measurements. See the
+[full methodology and per-compiler results](analysis/performance_acceptance.md).
 
 ### Accuracy
 
@@ -243,6 +347,16 @@ ctest --test-dir build
 
 # Run the full performance benchmark
 cmake --build build --target run_benchmarks
+```
+
+Using the protected build above with `BUILD_TESTING=ON`, run the protected
+benchmark with:
+
+```bash
+ctest --test-dir build -C Release -R mexce_protected_benchmark --verbose
+python analysis/run_protected_benchmarks.py \
+  build/protected_benchmark protected_benchmark_results.json \
+  --repeats 3 --resource-repeats 1
 ```
 
 ## License

@@ -1,7 +1,10 @@
 #include <mexce.h>
+
 #include <iostream>
 
-int main() {
+
+int main()
+{
     mexce::evaluator eval;
     double x = 0.5;
     eval.bind(x, "x");

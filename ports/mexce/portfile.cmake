@@ -6,7 +6,27 @@ vcpkg_from_github(
     HEAD_REF master
 )
 
-file(INSTALL "${SOURCE_PATH}/mexce.h" DESTINATION "${CURRENT_PACKAGES_DIR}/include")
+vcpkg_check_features(
+    OUT_FEATURE_OPTIONS FEATURE_OPTIONS
+    FEATURES
+        protected MEXCE_ENABLE_PROTECTED_EXPRESSIONS
+)
+
+vcpkg_cmake_configure(
+    SOURCE_PATH "${SOURCE_PATH}"
+    OPTIONS
+        -DBUILD_TESTING=OFF
+        ${FEATURE_OPTIONS}
+)
+vcpkg_cmake_install()
+vcpkg_cmake_config_fixup(
+    PACKAGE_NAME mexce
+    CONFIG_PATH lib/cmake/mexce
+)
+
+file(REMOVE_RECURSE
+    "${CURRENT_PACKAGES_DIR}/debug"
+    "${CURRENT_PACKAGES_DIR}/lib")
 
 vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/LICENSE.txt")
 

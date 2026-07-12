@@ -359,6 +359,26 @@ void test_constants_and_single_shot(TestSuite& suite) {
 
     eval.set_expression("ln(v)");
     suite.expect_near("ln", eval.evaluate(), std::log(v));
+    suite.expect_true(
+        "ln_introspection_spelling",
+        eval.get_optimized_expression().find("ln") != std::string::npos);
+
+    eval.set_expression("log(v)");
+    suite.expect_near("log", eval.evaluate(), std::log(v));
+    suite.expect_true(
+        "log_introspection_spelling",
+        eval.get_optimized_expression().find("log") != std::string::npos);
+}
+
+void test_signed_zero_semantics(TestSuite& suite)
+{
+    mexce::evaluator eval;
+
+    eval.set_expression("-0.0");
+    suite.expect_true("source_unary_minus_signed_zero", !std::signbit(eval.evaluate()));
+
+    eval.set_expression("neg(0.0)");
+    suite.expect_true("explicit_neg_signed_zero", std::signbit(eval.evaluate()));
 }
 
 void test_pow_optimizer_special_cases(TestSuite& suite) {
@@ -405,7 +425,6 @@ void test_nested_pow_folding_sympy_semantics(TestSuite& suite) {
 
 void test_helper_functions_and_element(TestSuite& suite) {
     using namespace mexce::impl;
-    mexce::evaluator eval;
 
     suite.expect_true("function_name_to_infix_operator_add", function_name_to_infix_operator("add") == "+");
     suite.expect_true("function_name_to_infix_operator_unknown", function_name_to_infix_operator("noop").empty());
@@ -420,7 +439,7 @@ void test_helper_functions_and_element(TestSuite& suite) {
     double value = 4.0;
     auto variable = std::make_shared<Variable>(1, &value, "value", M32FP);
     auto constant = std::make_shared<Constant>(2, 3.0);
-    auto add_function = make_function(&eval, "add");
+    auto add_function = std::make_shared<Function>(function_map().find("add")->second);
 
     elist_t elist;
     elist.push_back(Element(variable));
@@ -651,6 +670,97 @@ void test_parsing_errors(TestSuite& suite) {
     }, "Unexpected end of expression");
 }
 
+void test_empty_state_after_failed_replacement(TestSuite& suite)
+{
+    mexce::evaluator eval;
+
+    eval.set_expression("19.25");
+    suite.expect_near("constant_before_failed_replacement", eval.evaluate(), 19.25);
+    suite.expect_throw<mexce::mexce_parsing_exception>(
+        "constant_failed_replacement",
+        [&] { eval.set_expression("unknown_name"); },
+        "unknown_name is not a known constant, variable or function name"
+    );
+    suite.expect_throw<std::logic_error>(
+        "constant_empty_evaluate_after_failed_replacement",
+        [&] { (void)eval.evaluate(); },
+        "No expression has been compiled."
+    );
+    suite.expect_true(
+        "constant_empty_backend_after_failed_replacement",
+        eval.get_backend() == mexce::backend_type::none);
+    suite.expect_true(
+        "constant_empty_optimized_expression_after_failed_replacement",
+        eval.get_optimized_expression().empty());
+    suite.expect_true(
+        "constant_empty_byte_representation_after_failed_replacement",
+        eval.get_byte_representation().empty());
+
+    double value = 3.0;
+    eval.bind(value, "value");
+    eval.set_expression("value + 2");
+    suite.expect_near("native_before_failed_replacement", eval.evaluate(), 5.0);
+    suite.expect_throw<mexce::mexce_parsing_exception>(
+        "native_failed_replacement",
+        [&] { eval.set_expression("unknown_name"); },
+        "unknown_name is not a known constant, variable or function name"
+    );
+    suite.expect_throw<std::logic_error>(
+        "native_empty_evaluate_after_failed_replacement",
+        [&] { (void)eval.evaluate(); },
+        "No expression has been compiled."
+    );
+    suite.expect_true(
+        "native_empty_backend_after_failed_replacement",
+        eval.get_backend() == mexce::backend_type::none);
+    suite.expect_true(
+        "native_empty_optimized_expression_after_failed_replacement",
+        eval.get_optimized_expression().empty());
+    suite.expect_true(
+        "native_empty_byte_representation_after_failed_replacement",
+        eval.get_byte_representation().empty());
+    eval.unbind("value");
+    suite.expect_throw<std::logic_error>(
+        "unbind_after_failed_replacement_keeps_empty_state",
+        [&] { (void)eval.evaluate(); },
+        "No expression has been compiled."
+    );
+
+    double replacement_value = 4.0;
+    eval.bind(replacement_value, "replacement_value");
+    eval.set_expression("replacement_value * 3");
+    suite.expect_near("successful_replacement_after_failure", eval.evaluate(), 12.0);
+}
+
+void test_late_compilation_failure_reference_state(TestSuite& suite)
+{
+    mexce::evaluator eval;
+    double a = 1.25;
+    eval.bind(a, "a");
+    eval.use_x87_backend();
+
+    suite.expect_throw<std::overflow_error>(
+        "late_compilation_failure",
+        [&] {
+            eval.set_expression(
+                "mod(a,mod(a,mod(a,mod(a,mod(a,mod(a,mod(a,mod(a,mod(a,a)))))))))");
+        },
+        "Expression too complex for x87 FPU (stack overflow)"
+    );
+    suite.expect_throw<std::logic_error>(
+        "late_compilation_failure_empty_evaluate",
+        [&] { (void)eval.evaluate(); },
+        "No expression has been compiled."
+    );
+
+    eval.unbind("a");
+    suite.expect_throw<std::logic_error>(
+        "late_compilation_failure_unbind_preserves_empty_state",
+        [&] { (void)eval.evaluate(); },
+        "No expression has been compiled."
+    );
+}
+
 void test_unbind_referenced_and_variadic(TestSuite& suite) {
     mexce::evaluator eval;
 
@@ -687,19 +797,18 @@ void test_lock_executable_buffer_failure(TestSuite& suite) {
 
 void test_elist_to_string_unary_and_multi(TestSuite& suite) {
     using namespace mexce::impl;
-    mexce::evaluator eval;
 
     double value = 4.0;
     auto variable = std::make_shared<Variable>(1, &value, "value", M32FP);
 
-    auto neg_function = make_function(&eval, "neg");
+    auto neg_function = std::make_shared<Function>(function_map().find("neg")->second);
     elist_t eu;
     eu.push_back(Element(variable));
     eu.push_back(Element(neg_function));
     suite.expect_true("elist_to_string_unary_neg", elist_to_string(eu) == "(-value)");
 
     auto constant3 = std::make_shared<Constant>(3, 3.0);
-    auto min_function = make_function(&eval, "min");
+    auto min_function = std::make_shared<Function>(function_map().find("min")->second);
     elist_t em;
     em.push_back(Element(variable));
     em.push_back(Element(constant3));
@@ -950,6 +1059,33 @@ void test_cse_coverage(TestSuite& suite) {
     suite.expect_near("cse_exp", eval.evaluate(), expected);
 }
 
+void test_source_free_fallback_ownership(TestSuite& suite)
+{
+    mexce::evaluator eval;
+    double a = 1.25;
+    eval.bind(a, "a");
+    eval.use_sse2_backend();
+
+    const std::string polynomial =
+        "((((((((((2.20*a+1.1)*a+9.9)*a+8.8)*a+7.7)*a+6.6)*a+5.5)*a+4.4)*a+3.3)*a+2.2)*a+1.1)";
+    eval.set_expression(polynomial);
+
+    double expected = 2.20;
+    const double coefficients[] = {1.1, 9.9, 8.8, 7.7, 6.6, 5.5, 4.4, 3.3, 2.2, 1.1};
+    for (double coefficient : coefficients) {
+        expected = expected * a + coefficient;
+    }
+
+    suite.expect_true("post_optimizer_fallback_backend", eval.get_backend() == mexce::backend_type::x87);
+    suite.expect_near("post_optimizer_fallback_value", eval.evaluate(), expected);
+    suite.expect_true("fallback_does_not_mutate_options", !eval.get_options().prefer_x87);
+
+    eval.enable_cse();
+    eval.set_expression("(" + polynomial + ")+sin(a)+sin(a)");
+    suite.expect_true("cse_fallback_backend", eval.get_backend() == mexce::backend_type::x87);
+    suite.expect_near("cse_fallback_value", eval.evaluate(), expected + 2.0 * std::sin(a));
+}
+
 // Test SSE2 neg and abs operations (covers xorpd/andpd emit functions)
 void test_sse2_neg_abs(TestSuite& suite) {
 #ifdef MEXCE_64
@@ -1077,6 +1213,7 @@ int main() {
     test_ieee_self_cancellation_default_mode(suite);
     test_min_max_and_arithmetic(suite);
     test_constants_and_single_shot(suite);
+    test_signed_zero_semantics(suite);
     test_pow_optimizer_special_cases(suite);
     test_nested_pow_folding_sympy_semantics(suite);
     test_helper_functions_and_element(suite);
@@ -1086,6 +1223,8 @@ int main() {
     test_memory_management(suite);
     test_asmd_optimizer_branches(suite);
     test_parsing_errors(suite);
+    test_empty_state_after_failed_replacement(suite);
+    test_late_compilation_failure_reference_state(suite);
     test_elist_to_string_unary_and_multi(suite);
     test_parser_additional_coverage(suite);
     test_unbind_referenced_and_variadic(suite);
@@ -1099,6 +1238,7 @@ int main() {
     test_trunc_function(suite);
     test_options_api(suite);
     test_cse_coverage(suite);
+    test_source_free_fallback_ownership(suite);
     test_sse2_neg_abs(suite);
     test_sse2_log_functions(suite);
     test_numeric_data_types(suite);

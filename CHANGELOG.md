@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Opt-in authenticated protected-expression encoding and runtime loading on
+  x64 through libsodium 1.0.22.
+- The `mexce::protected` installed target and protected Conan/vcpkg package
+  variants while keeping the ordinary target dependency-free.
+- The opt-in `mexce_protect` issuer utility with owner-only raw-key output,
+  no-overwrite publication, partial-state detection, and Windows/Linux tests.
+- Protected usage, threat-model, issuer, example, and third-party notice
+  documentation.
+
 ## [1.0.1] - 2025-10-10
 ### Added
 - GitHub Actions workflows for build, benchmark, and coverage reporting, plus Codecov configuration and badges to track quality metrics. 

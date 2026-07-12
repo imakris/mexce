@@ -131,8 +131,10 @@
 #include <set>
 #include <new>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -159,6 +161,98 @@ namespace mexce {
 
 // Forward declarations
 class evaluator;
+class Protected_expression_key;
+
+
+enum class Protected_expression_error_category
+{
+    INVALID_ARGUMENT,
+    UNSUPPORTED_FORMAT,
+    SIZE_LIMIT,
+    AUTHENTICATION_FAILED,
+    MALFORMED_PROGRAM,
+    MISSING_BINDING,
+    INTROSPECTION_DISABLED,
+    CRYPTOGRAPHY_UNAVAILABLE,
+    COMPILATION_FAILED,
+    RESOURCE_FAILURE,
+};
+
+
+class Protected_expression_error: public std::runtime_error
+{
+public:
+    Protected_expression_error(
+        Protected_expression_error_category category,
+        const char* message)
+    :
+        std::runtime_error(message),
+        m_category(category),
+        m_has_record_index(false),
+        m_record_index(0)
+    {}
+
+    Protected_expression_error(
+        Protected_expression_error_category category,
+        const char* message,
+        uint32_t record_index)
+    :
+        std::runtime_error(message),
+        m_category(category),
+        m_has_record_index(true),
+        m_record_index(record_index)
+    {}
+
+    Protected_expression_error_category category() const noexcept { return m_category; }
+    bool has_record_index() const noexcept                         { return m_has_record_index; }
+
+    uint32_t record_index() const
+    {
+        if (!m_has_record_index) {
+            throw std::logic_error("No protected-expression record index is available.");
+        }
+        return m_record_index;
+    }
+
+private:
+    Protected_expression_error_category m_category;
+    bool                                m_has_record_index;
+    uint32_t                            m_record_index;
+};
+
+#ifndef MEXCE_USE_LIBM_TRANSCENDENTALS
+#   define MEXCE_USE_LIBM_TRANSCENDENTALS 1
+#endif
+#ifndef MEXCE_USE_LIBM_GENERIC_POW
+#   define MEXCE_USE_LIBM_GENERIC_POW MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_EXP
+#   define MEXCE_USE_LIBM_EXP MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_LOG
+#   define MEXCE_USE_LIBM_LOG MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_LOG10
+#   define MEXCE_USE_LIBM_LOG10 MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_LOG2
+#   define MEXCE_USE_LIBM_LOG2 MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_LOGB
+#   define MEXCE_USE_LIBM_LOGB MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_YLOG2
+#   define MEXCE_USE_LIBM_YLOG2 MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_SIN
+#   define MEXCE_USE_LIBM_SIN MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_COS
+#   define MEXCE_USE_LIBM_COS MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
+#ifndef MEXCE_USE_LIBM_TAN
+#   define MEXCE_USE_LIBM_TAN MEXCE_USE_LIBM_TRANSCENDENTALS
+#endif
 
 // --- Runtime-configurable options ---
 //
@@ -175,18 +269,17 @@ struct options {
     // Force x87 backend even when SSE2 is available
     bool prefer_x87 = false;
 
-    // Use libm functions instead of inline x87 assembly (currently compile-time only)
-    // These are included for completeness; runtime switching requires recompilation
-    bool use_libm_sin = true;
-    bool use_libm_cos = true;
-    bool use_libm_tan = true;
-    bool use_libm_exp = true;
-    bool use_libm_log = true;
-    bool use_libm_log10 = true;
-    bool use_libm_log2 = true;
-    bool use_libm_logb = true;
-    bool use_libm_ylog2 = true;
-    bool use_libm_generic_pow = true;
+    // Use libm functions instead of the inline x87 implementation.
+    bool use_libm_sin        = MEXCE_USE_LIBM_SIN != 0;
+    bool use_libm_cos        = MEXCE_USE_LIBM_COS != 0;
+    bool use_libm_tan        = MEXCE_USE_LIBM_TAN != 0;
+    bool use_libm_exp        = MEXCE_USE_LIBM_EXP != 0;
+    bool use_libm_log        = MEXCE_USE_LIBM_LOG != 0;
+    bool use_libm_log10      = MEXCE_USE_LIBM_LOG10 != 0;
+    bool use_libm_log2       = MEXCE_USE_LIBM_LOG2 != 0;
+    bool use_libm_logb       = MEXCE_USE_LIBM_LOGB != 0;
+    bool use_libm_ylog2      = MEXCE_USE_LIBM_YLOG2 != 0;
+    bool use_libm_generic_pow = MEXCE_USE_LIBM_GENERIC_POW != 0;
 
     // Convenience: set all libm options at once
     void set_use_libm(bool value) {
@@ -211,6 +304,40 @@ namespace impl {
     struct Variable;
     struct Function;
     struct mexce_charstream;
+    class Compilation_state;
+    class Semantic_graph_builder;
+    class Semantic_compiler;
+    class Clear_semantic_producer;
+    class Protected_semantic_sink;
+    struct Semantic_compilation_result;
+
+    enum class Protected_wipe_context
+    {
+        KEY,
+        PULL_STATE,
+        PUSH_STATE,
+        CLEAR_RECORD,
+        ADDITIONAL_DATA,
+        DECODED_SCALAR,
+        VALIDATOR_STATE,
+        PROTECTED_SCALAR,
+        OPTIMIZER_STATE,
+        CONSTANT_STORAGE,
+        FALLBACK_STORAGE,
+        OPTIONS_STORAGE,
+        EXECUTABLE,
+        COUNT,
+    };
+
+    using protected_wipe_function_t = void (*)(
+        void*, size_t, Protected_wipe_context);
+
+    enum class Compilation_test_fault
+    {
+        NONE,
+        EXECUTABLE_ALLOCATION,
+        EXECUTABLE_FINALIZATION,
+    };
 
     using std::abs;
     using std::deque;
@@ -274,6 +401,17 @@ public:
 
     void set_expression(std::string);
 
+    template <typename T>
+    void bind_protected(T& referenced_variable, uint32_t slot);
+
+    void unbind_protected(uint32_t slot);
+    void unbind_all_protected();
+
+    void set_protected_expression(
+        const uint8_t* program,
+        size_t program_size,
+        Protected_expression_key key);
+
     double evaluate();
 
     double evaluate(const std::string& expression);
@@ -329,30 +467,30 @@ public:
      * @brief Returns which backend was actually used for the current expression.
      * This may differ from the requested backend if fallback was needed.
      */
-    backend_type get_backend() const { return m_backend_used; }
+    backend_type get_backend() const;
 
 private:
     options                 m_options;
-
-    bool                    is_constant_expression      = false;
-    double                  constant_expression_value   = 0.0;
-    bool                    m_sse2_simplify_mode        = false;  // When true, asmd_optimizer reconstructs elist instead of x87 code
-    backend_type            m_backend_used              = backend_type::none;
-    size_t                  m_buffer_size               = 0;
-    std::string             m_expression;
-    std::string             m_last_expression;          // Saved for potential SSE2->x87 fallback re-parsing
-    impl::elist_t           m_elist;
-    std::list<std::string>  m_intermediate_code;
-    impl::constant_map_t    m_intermediate_constants;  // produced during expression simplification
     impl::variable_map_t    m_variables;
+    std::map<uint32_t, std::shared_ptr<impl::Variable>> m_protected_variables;
     impl::constant_map_t    m_constants;
-    uint64_t                m_next_element_id           = 0;
-    std::list<double>       m_cse_temps;               // Storage for common subexpressions
-    std::map<uint64_t, std::pair<impl::elist_t, double>> m_power_terms; // pow-optimized kernel/exponent for nested folding
+    uint64_t                m_next_variable_id          = 2;
+    std::unique_ptr<impl::Compilation_state> m_compilation;
+    impl::Compilation_state* m_active_compilation       = nullptr;
+    bool                    m_is_constant_expression    = false;
+    double                  m_constant_expression_value = 0.0;
+    double                (*m_evaluate_fptr)()          = nullptr;
+    backend_type            m_backend_used              = backend_type::none;
+    bool                    m_is_protected_expression   = false;
 
-    double                (*evaluate_fptr)()            = nullptr;
-
+    void reset_compiled_expression();
+    void publish_semantic_compilation(impl::Semantic_compilation_result result);
     void compile_and_finalize_elist(impl::elist_const_it_t first, impl::elist_const_it_t last);
+    impl::Semantic_compilation_result finish_semantic_compilation(
+        std::unique_ptr<impl::Compilation_state> candidate,
+        std::vector<std::shared_ptr<impl::Variable>> referenced_variables,
+        std::unique_ptr<impl::Compilation_state> fallback_candidate = nullptr);
+    impl::Compilation_state& active_compilation();
 
     // Grant friend access to helpers that need private state.
     friend std::shared_ptr<impl::Constant> impl::make_intermediate_constant(evaluator* ev, double v);
@@ -361,6 +499,9 @@ private:
     friend void impl::pow_optimizer(impl::elist_it_t it, evaluator* ev, impl::elist_t* elist);
     friend uint8_t* impl::push_intermediate_code(evaluator* ev, const std::string& s);
     friend void impl::run_cse(evaluator* ev, impl::elist_t& elist);
+    friend class impl::Semantic_compiler;
+    friend class impl::Clear_semantic_producer;
+    friend class impl::Protected_semantic_sink;
 
     template <typename = void> void bind() {}
     template <typename = void> void unbind() {}
@@ -422,8 +563,21 @@ uint8_t* get_executable_buffer(size_t sz)
 }
 
 
+class Executable_memory_error: public std::runtime_error
+{
+public:
+    explicit Executable_memory_error(const char* message)
+    :
+        std::runtime_error(message)
+    {}
+};
+
+
 inline
-double (*lock_executable_buffer(uint8_t* buffer, size_t sz))()
+double (*lock_executable_buffer(
+    uint8_t* buffer,
+    size_t sz,
+    protected_wipe_function_t wipe = nullptr))()
 {
     if (sz == 0) {
         throw std::runtime_error("lock_executable_buffer requires a non-zero size");
@@ -431,30 +585,56 @@ double (*lock_executable_buffer(uint8_t* buffer, size_t sz))()
 #ifdef _WIN32
     DWORD old_protect = 0;
     if (!VirtualProtect(buffer, sz, PAGE_EXECUTE_READ, &old_protect)) {
+        if (wipe) {
+            wipe(buffer, sz, Protected_wipe_context::EXECUTABLE);
+        }
         VirtualFree((void*)buffer, 0, MEM_RELEASE);
-        throw std::runtime_error("VirtualProtect(PAGE_EXECUTE_READ) failed");
+        throw Executable_memory_error("VirtualProtect(PAGE_EXECUTE_READ) failed");
     }
     FlushInstructionCache(GetCurrentProcess(), buffer, sz);
 #elif defined(__linux__)
     if (mprotect((void*)buffer, sz, PROT_READ | PROT_EXEC) != 0) {
+        if (wipe) {
+            wipe(buffer, sz, Protected_wipe_context::EXECUTABLE);
+        }
         munmap((void*)buffer, sz);
-        throw std::runtime_error("mprotect(PROT_READ|PROT_EXEC) failed");
+        throw Executable_memory_error("mprotect(PROT_READ|PROT_EXEC) failed");
     }
 #endif
     return reinterpret_cast<double (*)()>(buffer);
 }
 
 
+#if defined(__clang__)
+__attribute__((no_sanitize("function")))
+#endif
+inline double invoke_generated(double (*function)())
+{
+    return function();
+}
+
+
 inline
-void free_executable_buffer(double (*buffer)(), size_t sz)
+void free_executable_buffer(
+    double (*buffer)(),
+    size_t sz,
+    protected_wipe_function_t wipe = nullptr)
 {
     if (!buffer) {
         return;
     }
 #ifdef _WIN32
-    (void)sz; // prevent warning
+    if (wipe) {
+        DWORD old_protect = 0;
+        if (VirtualProtect((void*)buffer, sz, PAGE_READWRITE, &old_protect)) {
+            wipe((void*)buffer, sz, Protected_wipe_context::EXECUTABLE);
+        }
+    }
     VirtualFree( (void*) buffer, 0, MEM_RELEASE);
 #elif defined(__linux__)
+    if (wipe && mprotect((void*)buffer, sz, PROT_READ | PROT_WRITE) == 0) {
+        wipe((void*)buffer, sz, Protected_wipe_context::EXECUTABLE);
+    }
     munmap((void *) buffer, sz);
 #endif
 }
@@ -514,6 +694,8 @@ string double_to_hex( double v )
 
 struct Constant
 {
+    struct Protected_value {};
+
     uint64_t          id;
     string            name;
     double            value;
@@ -528,6 +710,11 @@ struct Constant
 
     Constant(uint64_t i, double v):
         id(i), name(double_to_hex(v)), value(v),
+        address((void*)&this->value), numeric_data_type(M64FP)
+    {}
+
+    Constant(uint64_t i, double v, Protected_value):
+        id(i), name(), value(v),
         address((void*)&this->value), numeric_data_type(M64FP)
     {}
 };
@@ -566,7 +753,8 @@ struct Function
     string              code;
     optimizer_t         optimizer;
 
-    bool                force_not_constant = false;
+    bool                force_not_constant     = false;
+    bool                m_requires_x87_backend = false;
     string              debug_desc;
     string              cse_store_suffix;  // CSE store code to emit after function code (x87)
     double*             cse_store_addr = nullptr;  // CSE temp address for backend-agnostic store
@@ -610,6 +798,352 @@ struct Element {
 };
 
 
+// Executable code can retain addresses into every container below.  Releasing
+// the code in the destructor body makes it uncallable before those containers
+// are destroyed.
+class Compilation_state
+{
+public:
+    enum class Protected_storage_role
+    {
+        PRIMARY,
+        FALLBACK,
+    };
+
+    Compilation_state(
+        const options& effective_options,
+        uint64_t first_element_id,
+        protected_wipe_function_t protected_wipe = nullptr,
+        Compilation_test_fault test_fault = Compilation_test_fault::NONE,
+        Protected_storage_role storage_role = Protected_storage_role::PRIMARY)
+    :
+        m_effective_options(effective_options),
+        m_next_element_id(first_element_id),
+        m_protected_wipe(protected_wipe),
+        m_test_fault(test_fault),
+        m_storage_role(storage_role)
+    {}
+
+    ~Compilation_state()
+    {
+        release_executable();
+        wipe_protected_state();
+    }
+
+    Compilation_state(const Compilation_state&) = delete;
+    Compilation_state& operator=(const Compilation_state&) = delete;
+
+    void release_executable()
+    {
+        free_executable_buffer(m_evaluate_fptr, m_buffer_size, m_protected_wipe);
+        m_evaluate_fptr = nullptr;
+        m_buffer_size   = 0;
+        m_backend_used  = backend_type::none;
+    }
+
+    bool is_protected() const { return m_protected_wipe != nullptr; }
+    protected_wipe_function_t protected_wipe() const { return m_protected_wipe; }
+    Compilation_test_fault test_fault() const { return m_test_fault; }
+    bool fail_executable_allocation() const
+    {
+        return m_test_fault == Compilation_test_fault::EXECUTABLE_ALLOCATION;
+    }
+    bool fail_executable_finalization() const
+    {
+        return m_test_fault == Compilation_test_fault::EXECUTABLE_FINALIZATION;
+    }
+    void wipe_protected_scalar(void* value, size_t size)
+    {
+        if (m_protected_wipe) {
+            m_protected_wipe(value, size, protected_storage_context());
+        }
+    }
+
+    options                 m_effective_options;
+    bool                    m_is_constant_expression    = false;
+    double                  m_constant_expression_value = 0.0;
+    bool                    m_sse2_simplify_mode        = false;
+    backend_type            m_backend_used              = backend_type::none;
+    size_t                  m_buffer_size               = 0;
+    elist_t                 m_elist;
+    std::list<std::string>  m_intermediate_code;
+    constant_map_t          m_intermediate_constants;
+    std::list<std::shared_ptr<Constant>> m_protected_constants;
+    uint64_t                m_next_element_id;
+    std::list<double>       m_cse_temps;
+    std::map<uint64_t, std::pair<elist_t, double>> m_power_terms;
+    double                (*m_evaluate_fptr)()          = nullptr;
+
+private:
+    Protected_wipe_context protected_storage_context() const
+    {
+        return m_storage_role == Protected_storage_role::FALLBACK
+            ? Protected_wipe_context::FALLBACK_STORAGE
+            : Protected_wipe_context::CONSTANT_STORAGE;
+    }
+
+    Protected_wipe_context optimizer_storage_context() const
+    {
+        return m_storage_role == Protected_storage_role::FALLBACK
+            ? Protected_wipe_context::FALLBACK_STORAGE
+            : Protected_wipe_context::OPTIMIZER_STATE;
+    }
+
+    void wipe_string(string& value, Protected_wipe_context context)
+    {
+        if (!value.empty()) {
+            m_protected_wipe(&value[0], value.size(), context);
+        }
+    }
+
+    void wipe_element(Element& element)
+    {
+        if (element.c) {
+            return;
+        }
+        if (element.f) {
+            const auto context = optimizer_storage_context();
+            wipe_string(element.f->name, context);
+            wipe_string(element.f->code, context);
+            wipe_string(element.f->debug_desc, context);
+            wipe_string(element.f->cse_store_suffix, context);
+            for (auto& absorbed_group : element.f->absorbed) {
+                for (auto& absorbed : absorbed_group) {
+                    for (auto& nested : absorbed) {
+                        wipe_element(nested);
+                    }
+                }
+            }
+        }
+    }
+
+    void wipe_protected_state()
+    {
+        if (!m_protected_wipe) {
+            return;
+        }
+
+        m_protected_wipe(
+            &m_constant_expression_value,
+            sizeof(m_constant_expression_value),
+            protected_storage_context());
+        m_protected_wipe(
+            &m_effective_options,
+            sizeof(m_effective_options),
+            Protected_wipe_context::OPTIONS_STORAGE);
+        for (auto& element : m_elist) {
+            wipe_element(element);
+        }
+        for (auto& code : m_intermediate_code) {
+            wipe_string(code, optimizer_storage_context());
+        }
+        for (auto& constant : m_intermediate_constants) {
+            m_protected_wipe(
+                &constant.second->value,
+                sizeof(constant.second->value),
+                protected_storage_context());
+            wipe_string(constant.second->name, protected_storage_context());
+        }
+        for (auto& constant : m_protected_constants) {
+            m_protected_wipe(
+                &constant->value,
+                sizeof(constant->value),
+                protected_storage_context());
+            wipe_string(constant->name, protected_storage_context());
+        }
+        for (auto& value : m_cse_temps) {
+            m_protected_wipe(
+                &value, sizeof(value), optimizer_storage_context());
+        }
+        for (auto& power_term : m_power_terms) {
+            for (auto& element : power_term.second.first) {
+                wipe_element(element);
+            }
+            m_protected_wipe(
+                &power_term.second.second,
+                sizeof(power_term.second.second),
+                optimizer_storage_context());
+        }
+    }
+
+    protected_wipe_function_t m_protected_wipe;
+    Compilation_test_fault    m_test_fault;
+    Protected_storage_role    m_storage_role;
+};
+
+
+class Semantic_graph_builder
+{
+public:
+    explicit Semantic_graph_builder(evaluator& owner)
+    :
+        m_owner(owner)
+    {}
+
+    void reset(Compilation_state& compilation);
+    void clear() { m_compilation = nullptr; }
+    void push_literal(double value);
+    void push_variable(const shared_ptr<Variable>& variable);
+    void call(const string& name);
+    void finish() const;
+
+private:
+    evaluator&          m_owner;
+    Compilation_state*  m_compilation = nullptr;
+    size_t              m_stack_depth = 0;
+};
+
+
+enum class Semantic_record_kind
+{
+    LITERAL,
+    VARIABLE,
+    CALL,
+};
+
+
+class Semantic_record
+{
+public:
+    explicit Semantic_record(double literal)
+    :
+        m_kind(Semantic_record_kind::LITERAL),
+        m_literal(literal)
+    {}
+
+    explicit Semantic_record(const Variable* variable)
+    :
+        m_kind(Semantic_record_kind::VARIABLE),
+        m_variable(variable)
+    {}
+
+    explicit Semantic_record(const Function* function)
+    :
+        m_kind(Semantic_record_kind::CALL),
+        m_function(function)
+    {}
+
+    Semantic_record_kind kind() const       { return m_kind;     }
+    double literal() const                  { return m_literal;  }
+    const Variable* variable() const        { return m_variable; }
+    const Function* function() const        { return m_function; }
+
+private:
+    Semantic_record_kind m_kind;
+    union
+    {
+        double          m_literal;
+        const Variable* m_variable;
+        const Function* m_function;
+    };
+};
+
+
+using Semantic_program = vector<Semantic_record>;
+
+
+class Semantic_program_wipe_guard
+{
+public:
+    Semantic_program_wipe_guard(
+        Semantic_program& program,
+        protected_wipe_function_t wipe)
+    :
+        m_program(program),
+        m_wipe(wipe)
+    {}
+
+    ~Semantic_program_wipe_guard()
+    {
+        if (m_wipe && !m_program.empty()) {
+            m_wipe(
+                &m_program[0],
+                m_program.size() * sizeof(m_program[0]),
+                Protected_wipe_context::OPTIMIZER_STATE);
+        }
+    }
+
+private:
+    Semantic_program&          m_program;
+    protected_wipe_function_t  m_wipe;
+};
+
+
+struct Semantic_compilation_result
+{
+    std::unique_ptr<Compilation_state> compilation;
+    vector<shared_ptr<Variable>>       referenced_variables;
+};
+
+
+class Active_compilation_reset
+{
+public:
+    explicit Active_compilation_reset(Compilation_state*& active)
+    :
+        m_active(active)
+    {
+        assert(m_active == nullptr);
+    }
+
+    ~Active_compilation_reset() { m_active = nullptr; }
+
+    void set(Compilation_state* compilation) { m_active = compilation; }
+    void clear()                              { m_active = nullptr;     }
+
+private:
+    Compilation_state*& m_active;
+};
+
+
+class Semantic_compiler
+{
+public:
+    Semantic_compiler(
+        evaluator& owner,
+        const options& effective_options,
+        uint64_t first_element_id,
+        protected_wipe_function_t protected_wipe = nullptr,
+        Compilation_test_fault test_fault = Compilation_test_fault::NONE);
+
+    void consume(const Semantic_record& record);
+    void consume_literal(double value);
+    void consume_variable(const shared_ptr<Variable>& variable);
+    void consume_call(const string& name);
+    Semantic_compilation_result finish();
+
+private:
+    void consume_literal_into(
+        Compilation_state& compilation,
+        Semantic_graph_builder& builder,
+        double value);
+    void consume_variable_into(
+        Compilation_state& compilation,
+        Semantic_graph_builder& builder,
+        const shared_ptr<Variable>& variable);
+    void consume_call_into(
+        Compilation_state& compilation,
+        Semantic_graph_builder& builder,
+        const string& name);
+
+    evaluator&                         m_owner;
+    std::unique_ptr<Compilation_state> m_candidate;
+    Semantic_graph_builder             m_graph_builder;
+    std::unique_ptr<Compilation_state> m_fallback_candidate;
+    Semantic_graph_builder             m_fallback_graph_builder;
+    Active_compilation_reset           m_active_compilation_reset;
+    vector<shared_ptr<Variable>>       m_referenced_variables;
+    std::set<Variable*>                m_referenced_variable_set;
+};
+
+
+class Clear_semantic_producer
+{
+public:
+    static Semantic_program produce(evaluator& owner, string expression);
+};
+
+
 
 struct mexce_charstream {
     vector<uint8_t> buf;
@@ -644,11 +1178,25 @@ void patch_rel32(mexce_charstream& s, size_t rel32_pos, size_t target_pos)
 inline
 shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v)
 {
+    auto& compilation = ev->active_compilation();
+    if (compilation.is_protected()) {
+        compilation.m_protected_constants.push_back(shared_ptr<Constant>());
+        try {
+            compilation.m_protected_constants.back() = make_shared<Constant>(
+                compilation.m_next_element_id++, v, Constant::Protected_value());
+        }
+        catch (...) {
+            compilation.m_protected_constants.pop_back();
+            throw;
+        }
+        return compilation.m_protected_constants.back();
+    }
+
     auto name = double_to_hex(v);
-    auto it = ev->m_intermediate_constants.find(name);
-    if (it == ev->m_intermediate_constants.end()) {
-        auto sc = make_shared<Constant>(ev->m_next_element_id++, v);
-        ev->m_intermediate_constants[name] = sc;
+    auto it = compilation.m_intermediate_constants.find(name);
+    if (it == compilation.m_intermediate_constants.end()) {
+        auto sc = make_shared<Constant>(compilation.m_next_element_id++, v);
+        compilation.m_intermediate_constants[name] = sc;
         return sc;
     }
     else {
@@ -660,9 +1208,10 @@ shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v)
 inline
 uint8_t* push_intermediate_code(evaluator* ev, const string& s)
 {
-    ev->m_intermediate_code.push_back(string());
-    ev->m_intermediate_code.back() = s;
-    return (uint8_t*)&ev->m_intermediate_code.back()[0];
+    auto& compilation = ev->active_compilation();
+    compilation.m_intermediate_code.push_back(string());
+    compilation.m_intermediate_code.back() = s;
+    return (uint8_t*)&compilation.m_intermediate_code.back()[0];
 }
 
 
@@ -726,46 +1275,6 @@ Token_type get_infix_rank(char infix_op)
 #   define MEXCE_TRIG_USE_PIO2_KERNEL 0
 #endif
 
-
-// --- Libm-backed transcendental functions ---
-//
-// mexce historically used x87 transcendental instructions for exp/log/pow, etc.
-// On many modern targets libm implementations can be faster, so these are
-// enabled by default but can be disabled at compile time.
-#ifndef MEXCE_USE_LIBM_TRANSCENDENTALS
-#   define MEXCE_USE_LIBM_TRANSCENDENTALS 1
-#endif
-#ifndef MEXCE_USE_LIBM_GENERIC_POW
-#   define MEXCE_USE_LIBM_GENERIC_POW MEXCE_USE_LIBM_TRANSCENDENTALS
-#endif
-#ifndef MEXCE_USE_LIBM_EXP
-#   define MEXCE_USE_LIBM_EXP MEXCE_USE_LIBM_TRANSCENDENTALS
-#endif
-#ifndef MEXCE_USE_LIBM_LOG
-#   define MEXCE_USE_LIBM_LOG MEXCE_USE_LIBM_TRANSCENDENTALS
-#endif
-#ifndef MEXCE_USE_LIBM_LOG10
-#   define MEXCE_USE_LIBM_LOG10 MEXCE_USE_LIBM_TRANSCENDENTALS
-#endif
-#ifndef MEXCE_USE_LIBM_LOG2
-#   define MEXCE_USE_LIBM_LOG2 MEXCE_USE_LIBM_TRANSCENDENTALS
-#endif
-#ifndef MEXCE_USE_LIBM_LOGB
-#   define MEXCE_USE_LIBM_LOGB MEXCE_USE_LIBM_TRANSCENDENTALS
-#endif
-#ifndef MEXCE_USE_LIBM_YLOG2
-#   define MEXCE_USE_LIBM_YLOG2 MEXCE_USE_LIBM_TRANSCENDENTALS
-#endif
-
-#ifndef MEXCE_USE_LIBM_SIN
-#   define MEXCE_USE_LIBM_SIN MEXCE_USE_LIBM_TRANSCENDENTALS
-#endif
-#ifndef MEXCE_USE_LIBM_COS
-#   define MEXCE_USE_LIBM_COS MEXCE_USE_LIBM_TRANSCENDENTALS
-#endif
-#ifndef MEXCE_USE_LIBM_TAN
-#   define MEXCE_USE_LIBM_TAN MEXCE_USE_LIBM_TRANSCENDENTALS
-#endif
 
 // --- Optional compile-time optimizations ---
 #ifndef MEXCE_ENABLE_CSE
@@ -1016,13 +1525,14 @@ static const double mexce_trig_tan_x_thresholds[] = {
     0xdd,0xd9, /* fstp  st(1)   (pop -1) */ \
     0xde,0xe9  /* fsubp st(1), st => x - π/2 */
 
-inline Function Cos()
+inline Function Cos(bool use_libm = MEXCE_USE_LIBM_COS != 0)
 {
-#if MEXCE_USE_LIBM_COS
-    mexce_charstream s;
-    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::cos));
-    return Function(0, "cos", 1, 1, s.buf.size(), s.buf.data());
-#elif MEXCE_TRIG_USE_X87
+    if (use_libm) {
+        mexce_charstream s;
+        emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::cos));
+        return Function(0, "cos", 1, 1, s.buf.size(), s.buf.data());
+    }
+#if MEXCE_TRIG_USE_X87
     uint8_t code[] = { 0xd9, 0xff }; // fcos
     return Function(0, "cos", 1, 0, sizeof(code), code);
 #else
@@ -1361,13 +1871,14 @@ inline Function Cos()
 
 
 
-inline Function Sin()
+inline Function Sin(bool use_libm = MEXCE_USE_LIBM_SIN != 0)
 {
-#if MEXCE_USE_LIBM_SIN
-    mexce_charstream s;
-    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::sin));
-    return Function(0, "sin", 1, 1, s.buf.size(), s.buf.data());
-#elif MEXCE_TRIG_USE_X87
+    if (use_libm) {
+        mexce_charstream s;
+        emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::sin));
+        return Function(0, "sin", 1, 1, s.buf.size(), s.buf.data());
+    }
+#if MEXCE_TRIG_USE_X87
     uint8_t code[] = { 0xd9, 0xfe }; // fsin
     return Function(0, "sin", 1, 0, sizeof(code), code);
 #else
@@ -1716,13 +2227,14 @@ inline Function Sin()
 }
 
 
-inline Function Tan()
+inline Function Tan(bool use_libm = MEXCE_USE_LIBM_TAN != 0)
 {
-#if MEXCE_USE_LIBM_TAN
-    mexce_charstream s;
-    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::tan));
-    return Function(0, "tan", 1, 1, s.buf.size(), s.buf.data());
-#elif MEXCE_TRIG_USE_X87
+    if (use_libm) {
+        mexce_charstream s;
+        emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::tan));
+        return Function(0, "tan", 1, 1, s.buf.size(), s.buf.data());
+    }
+#if MEXCE_TRIG_USE_X87
     uint8_t code[] = {
         0xd9, 0xf2,                                 // fptan
         0xdd, 0xd8                                  // fstp        st(0)
@@ -2211,6 +2723,7 @@ void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
 inline
 void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
+    auto& compilation = ev->active_compilation();
     auto f = it->f;
 
     // Nested power folding: (a^b)^n -> a^(b*n) when the outer exponent is an integer.
@@ -2218,8 +2731,8 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     // avoids spurious NaNs from intermediate real-domain pow/sqrt on negative bases.
     if (f->args[0]->type == Element_type::CCONST && f->args[1]->type == Element_type::CFUNC) {
         const uint64_t base_id = f->args[1]->id;
-        auto pit = ev->m_power_terms.find(base_id);
-        if (pit != ev->m_power_terms.end()) {
+        auto pit = compilation.m_power_terms.find(base_id);
+        if (pit != compilation.m_power_terms.end()) {
             const double outer_exp_d = f->args[0]->c->value;
             const double outer_round = round(outer_exp_d);
             if (std::isfinite(outer_exp_d) && outer_round == outer_exp_d) {
@@ -2239,7 +2752,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                     }
 
                     elist->erase(base_it);
-                    ev->m_power_terms.erase(pit);
+                    compilation.m_power_terms.erase(pit);
                 }
             }
         }
@@ -2306,30 +2819,35 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             compile_elist(final_s, base_chunk.begin(), base_chunk.end());
             final_s.write((const char*)s.buf.data(), s.buf.size());
 
-            // Generate correct debug string
-            string base_str = elist_to_string(base_chunk);
-            stringstream ss;
-            if (optimized_name == "sqrt") {
-                ss << "sqrt(" << base_str << ")";
+            if (!compilation.is_protected()) {
+                const string base_string = elist_to_string(base_chunk);
+                stringstream stream;
+                if (optimized_name == "sqrt") {
+                    stream << "sqrt(" << base_string << ")";
+                }
+                else
+                if (optimized_name == "inv_sqrt") {
+                    stream << "inv_sqrt(" << base_string << ")";
+                }
+                else
+                if (optimized_name == "pow_int") {
+                    stream << "pow_int(" << base_string << ", "
+                        << static_cast<int64_t>(v_d) << ")";
+                }
+                debug_desc = stream.str();
             }
-            else
-            if (optimized_name == "inv_sqrt") {
-                ss << "inv_sqrt(" << base_str << ")";
-            }
-            else
-            if (optimized_name == "pow_int") {
-                ss << "pow_int(" << base_str << ", " << static_cast<int64_t>(v_d) << ")";
-            }
-            debug_desc = ss.str();
 
             uint8_t* cc = push_intermediate_code(ev, final_s.str());
-            auto f_opt = make_shared<Function>(ev->m_next_element_id++, optimized_name, 0, 0, final_s.buf.size(), cc, nullptr);
+            auto f_opt = make_shared<Function>(
+                compilation.m_next_element_id++, optimized_name, 0, 0,
+                final_s.buf.size(), cc, nullptr);
+            f_opt->m_requires_x87_backend = true;
             f_opt->debug_desc = debug_desc;
             f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
             f_opt->cse_store_addr = f->cse_store_addr;      // Preserve CSE temp address
 
             if (optimized_name == "sqrt" || optimized_name == "inv_sqrt" || optimized_name == "pow_int") {
-                ev->m_power_terms[f_opt->id] = std::make_pair(std::move(base_chunk), v_d);
+                compilation.m_power_terms[f_opt->id] = std::make_pair(std::move(base_chunk), v_d);
             }
 
             elist->erase(f->args[0]); // Exponent (constant)
@@ -2338,11 +2856,14 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         }
         else {
             // Generic pow (non-integer constant exponent)
-            mexce_charstream s;
-#if MEXCE_USE_LIBM_GENERIC_POW
-            emit_libm_binary_call(s, (void*)static_cast<double(*)(double,double)>(std::pow));
-#else
-            s < 0xd9 < 0xc9                         // fxch                                 }
+            mexce_charstream generic_code;
+            if (compilation.m_effective_options.use_libm_generic_pow) {
+                emit_libm_binary_call(
+                    generic_code,
+                    (void*)static_cast<double(*)(double,double)>(std::pow));
+            }
+            else {
+                generic_code < 0xd9 < 0xc9          // fxch                                 }
               < 0xd9 < 0xe4                         // ftst                                 } if base is 0, leave it in st(0)
               < 0xdf < 0xe0                         // fnstsw      ax                       } and exit
               < 0x9e                                // sahf                                 }
@@ -2358,11 +2879,14 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
               < 0x77 < 0x02                         // ja          store_and_exit
               < 0xd9 < 0xe0                         // fchs
 // store_and_exit:
-              < 0xdd < 0xd9;                        // fstp        st(1)
-#endif
+                  < 0xdd < 0xd9;                    // fstp        st(1)
+            }
 
-            uint8_t* cc = push_intermediate_code(ev, s.str());
-            auto f_opt = make_shared<Function>(ev->m_next_element_id++, "pow_opt", 2, 0, s.buf.size(), cc, nullptr);
+            uint8_t* cc = push_intermediate_code(ev, generic_code.str());
+            auto f_opt = make_shared<Function>(
+                compilation.m_next_element_id++, "pow_opt", 2, 0,
+                generic_code.buf.size(), cc, nullptr);
+            f_opt->m_requires_x87_backend = true;
             f_opt->args[0] = f->args[0];
             f_opt->args[1] = f->args[1];
             f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
@@ -2373,7 +2897,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 }
 
 
-inline Function Pow()
+inline Function Pow(bool use_libm = MEXCE_USE_LIBM_GENERIC_POW != 0)
 {
     // Pow() has several fast paths (small integer exponents, etc.).
     // We only replace the expensive generic pow path with an optional libm call.
@@ -2442,28 +2966,32 @@ inline Function Pow()
     s <0xe9; size_t jmp_exit_point_zeroexp = s.buf.size(); s << int32_t(0);           // jmp exit_point
 
     const size_t non_zero_exponent = s.buf.size();
-#if MEXCE_USE_LIBM_GENERIC_POW
-    emit_libm_binary_call(s, (void*)static_cast<double(*)(double,double)>(std::pow));
-#else
-    // Original x87 generic pow implementation (kept as a fallback)
-    s <0xd9 <0xc9;                                  // fxch
-    s <0xd9 <0xe4;                                  // ftst
-    s <0xdf <0xe0;                                  // fnstsw      ax
-    s <0x9e;                                        // sahf
-    s <0x0f <0x84; size_t je_store_and_exit = s.buf.size(); s << int32_t(0);          // je store_and_exit
-    s <0xd9 <0xe1;                                  // fabs
-    s <0xd9 <0xf1;                                  // fyl2x
-    s <0xd9 <0xe8;                                  // fld1
-    s <0xd9 <0xc1;                                  // fld         st(1)
-    s <0xd9 <0xf8;                                  // fprem
-    s <0xd9 <0xf0;                                  // f2xm1
-    s <0xde <0xc1;                                  // faddp       st(1), st
-    s <0xd9 <0xfd;                                  // fscale
-    s <0x0f <0x87; size_t ja_store_and_exit = s.buf.size(); s << int32_t(0);          // ja store_and_exit
-    s <0xd9 <0xe0;                                  // fchs
-    const size_t store_and_exit = s.buf.size();
-    s <0xdd <0xd9;                                  // fstp        st(1)
-#endif
+    size_t je_store_and_exit = 0;
+    size_t ja_store_and_exit = 0;
+    size_t store_and_exit    = 0;
+    if (use_libm) {
+        emit_libm_binary_call(
+            s, (void*)static_cast<double(*)(double,double)>(std::pow));
+    }
+    else {
+        s <0xd9 <0xc9;                              // fxch
+        s <0xd9 <0xe4;                              // ftst
+        s <0xdf <0xe0;                              // fnstsw      ax
+        s <0x9e;                                    // sahf
+        s <0x0f <0x84; je_store_and_exit = s.buf.size(); s << int32_t(0);
+        s <0xd9 <0xe1;                              // fabs
+        s <0xd9 <0xf1;                              // fyl2x
+        s <0xd9 <0xe8;                              // fld1
+        s <0xd9 <0xc1;                              // fld         st(1)
+        s <0xd9 <0xf8;                              // fprem
+        s <0xd9 <0xf0;                              // f2xm1
+        s <0xde <0xc1;                              // faddp       st(1), st
+        s <0xd9 <0xfd;                              // fscale
+        s <0x0f <0x87; ja_store_and_exit = s.buf.size(); s << int32_t(0);
+        s <0xd9 <0xe0;                              // fchs
+        store_and_exit = s.buf.size();
+        s <0xdd <0xd9;                              // fstp        st(1)
+    }
     s <0xe9; size_t jmp_exit_from_generic = s.buf.size(); s << int32_t(0);  // jmp exit_point
 
 #ifdef MEXCE_64
@@ -2497,22 +3025,22 @@ inline Function Pow()
     patch_rel32(s, jmp_loop_start, loop_start);
     patch_rel32(s, jne_non_zero_exponent, non_zero_exponent);
     patch_rel32(s, jmp_exit_point_zeroexp, exit_point);
-#if !MEXCE_USE_LIBM_GENERIC_POW
-    patch_rel32(s, je_store_and_exit, store_and_exit);
-    patch_rel32(s, ja_store_and_exit, store_and_exit);
-#endif
+    if (!use_libm) {
+        patch_rel32(s, je_store_and_exit, store_and_exit);
+        patch_rel32(s, ja_store_and_exit, store_and_exit);
+    }
 
     return Function(0, "pow", 2, 1, s.buf.size(), s.buf.data(), pow_optimizer);
 }
 
 
-inline Function Exp()
+inline Function Exp(bool use_libm = MEXCE_USE_LIBM_EXP != 0)
 {
-#if MEXCE_USE_LIBM_EXP
-    mexce_charstream s;
-    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::exp));
-    return Function(0, "exp", 1, 1, s.buf.size(), s.buf.data());
-#else
+    if (use_libm) {
+        mexce_charstream s;
+        emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::exp));
+        return Function(0, "exp", 1, 1, s.buf.size(), s.buf.data());
+    }
     uint8_t code[] = {
         0xd9, 0xea,                                 // fldl2e
         0xde, 0xc9,                                 // fmulp       st(1), st
@@ -2525,17 +3053,16 @@ inline Function Exp()
         0xdd, 0xd9,                                 // fstp        st(1)
     };
     return Function(0, "exp", 1, 1, sizeof(code), code);
-#endif
 }
 
 
-inline Function Logb()
+inline Function Logb(bool use_libm = MEXCE_USE_LIBM_LOGB != 0)
 {
-#if MEXCE_USE_LIBM_LOGB
-    mexce_charstream s;
-    emit_libm_binary_call(s, (void*)&mexce_libm_logb);
-    return Function(0, "logb", 2, 1, s.buf.size(), s.buf.data());
-#else
+    if (use_libm) {
+        mexce_charstream s;
+        emit_libm_binary_call(s, (void*)&mexce_libm_logb);
+        return Function(0, "logb", 2, 1, s.buf.size(), s.buf.data());
+    }
     uint8_t code[] = {
         0xd9, 0xe8,                                 // fld1
         0xd9, 0xc9,                                 // fxch        st(1)
@@ -2547,17 +3074,16 @@ inline Function Logb()
         0xde, 0xf9                                  // fdivp       st(1), st
     };
     return Function(0, "logb", 2, 1, sizeof(code), code);
-#endif
 }
 
 
-inline Function Ln()
+inline Function Ln(bool use_libm = MEXCE_USE_LIBM_LOG != 0)
 {
-#if MEXCE_USE_LIBM_LOG
-    mexce_charstream s;
-    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::log));
-    return Function(0, "ln", 1, 1, s.buf.size(), s.buf.data());
-#else
+    if (use_libm) {
+        mexce_charstream s;
+        emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::log));
+        return Function(0, "ln", 1, 1, s.buf.size(), s.buf.data());
+    }
     uint8_t code[] = {
         0xd9, 0xe8,                                 // fld1
         0xd9, 0xc9,                                 // fxch
@@ -2566,63 +3092,59 @@ inline Function Ln()
         0xde, 0xf9                                  // fdivp       st(1), st
     };
     return Function(0, "ln", 1, 1, sizeof(code), code);
-#endif
 }
 
-inline Function Log()
+inline Function Log(bool use_libm = MEXCE_USE_LIBM_LOG != 0)
 {
-    Function f = Ln();
+    Function f = Ln(use_libm);
     f.name="log";
     return f;
 }
 
 
-inline Function Log10()
+inline Function Log10(bool use_libm = MEXCE_USE_LIBM_LOG10 != 0)
 {
-#if MEXCE_USE_LIBM_LOG10
-    mexce_charstream s;
-    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::log10));
-    return Function(0, "log10", 1, 0, s.buf.size(), s.buf.data());
-#else
+    if (use_libm) {
+        mexce_charstream s;
+        emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::log10));
+        return Function(0, "log10", 1, 0, s.buf.size(), s.buf.data());
+    }
     uint8_t code[] = {
         0xd9, 0xec, // fldlg2
         0xd9, 0xc9, // fxch
         0xd9, 0xf1  // fyl2x
     };
     return Function(0, "log10", 1, 0, sizeof(code), code);
-#endif
 }
 
 
-inline Function Log2()
+inline Function Log2(bool use_libm = MEXCE_USE_LIBM_LOG2 != 0)
 {
-#if MEXCE_USE_LIBM_LOG2
-    mexce_charstream s;
-    emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::log2));
-    return Function(0, "log2", 1, 0, s.buf.size(), s.buf.data());
-#else
+    if (use_libm) {
+        mexce_charstream s;
+        emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::log2));
+        return Function(0, "log2", 1, 0, s.buf.size(), s.buf.data());
+    }
     uint8_t code[] = {
         0xd9, 0xe8,                                 // fld1
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1                                  // fyl2x
     };
     return Function(0, "log2", 1, 0, sizeof(code), code);
-#endif
 }
 
 
-inline Function Ylog2()
+inline Function Ylog2(bool use_libm = MEXCE_USE_LIBM_YLOG2 != 0)
 {
-#if MEXCE_USE_LIBM_YLOG2
-    mexce_charstream s;
-    emit_libm_binary_call(s, (void*)&mexce_libm_ylog2);
-    return Function(0, "ylog2", 2, 0, s.buf.size(), s.buf.data());
-#else
+    if (use_libm) {
+        mexce_charstream s;
+        emit_libm_binary_call(s, (void*)&mexce_libm_ylog2);
+        return Function(0, "ylog2", 2, 0, s.buf.size(), s.buf.data());
+    }
     uint8_t code[] = {
         0xd9, 0xf1                                  // fyl2x
     };
     return Function(0, "ylog2", 2, 0, sizeof(code), code);
-#endif
 }
 
 
@@ -3219,7 +3741,10 @@ inline bool sse2_needs_libm_calls(const impl::elist_const_it_t first, const impl
 {
     using namespace impl;
     for (auto it = first; it != last; ++it) {
-        if (it->type == Element_type::CFUNC && is_sse2_libm_function(it->f->name)) {
+        if (it->type == Element_type::CFUNC &&
+            !it->f->m_requires_x87_backend &&
+            is_sse2_libm_function(it->f->name))
+        {
             return true;
         }
     }
@@ -3247,9 +3772,7 @@ inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::e
 
     for (auto it = first; it != last; ++it) {
         if (it->type == Element_type::CFUNC) {
-            // Optimized functions (from pow_optimizer etc.) have embedded x87 code
-            // and a non-empty debug_desc. These cannot be handled by SSE2.
-            if (!it->f->debug_desc.empty()) {
+            if (it->f->m_requires_x87_backend) {
                 return false;
             }
             if (!is_sse2_supported_function(it->f->name)) {
@@ -4325,6 +4848,7 @@ string elist_to_string(const elist_t& elist)
 inline
 void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
+    auto& compilation = ev->active_compilation();
     auto f = it->f;
     auto fname = f->name;
     int fclass = (fname == "add" || fname == "sub") ? 1 : (fname == "mul" || fname == "div") ? 2 : 0;
@@ -4429,7 +4953,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             const bool would_cancel_or_cross_zero =
                 ((merged.back().factor > 0 && term.factor < 0) ||
                  (merged.back().factor < 0 && term.factor > 0));
-            if (!ev->m_options.fast_math && would_cancel_or_cross_zero) {
+            if (!compilation.m_effective_options.fast_math && would_cancel_or_cross_zero) {
                 if (term.factor != 0) {
                     merged.push_back({std::move(term.chunk), term.factor});
                 }
@@ -4449,46 +4973,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     // === SSE2 simplification: reconstruct simplified elist ===
     // Instead of generating x87 code, build a new elist from the simplified terms.
-    if (ev->m_sse2_simplify_mode) {
-        // Build debug string for get_optimized_expression()
-        stringstream debug_ss;
-        bool debug_first = true;
-        if (fclass == 1) {
-            if (ac_final != neutral) { debug_ss << double_to_pretty_string(ac_final); debug_first = false; }
-            for (auto &term : merged) {
-                string term_str = "(" + elist_to_string(term.chunk) + ")";
-                if (term.factor > 0) {
-                    if (!debug_first) debug_ss << "+";
-                    if (term.factor != 1) debug_ss << term.factor << "*";
-                    debug_ss << term_str;
-                } else {
-                    debug_ss << "-";
-                    if (term.factor != -1) debug_ss << abs(term.factor) << "*";
-                    debug_ss << term_str;
-                }
-                debug_first = false;
-            }
-        }
-        else {
-            if (ac_final != neutral) { debug_ss << double_to_pretty_string(ac_final); debug_first = false; }
-            for (auto &term : merged) {
-                string term_str = "(" + elist_to_string(term.chunk) + ")";
-                if (term.factor > 0) {
-                    if (!debug_first) debug_ss << "*";
-                    debug_ss << term_str;
-                    if (term.factor != 1) debug_ss << "^" << term.factor;
-                }
-                else {
-                    if (debug_first) debug_ss << "1";
-                    debug_ss << "/";
-                    debug_ss << term_str;
-                    if (term.factor != -1) debug_ss << "^" << abs(term.factor);
-                }
-                debug_first = false;
-            }
-        }
-        if (debug_first) debug_ss << double_to_pretty_string(ac_final);
-
+    if (compilation.m_sse2_simplify_mode) {
         // Reconstruct elist in postfix order
         elist_t result;
 
@@ -4620,6 +5105,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     mexce_charstream s;
     stringstream debug_ss;
     bool debug_first = true;
+    const bool build_debug = !compilation.is_protected();
 
     // Shared RAX cache for compile_elist calls - allows caching variable addresses
     // across term compilations (e.g., polynomial terms that all use the same variable).
@@ -4638,7 +5124,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             }
         };
 
-        if (ac_final != neutral) {
+        if (build_debug && ac_final != neutral) {
             debug_ss << double_to_pretty_string(ac_final);
             debug_first = false;
         }
@@ -4649,18 +5135,20 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 continue;
             }
 
-            string term_str = "(" + elist_to_string(term.chunk) + ")";
-            if (factor > 0) {
-                if (!debug_first) debug_ss << "+";
-                if (factor != 1) debug_ss << factor << "*";
-                debug_ss << term_str;
+            if (build_debug) {
+                const string term_string = "(" + elist_to_string(term.chunk) + ")";
+                if (factor > 0) {
+                    if (!debug_first) debug_ss << "+";
+                    if (factor != 1) debug_ss << factor << "*";
+                    debug_ss << term_string;
+                }
+                else {
+                    debug_ss << "-";
+                    if (factor != -1) debug_ss << abs(factor) << "*";
+                    debug_ss << term_string;
+                }
+                debug_first = false;
             }
-            else {
-                debug_ss << "-";
-                if (factor != -1) debug_ss << abs(factor) << "*";
-                debug_ss << term_str;
-            }
-            debug_first = false;
 
             if (have_value) {
                 ensure_constant();
@@ -4711,7 +5199,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             }
         };
 
-        if (ac_final != neutral) {
+        if (build_debug && ac_final != neutral) {
             debug_ss << double_to_pretty_string(ac_final);
             debug_first = false;
         }
@@ -4722,19 +5210,21 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 continue;
             }
 
-            string term_str = "(" + elist_to_string(term.chunk) + ")";
-            if (factor > 0) {
-                if (!debug_first) debug_ss << "*";
-                debug_ss << term_str;
-                if (factor != 1) debug_ss << "^" << factor;
+            if (build_debug) {
+                const string term_string = "(" + elist_to_string(term.chunk) + ")";
+                if (factor > 0) {
+                    if (!debug_first) debug_ss << "*";
+                    debug_ss << term_string;
+                    if (factor != 1) debug_ss << "^" << factor;
+                }
+                else {
+                    if (debug_first) debug_ss << "1"; // e.g. 1/x
+                    debug_ss << "/";
+                    debug_ss << term_string;
+                    if (factor != -1) debug_ss << "^" << abs(factor);
+                }
+                debug_first = false;
             }
-            else {
-                if (debug_first) debug_ss << "1"; // e.g. 1/x
-                debug_ss << "/";
-                debug_ss << term_str;
-                if (factor != -1) debug_ss << "^" << abs(factor);
-            }
-            debug_first = false;
 
             if (have_value) {
                 ensure_constant();
@@ -4779,14 +5269,19 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         }
     }
 
-    if (debug_first) { // Loop didn't run or output anything, just constant
+    if (build_debug && debug_first) { // Loop didn't run or output anything, just constant
         if (debug_ss.str().empty()) debug_ss << double_to_pretty_string(ac_final);
     }
 
     string new_name = (fclass == 1) ? "add_sub_opt" : "mul_div_opt";
     uint8_t* cc = push_intermediate_code(ev, s.str());
-    auto f_opt = make_shared<Function>(ev->m_next_element_id++, new_name, 0, 0, s.buf.size(), cc, nullptr);
-    f_opt->debug_desc = "(" + debug_ss.str() + ")";
+    auto f_opt = make_shared<Function>(
+        compilation.m_next_element_id++, new_name, 0, 0,
+        s.buf.size(), cc, nullptr);
+    f_opt->m_requires_x87_backend = true;
+    if (build_debug) {
+        f_opt->debug_desc = "(" + debug_ss.str() + ")";
+    }
     f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
     f_opt->cse_store_addr = f->cse_store_addr;      // Preserve CSE temp address
 
@@ -4931,12 +5426,231 @@ inline const map<string, Function>& function_map()
 
 
 inline shared_ptr<Function> make_function(evaluator* ev, const string& name) {
+    auto& compilation = ev->active_compilation();
     auto fn_it = function_map().find(name);
     assert(fn_it != function_map().end());
-    // Create a copy of the prototype and assign a new, unique ID.
-    auto new_func = make_shared<Function>(fn_it->second);
-    new_func->id = ev->m_next_element_id++;
+    Function configured = fn_it->second;
+    const auto& selected = compilation.m_effective_options;
+    if (name == "sin") {
+        configured = Sin(selected.use_libm_sin);
+        configured.m_requires_x87_backend = !selected.use_libm_sin;
+    }
+    else if (name == "cos") {
+        configured = Cos(selected.use_libm_cos);
+        configured.m_requires_x87_backend = !selected.use_libm_cos;
+    }
+    else if (name == "tan") {
+        configured = Tan(selected.use_libm_tan);
+        configured.m_requires_x87_backend = !selected.use_libm_tan;
+    }
+    else if (name == "exp") {
+        configured = Exp(selected.use_libm_exp);
+        configured.m_requires_x87_backend = !selected.use_libm_exp;
+    }
+    else if (name == "log" || name == "ln") {
+        configured = name == "log"
+            ? Log(selected.use_libm_log)
+            : Ln(selected.use_libm_log);
+        configured.m_requires_x87_backend = !selected.use_libm_log;
+    }
+    else if (name == "log10") {
+        configured = Log10(selected.use_libm_log10);
+        configured.m_requires_x87_backend = !selected.use_libm_log10;
+    }
+    else if (name == "log2") {
+        configured = Log2(selected.use_libm_log2);
+        configured.m_requires_x87_backend = !selected.use_libm_log2;
+    }
+    else if (name == "logb") {
+        configured = Logb(selected.use_libm_logb);
+        configured.m_requires_x87_backend = !selected.use_libm_logb;
+    }
+    else if (name == "ylog2") {
+        configured = Ylog2(selected.use_libm_ylog2);
+        configured.m_requires_x87_backend = !selected.use_libm_ylog2;
+    }
+    else if (name == "pow") {
+        configured = Pow(selected.use_libm_generic_pow);
+        configured.m_requires_x87_backend = !selected.use_libm_generic_pow;
+    }
+    auto new_func = make_shared<Function>(configured);
+    new_func->id = compilation.m_next_element_id++;
     return new_func;
+}
+
+
+inline void Semantic_graph_builder::reset(Compilation_state& compilation)
+{
+    m_compilation = &compilation;
+    m_stack_depth = 0;
+}
+
+
+inline void Semantic_graph_builder::push_literal(double value)
+{
+    m_compilation->m_elist.push_back(Element(make_intermediate_constant(&m_owner, value)));
+    ++m_stack_depth;
+}
+
+
+inline void Semantic_graph_builder::push_variable(const shared_ptr<Variable>& variable)
+{
+    m_compilation->m_elist.push_back(Element(variable));
+    ++m_stack_depth;
+}
+
+
+inline void Semantic_graph_builder::call(const string& name)
+{
+    const auto function_it = function_map().find(name);
+    if (function_it == function_map().end() || m_stack_depth < function_it->second.num_args) {
+        throw std::logic_error("Invalid semantic expression");
+    }
+
+    m_compilation->m_elist.push_back(Element(make_function(&m_owner, name)));
+    m_stack_depth = m_stack_depth - function_it->second.num_args + 1;
+}
+
+
+inline void Semantic_graph_builder::finish() const
+{
+    if (m_stack_depth != 1) {
+        throw std::logic_error("Invalid semantic expression");
+    }
+}
+
+
+inline Semantic_compiler::Semantic_compiler(
+    evaluator& owner,
+    const options& effective_options,
+    uint64_t first_element_id,
+    protected_wipe_function_t protected_wipe,
+    Compilation_test_fault test_fault)
+:
+    m_owner(owner),
+    m_candidate(new Compilation_state(
+        effective_options, first_element_id, protected_wipe, test_fault)),
+    m_graph_builder(owner),
+    m_fallback_graph_builder(owner),
+    m_active_compilation_reset(owner.m_active_compilation)
+{
+    m_active_compilation_reset.set(m_candidate.get());
+    m_graph_builder.reset(*m_candidate);
+    if (protected_wipe) {
+        options fallback_options = effective_options;
+        fallback_options.prefer_x87 = true;
+        m_fallback_candidate.reset(new Compilation_state(
+            fallback_options,
+            first_element_id,
+            protected_wipe,
+            test_fault,
+            Compilation_state::Protected_storage_role::FALLBACK));
+        m_fallback_graph_builder.reset(*m_fallback_candidate);
+    }
+}
+
+
+inline void Semantic_compiler::consume_literal_into(
+    Compilation_state& compilation,
+    Semantic_graph_builder& builder,
+    double value)
+{
+    m_active_compilation_reset.set(&compilation);
+    builder.push_literal(value);
+}
+
+
+inline void Semantic_compiler::consume_variable_into(
+    Compilation_state& compilation,
+    Semantic_graph_builder& builder,
+    const shared_ptr<Variable>& variable)
+{
+    m_active_compilation_reset.set(&compilation);
+    builder.push_variable(variable);
+}
+
+
+inline void Semantic_compiler::consume_call_into(
+    Compilation_state& compilation,
+    Semantic_graph_builder& builder,
+    const string& name)
+{
+    m_active_compilation_reset.set(&compilation);
+    builder.call(name);
+}
+
+
+inline void Semantic_compiler::consume(const Semantic_record& record)
+{
+    switch (record.kind()) {
+        case Semantic_record_kind::LITERAL:
+            consume_literal(record.literal());
+            break;
+        case Semantic_record_kind::VARIABLE: {
+            const auto variable_it = m_owner.m_variables.find(record.variable()->name);
+            if (variable_it == m_owner.m_variables.end() ||
+                variable_it->second.get() != record.variable())
+            {
+                throw std::logic_error("Invalid semantic expression");
+            }
+            consume_variable(variable_it->second);
+            break;
+        }
+        case Semantic_record_kind::CALL:
+            consume_call(record.function()->name);
+            break;
+        default:
+            throw std::logic_error("Invalid semantic expression");
+    }
+}
+
+
+inline void Semantic_compiler::consume_literal(double value)
+{
+    consume_literal_into(*m_candidate, m_graph_builder, value);
+    if (m_fallback_candidate) {
+        consume_literal_into(
+            *m_fallback_candidate, m_fallback_graph_builder, value);
+    }
+}
+
+
+inline void Semantic_compiler::consume_variable(const shared_ptr<Variable>& variable)
+{
+    consume_variable_into(*m_candidate, m_graph_builder, variable);
+    if (m_fallback_candidate) {
+        consume_variable_into(
+            *m_fallback_candidate, m_fallback_graph_builder, variable);
+    }
+    if (m_referenced_variable_set.insert(variable.get()).second) {
+        m_referenced_variables.push_back(variable);
+    }
+}
+
+
+inline void Semantic_compiler::consume_call(const string& name)
+{
+    consume_call_into(*m_candidate, m_graph_builder, name);
+    if (m_fallback_candidate) {
+        consume_call_into(*m_fallback_candidate, m_fallback_graph_builder, name);
+    }
+}
+
+
+inline Semantic_compilation_result Semantic_compiler::finish()
+{
+    m_graph_builder.finish();
+    m_graph_builder.clear();
+    if (m_fallback_candidate) {
+        m_fallback_graph_builder.finish();
+        m_fallback_graph_builder.clear();
+    }
+    auto result = m_owner.finish_semantic_compilation(
+        std::move(m_candidate),
+        std::move(m_referenced_variables),
+        std::move(m_fallback_candidate));
+    m_active_compilation_reset.clear();
+    return result;
 }
 
 
@@ -5011,6 +5725,7 @@ string get_element_signature(const Element& e)
 inline
 void run_cse(evaluator* ev, elist_t& elist)
 {
+    auto& compilation = ev->active_compilation();
     // 1. Identify common subexpressions via signature
     // Map Signature -> Vector of (Parent Iterator, Element Pointer) pairs?
     // No, elements are shared pointers inside the list.
@@ -5139,8 +5854,8 @@ void run_cse(evaluator* ev, elist_t& elist)
             }
 
             // Allocate a temporary storage slot
-            ev->m_cse_temps.push_back(0.0);
-            double* temp_addr = &ev->m_cse_temps.back();
+            compilation.m_cse_temps.push_back(0.0);
+            double* temp_addr = &compilation.m_cse_temps.back();
 
             // Transform Source: Set CSE store suffix
             // Generate FST instruction to store result after function executes.
@@ -5161,7 +5876,7 @@ void run_cse(evaluator* ev, elist_t& elist)
             source->f->cse_store_addr = temp_addr;  // For SSE2 backend
 
             // Shared temp variable for all subsequent replacements in this group.
-            const uint64_t temp_var_id = ev->m_next_element_id++;
+            const uint64_t temp_var_id = compilation.m_next_element_id++;
             auto temp_var = make_shared<Variable>(temp_var_id, (volatile void*)temp_addr, "cse_temp_" + std::to_string(temp_var_id), M64FP);
 
 
@@ -5217,7 +5932,6 @@ inline
 evaluator::evaluator():
     m_constants(impl::built_in_constants_map())
 {
-    m_next_element_id = 2; // Start after built-in constants.
     set_expression("0");
 }
 
@@ -5225,7 +5939,7 @@ evaluator::evaluator():
 inline
 evaluator::~evaluator()
 {
-    impl::free_executable_buffer(evaluate_fptr, m_buffer_size);
+    reset_compiled_expression();
 }
 
 
@@ -5239,9 +5953,41 @@ void evaluator::bind(T& v, const std::string& s, Args&... args)
     if (built_in_constants_map().find(s) != built_in_constants_map().end()) {
         throw std::logic_error("Attempted to bind a variable, named as an existing constant");
     }
-    m_variables[s] = make_shared<Variable>(m_next_element_id++, &v, s, get_ndt<T>());
+    m_variables[s] = make_shared<Variable>(m_next_variable_id++, &v, s, get_ndt<T>());
 
     bind(args...);
+}
+
+
+template <typename T>
+void evaluator::bind_protected(T& referenced_variable, uint32_t slot)
+{
+    static_assert(
+        std::is_same<T, double>::value  ||
+        std::is_same<T, float>::value   ||
+        std::is_same<T, int16_t>::value ||
+        std::is_same<T, int32_t>::value ||
+        std::is_same<T, int64_t>::value,
+        "Protected bindings support double, float, int16_t, int32_t, and int64_t");
+
+    if (slot > 4095) {
+        throw Protected_expression_error(
+            Protected_expression_error_category::INVALID_ARGUMENT,
+            "A protected-expression binding slot is out of range.");
+    }
+
+    const auto binding = m_protected_variables.find(slot);
+    if (binding != m_protected_variables.end() && binding->second->referenced) {
+        throw Protected_expression_error(
+            Protected_expression_error_category::INVALID_ARGUMENT,
+            "A referenced protected-expression binding cannot be replaced.");
+    }
+
+    m_protected_variables[slot] = std::make_shared<impl::Variable>(
+        m_next_variable_id++,
+        &referenced_variable,
+        std::string(),
+        impl::get_ndt<T>());
 }
 
 
@@ -5272,33 +6018,80 @@ void evaluator::unbind_all()
 
 
 inline
-double evaluator::evaluate() {
-    if (is_constant_expression) {
-        return constant_expression_value;
+void evaluator::unbind_protected(uint32_t slot)
+{
+    const auto binding = m_protected_variables.find(slot);
+    if (binding == m_protected_variables.end()) {
+        throw Protected_expression_error(
+            Protected_expression_error_category::INVALID_ARGUMENT,
+            "Attempted to unbind an unknown protected-expression slot.");
     }
-    return evaluate_fptr();
+    if (binding->second->referenced) {
+        reset_compiled_expression();
+    }
+    m_protected_variables.erase(slot);
+}
+
+
+inline
+void evaluator::unbind_all_protected()
+{
+    bool has_referenced_binding = false;
+    for (const auto& binding : m_protected_variables) {
+        has_referenced_binding |= binding.second->referenced;
+    }
+    if (has_referenced_binding) {
+        reset_compiled_expression();
+    }
+    m_protected_variables.clear();
+}
+
+
+inline
+double evaluator::evaluate() {
+    if (m_is_constant_expression) {
+        return m_constant_expression_value;
+    }
+    if (!m_evaluate_fptr) {
+        throw std::logic_error("No expression has been compiled.");
+    }
+    return impl::invoke_generated(m_evaluate_fptr);
 }
 
 
 inline
 std::string evaluator::get_optimized_expression() const {
-    return impl::elist_to_string(m_elist);
+    if (m_is_protected_expression) {
+        throw Protected_expression_error(
+            Protected_expression_error_category::INTROSPECTION_DISABLED,
+            "Protected-expression introspection is disabled.");
+    }
+    return m_compilation ? impl::elist_to_string(m_compilation->m_elist) : std::string();
 }
 
 
 inline
 std::string evaluator::get_byte_representation() const {
-    if (is_constant_expression || !evaluate_fptr || m_buffer_size == 0) {
+    if (m_is_protected_expression) {
+        throw Protected_expression_error(
+            Protected_expression_error_category::INTROSPECTION_DISABLED,
+            "Protected-expression introspection is disabled.");
+    }
+    if (!m_compilation ||
+        m_compilation->m_is_constant_expression ||
+        !m_compilation->m_evaluate_fptr ||
+        m_compilation->m_buffer_size == 0)
+    {
         return std::string();
     }
 
     std::string result;
-    result.reserve(m_buffer_size * 3);  // 2 hex chars + space per byte
+    result.reserve(m_compilation->m_buffer_size * 3);  // 2 hex chars + space per byte
 
-    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(evaluate_fptr);
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(m_compilation->m_evaluate_fptr);
     char hex_buf[4];
 
-    for (size_t i = 0; i < m_buffer_size; ++i) {
+    for (size_t i = 0; i < m_compilation->m_buffer_size; ++i) {
         if (i > 0) {
             result += ' ';
         }
@@ -5311,30 +6104,28 @@ std::string evaluator::get_byte_representation() const {
 
 
 inline
-void evaluator::set_expression(std::string e)
+backend_type evaluator::get_backend() const
 {
-    using namespace impl;
+    return m_backend_used;
+}
+
+
+inline
+impl::Compilation_state& evaluator::active_compilation()
+{
+    assert(m_active_compilation != nullptr);
+    return *m_active_compilation;
+}
+
+
+inline
+impl::Semantic_program impl::Clear_semantic_producer::produce(
+    evaluator& owner,
+    std::string e)
+{
     using mpe = mexce_parsing_exception;
 
-    // Save for potential fallback re-parsing (SSE2->x87)
-    m_last_expression = e;
-
     deque<Token> tokens;
-
-    m_intermediate_constants.clear();
-    m_intermediate_code.clear();
-    m_elist.clear();
-    m_cse_temps.clear(); // Clear previous CSE temps
-    m_power_terms.clear();
-
-    if (evaluate_fptr) {
-        free_executable_buffer(evaluate_fptr, m_buffer_size);
-        evaluate_fptr = nullptr;
-    }
-
-    auto x = m_variables.begin();
-    for (; x != m_variables.end(); x++)
-        x->second->referenced = false;
 
     if (e.length() == 0){
         throw (std::logic_error("Expected an expression"));
@@ -5506,13 +6297,13 @@ void evaluator::set_expression(std::string e)
                     break;
                 }
                 if (e[i] == ' ') {
-                    if (m_variables.find(temp.content) != m_variables.end()) {
+                    if (owner.m_variables.find(temp.content) != owner.m_variables.end()) {
                         temp.type = VARIABLE_NAME;
                         tokens.push_back(temp);
                         state = 5;
                         break;
                     }
-                    if (m_constants.find(temp.content) != m_constants.end()) {
+                    if (owner.m_constants.find(temp.content) != owner.m_constants.end()) {
                         temp.type = CONSTANT_NAME;
                         tokens.push_back(temp);
                         state = 5;
@@ -5531,8 +6322,8 @@ void evaluator::set_expression(std::string e)
                         " is not a known constant, variable or function name", i));
                 }
                 if (e[i] == ')') {
-                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME :
-                                m_constants.find(temp.content) != m_constants.end() ? CONSTANT_NAME :
+                    temp.type = owner.m_variables.find(temp.content) != owner.m_variables.end() ? VARIABLE_NAME :
+                                owner.m_constants.find(temp.content) != owner.m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content) +
                             " is not a known constant or variable name", i));
                     tokens.push_back(temp);
@@ -5553,8 +6344,8 @@ void evaluator::set_expression(std::string e)
                     break;
                 }
                 if (parse_infix_op(i, infix_op, infix_op_len)) {
-                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME :
-                                m_constants.find(temp.content) != m_constants.end() ? CONSTANT_NAME :
+                    temp.type = owner.m_variables.find(temp.content) != owner.m_variables.end() ? VARIABLE_NAME :
+                                owner.m_constants.find(temp.content) != owner.m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content) +
                             " is not a known constant or variable name", i));
                     tokens.push_back(temp);
@@ -5564,8 +6355,8 @@ void evaluator::set_expression(std::string e)
                     break;
                 }
                 if (e[i] == ',') {
-                    temp.type = m_variables.find(temp.content) != m_variables.end() ? VARIABLE_NAME :
-                                m_constants.find(temp.content) != m_constants.end() ? CONSTANT_NAME :
+                    temp.type = owner.m_variables.find(temp.content) != owner.m_variables.end() ? VARIABLE_NAME :
+                                owner.m_constants.find(temp.content) != owner.m_constants.end() ? CONSTANT_NAME :
                         throw (mpe(string(temp.content)+" is not a "
                             "known constant or variable name", i));
                     tokens.push_back(temp);
@@ -5672,7 +6463,38 @@ void evaluator::set_expression(std::string e)
         tstack.pop_back();
     }
 
-    //stage 3: convert "Token" expression primitives to "Element *"
+    struct semantic_node_t
+    {
+        Semantic_record record;
+        size_t          first_child;
+        size_t          child_count;
+    };
+
+    vector<semantic_node_t>  semantic_nodes;
+    vector<size_t>           semantic_children;
+    vector<size_t>           semantic_stack;
+    semantic_nodes.reserve(postfix.size() * 2);
+    semantic_children.reserve(postfix.size() * 2);
+    semantic_stack.reserve(postfix.size());
+    auto emit_call = [&](const Function* function) {
+        if (semantic_stack.size() < function->num_args) {
+            throw std::logic_error("Invalid semantic expression");
+        }
+
+        const size_t first_argument = semantic_stack.size() - function->num_args;
+        const size_t first_child = semantic_children.size();
+        semantic_children.insert(
+            semantic_children.end(),
+            semantic_stack.begin() + first_argument,
+            semantic_stack.end());
+        semantic_stack.resize(first_argument);
+        semantic_nodes.push_back({
+            Semantic_record(function),
+            first_child,
+            function->num_args,
+        });
+        semantic_stack.push_back(semantic_nodes.size() - 1);
+    };
 
     while (!postfix.empty()) {
         temp = postfix.front();
@@ -5682,48 +6504,171 @@ void evaluator::set_expression(std::string e)
             case INFIX_3:
             case INFIX_2:
             case INFIX_1: {
-                auto name = infix_operator_to_function_name(temp.content);
-                m_elist.push_back(Element(make_function(this, name)));
+                const auto function_it = function_map().find(
+                    infix_operator_to_function_name(temp.content));
+                assert(function_it != function_map().end());
+                emit_call(&function_it->second);
                 break;
             }
-            case FUNCTION_NAME:
-                m_elist.push_back(Element(make_function(this, temp.content)));
+            case FUNCTION_NAME: {
+                const auto function_it = function_map().find(temp.content);
+                assert(function_it != function_map().end());
+                emit_call(&function_it->second);
                 break;
+            }
             case UNARY:
-                if (temp.content == "-") { // unary '+' is ignored
-
-                    // Rather than having an individual function for the unary minus
-                    // we insert a zero before the last argument (which is already in
-                    // the list), and use a subtraction instead.
-                    // The reason is to allow the optimizer to group
-                    // addition/subtraction chains. Clearly, this is a bit unorthodox
-                    // and could be done in the optimizer too, but the optimizer is
-                    // complex enough already.
-
-                    link_arguments(m_elist);
-                    auto chunk = get_dependent_chunk(std::prev(m_elist.end()));
-                    m_elist.insert(chunk.first, Element(make_intermediate_constant(this, 0.0)));
-                    m_elist.push_back(Element(make_function(this, "sub")));
+                if (temp.content == "-") {
+                    if (semantic_stack.empty()) {
+                        throw std::logic_error("Invalid semantic expression");
+                    }
+                    semantic_nodes.push_back({Semantic_record(0.0), 0, 0});
+                    const size_t zero = semantic_nodes.size() - 1;
+                    const size_t operand = semantic_stack.back();
+                    const size_t first_child = semantic_children.size();
+                    semantic_children.push_back(zero);
+                    semantic_children.push_back(operand);
+                    semantic_nodes.push_back({
+                        Semantic_record(&function_map().find("sub")->second),
+                        first_child,
+                        2,
+                    });
+                    semantic_stack.back() = semantic_nodes.size() - 1;
                 }
                 break;
             case NUMERIC_LITERAL: {
-                double c_value = atof(temp.content.c_str());
-                m_elist.push_back(Element(make_intermediate_constant(this, c_value)));
+                semantic_nodes.push_back({
+                    Semantic_record(atof(temp.content.c_str())), 0, 0});
+                semantic_stack.push_back(semantic_nodes.size() - 1);
                 break;
             }
             case CONSTANT_NAME: {
-                m_elist.push_back(Element(m_constants.find(temp.content)->second));
+                semantic_nodes.push_back({
+                    Semantic_record(owner.m_constants.find(temp.content)->second->value),
+                    0,
+                    0,
+                });
+                semantic_stack.push_back(semantic_nodes.size() - 1);
                 break;
             }
             case VARIABLE_NAME: {
-                auto it = m_variables.find(temp.content);
-                assert(it != m_variables.end());
-                it->second->referenced = true;
-                m_elist.push_back(Element(it->second));
+                const auto variable_it = owner.m_variables.find(temp.content);
+                assert(variable_it != owner.m_variables.end());
+                semantic_nodes.push_back({
+                    Semantic_record(variable_it->second.get()), 0, 0});
+                semantic_stack.push_back(semantic_nodes.size() - 1);
                 break;
+            }
+            default:
+                throw std::logic_error("Invalid semantic expression");
+        }
+    }
+
+    if (semantic_stack.size() != 1) {
+        throw std::logic_error("Invalid semantic expression");
+    }
+
+    struct semantic_traversal_t
+    {
+        size_t node;
+        bool   emit;
+    };
+
+    Semantic_program result;
+    result.reserve(semantic_nodes.size());
+    vector<semantic_traversal_t> traversal;
+    traversal.push_back({semantic_stack.back(), false});
+    while (!traversal.empty()) {
+        const auto step = traversal.back();
+        traversal.pop_back();
+        const auto& node = semantic_nodes[step.node];
+        if (step.emit || node.child_count == 0) {
+            result.push_back(node.record);
+            continue;
+        }
+
+        traversal.push_back({step.node, true});
+        for (size_t child = node.child_count; child > 0; --child) {
+            traversal.push_back({
+                semantic_children[node.first_child + child - 1],
+                false,
+            });
+        }
+    }
+    return result;
+}
+
+
+inline
+impl::Semantic_compilation_result evaluator::finish_semantic_compilation(
+    std::unique_ptr<impl::Compilation_state> candidate,
+    std::vector<std::shared_ptr<impl::Variable>> referenced_variables,
+    std::unique_ptr<impl::Compilation_state> fallback_candidate)
+{
+    using namespace impl;
+
+    Semantic_program fallback_program;
+    Semantic_program_wipe_guard fallback_wipe(
+        fallback_program, candidate->protected_wipe());
+    m_active_compilation = candidate.get();
+
+    link_arguments(candidate->m_elist);
+    normalize_commutative_operands(candidate->m_elist);
+
+    size_t semantic_value_count = 0;
+    for (const auto& element : candidate->m_elist) {
+        if (element.type != Element_type::CFUNC) {
+            ++semantic_value_count;
+        }
+    }
+
+    // Optimization cannot require more registers than the program has values.
+    // Small programs therefore cannot cross the SSE2 register limit and need no
+    // fallback snapshot.
+    const bool might_need_fallback =
+        semantic_value_count > static_cast<size_t>(k_sse2_max_registers) &&
+        is_sse2_compatible(
+            candidate->m_elist.begin(),
+            candidate->m_elist.end(),
+            candidate->m_effective_options.prefer_x87);
+    if (might_need_fallback && !fallback_candidate) {
+        if (candidate->is_protected()) {
+            throw std::logic_error(
+                "Protected compilation requires an independent fallback owner");
+        }
+        // Optimizers mutate compiler objects.  Preserve typed semantics so fallback
+        // can construct an independent graph without retaining or reparsing source.
+        fallback_program.reserve(candidate->m_elist.size());
+        for (const auto& element : candidate->m_elist) {
+            switch (element.type) {
+                case Element_type::CCONST:
+                    fallback_program.emplace_back(element.c->value);
+                    break;
+                case Element_type::CVAR:
+                    fallback_program.emplace_back(element.v.get());
+                    break;
+                case Element_type::CFUNC: {
+                    const auto function_it = function_map().find(element.f->name);
+                    assert(function_it != function_map().end());
+                    fallback_program.emplace_back(&function_it->second);
+                    break;
+                }
+                default:
+                    throw std::logic_error("Invalid semantic expression");
             }
         }
     }
+    if (!might_need_fallback) {
+        fallback_candidate.reset();
+    }
+
+    bool fallback_allowed = might_need_fallback;
+compile_candidate:
+    auto& m_elist                   = candidate->m_elist;
+    auto& effective_options         = candidate->m_effective_options;
+    auto& m_sse2_simplify_mode      = candidate->m_sse2_simplify_mode;
+    auto& is_constant_expression    = candidate->m_is_constant_expression;
+    auto& constant_expression_value = candidate->m_constant_expression_value;
+    auto& evaluate_fptr             = candidate->m_evaluate_fptr;
 
     // link functions to their arguments (1)
     link_arguments(m_elist);
@@ -5736,24 +6681,22 @@ void evaluator::set_expression(std::string e)
     // Run Common Subexpression Elimination (CSE)
     // This must run before destructive optimizers (asmd, pow) to catch
     // identical subtrees like div(2.2, y).
-    if (m_options.enable_cse) {
+    if (effective_options.enable_cse) {
         run_cse(this, m_elist);
     }
 
     // Check if the expression is SSE2-compatible BEFORE running optimizers.
     // For SSE2, we still want the algebraic simplifications from asmd_optimizer,
     // but we want it to output a simplified elist instead of x87 code.
-    m_sse2_simplify_mode = is_sse2_compatible(m_elist.begin(), m_elist.end(), m_options.prefer_x87);
+    m_sse2_simplify_mode = is_sse2_compatible(
+        m_elist.begin(), m_elist.end(), effective_options.prefer_x87);
 
-    // Track if we need to check for SSE2->x87 fallback after optimization.
-    // We can't backup the elist because optimizers modify Function objects in place
-    // (shared via shared_ptr), so instead we re-parse from m_last_expression if needed.
     bool need_fallback_check = m_sse2_simplify_mode;
 
     // Fast-math algebraic simplifications - run in a SEPARATE PASS before any optimizer
     // modifies the expression structure. This must happen before asmd_optimizer which
     // transforms the elist in ways that would confuse the chunk comparison.
-    if (m_options.fast_math) {
+    if (effective_options.fast_math) {
         // Helper lambda to check if two chunks are structurally equal
         // Avoids creating copies for the common case of simple single-element comparisons
         auto chunks_equal = [](elist_it_t first0, elist_it_t last0,
@@ -5903,14 +6846,11 @@ void evaluator::set_expression(std::string e)
                     elist_it_t first_arg_it = y;
                     std::advance(first_arg_it, -(int64_t)f->num_args);
                     compile_and_finalize_elist(first_arg_it, next(y));
-                    double res = evaluate_fptr();
+                    const double res = invoke_generated(evaluate_fptr);
                     // Constant folding uses a temporary JIT buffer.  Release it
                     // immediately so repeated foldable subtrees do not leak one
                     // executable page per fold before the final expression compile.
-                    free_executable_buffer(evaluate_fptr, m_buffer_size);
-                    evaluate_fptr = nullptr;
-                    m_buffer_size = 0;
-                    m_backend_used = backend_type::none;
+                    candidate->release_executable();
                     m_elist.erase(first_arg_it, y);
                     *y = Element(make_intermediate_constant(this, res));
                     y = y_next;
@@ -5929,27 +6869,117 @@ void evaluator::set_expression(std::string e)
         y = y_next;
     }
 
-    // Check if SSE2 optimization produced an elist that's no longer SSE2-compatible.
-    // This can happen when asmd_optimizer flattens chains into too many parallel terms.
-    // If so, re-parse the expression with x87 mode forced.
-    // Note: We cannot simply restore the backup because the optimizer modifies Function
-    // objects in place (shared via shared_ptr), corrupting the backup.
-    if (need_fallback_check && !is_sse2_compatible(m_elist.begin(), m_elist.end(), false)) {
-        // Force x87 mode and re-parse the expression from scratch
-        bool original_prefer_x87 = m_options.prefer_x87;
-        m_options.prefer_x87 = true;
-        set_expression(m_last_expression);
-        m_options.prefer_x87 = original_prefer_x87;
-        return;
+    if (fallback_allowed &&
+        need_fallback_check &&
+        !is_sse2_compatible(m_elist.begin(), m_elist.end(), false))
+    {
+        if (fallback_candidate) {
+            candidate = std::move(fallback_candidate);
+            m_active_compilation = candidate.get();
+        }
+        else {
+            options fallback_options = candidate->m_effective_options;
+            fallback_options.prefer_x87 = true;
+            candidate.reset(new Compilation_state(
+                fallback_options, m_next_variable_id));
+            m_active_compilation = candidate.get();
+
+            Semantic_graph_builder fallback_builder(*this);
+            fallback_builder.reset(*candidate);
+            for (const auto& record : fallback_program) {
+                switch (record.kind()) {
+                    case Semantic_record_kind::LITERAL:
+                        fallback_builder.push_literal(record.literal());
+                        break;
+                    case Semantic_record_kind::VARIABLE: {
+                        const auto variable_it = m_variables.find(record.variable()->name);
+                        assert(variable_it != m_variables.end());
+                        fallback_builder.push_variable(variable_it->second);
+                        break;
+                    }
+                    case Semantic_record_kind::CALL:
+                        fallback_builder.call(record.function()->name);
+                        break;
+                    default:
+                        throw std::logic_error("Invalid semantic expression");
+                }
+            }
+            fallback_builder.finish();
+        }
+        fallback_allowed = false;
+        goto compile_candidate;
     }
 
-    is_constant_expression = m_elist.size()==1 && m_elist.back().type == Element_type::CCONST;
+    fallback_candidate.reset();
+
+    is_constant_expression = m_elist.size() == 1 && m_elist.back().type == Element_type::CCONST;
     if (is_constant_expression) {
         constant_expression_value = m_elist.back().c->value;
     }
     else {
         compile_and_finalize_elist(m_elist.begin(), m_elist.end());
     }
+    Semantic_compilation_result result;
+    result.compilation          = std::move(candidate);
+    result.referenced_variables = std::move(referenced_variables);
+    return result;
+}
+
+
+inline
+void evaluator::reset_compiled_expression()
+{
+    if (m_compilation) {
+        m_compilation->release_executable();
+        m_compilation->wipe_protected_scalar(
+            &m_constant_expression_value,
+            sizeof(m_constant_expression_value));
+    }
+    m_is_constant_expression    = false;
+    m_constant_expression_value = 0.0;
+    m_evaluate_fptr             = nullptr;
+    m_backend_used              = backend_type::none;
+    m_is_protected_expression   = false;
+    m_compilation.reset();
+
+    for (const auto& variable : m_variables) {
+        variable.second->referenced = false;
+    }
+    for (const auto& variable : m_protected_variables) {
+        variable.second->referenced = false;
+    }
+}
+
+
+inline
+void evaluator::publish_semantic_compilation(
+    impl::Semantic_compilation_result result)
+{
+    m_compilation = std::move(result.compilation);
+    for (const auto& variable : result.referenced_variables) {
+        variable->referenced = true;
+    }
+    m_is_constant_expression    = m_compilation->m_is_constant_expression;
+    m_constant_expression_value = m_compilation->m_constant_expression_value;
+    m_evaluate_fptr             = m_compilation->m_evaluate_fptr;
+    m_backend_used              = m_compilation->m_backend_used;
+    m_is_protected_expression   = m_compilation->is_protected();
+}
+
+
+inline
+void evaluator::set_expression(std::string expression)
+{
+    reset_compiled_expression();
+
+    const auto semantic_program = impl::Clear_semantic_producer::produce(
+        *this, std::move(expression));
+    impl::Semantic_compiler compiler(*this, m_options, m_next_variable_id);
+    for (const auto& record : semantic_program) {
+        compiler.consume(record);
+    }
+    auto result = compiler.finish();
+    publish_semantic_compilation(std::move(result));
 }
 
 
@@ -5958,10 +6988,15 @@ inline
 void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::elist_const_it_t last)
 {
     using namespace impl;
+    auto& compilation       = active_compilation();
+    auto& effective_options = compilation.m_effective_options;
+    auto& m_buffer_size     = compilation.m_buffer_size;
+    auto& evaluate_fptr     = compilation.m_evaluate_fptr;
+    auto& compiled_backend  = compilation.m_backend_used;
 
 #ifdef MEXCE_64
     // Check if we can use the faster SSE2 backend
-    bool use_sse2 = is_sse2_compatible(first, last, m_options.prefer_x87);
+    bool use_sse2 = is_sse2_compatible(first, last, effective_options.prefer_x87);
 
     if (use_sse2) {
         // SSE2 backend: simpler prologue/epilogue since result is already in xmm0
@@ -6005,6 +7040,9 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
         finalize_rip_constants(code_buffer, pending_constants);
 
         m_buffer_size = code_buffer.buf.size();
+        if (compilation.fail_executable_allocation()) {
+            throw std::bad_alloc();
+        }
         auto buffer = get_executable_buffer(m_buffer_size);
 
 #ifdef _WIN32
@@ -6018,8 +7056,16 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 #endif
 
         memcpy(buffer, code_buffer.buf.data(), m_buffer_size);
-        evaluate_fptr = lock_executable_buffer(buffer, m_buffer_size);
-        m_backend_used = backend_type::sse2;
+        if (compilation.fail_executable_finalization()) {
+            free_executable_buffer(
+                reinterpret_cast<double (*)()>(buffer),
+                m_buffer_size,
+                compilation.protected_wipe());
+            throw Executable_memory_error("Injected executable finalization failure");
+        }
+        evaluate_fptr = lock_executable_buffer(
+            buffer, m_buffer_size, compilation.protected_wipe());
+        compiled_backend = backend_type::sse2;
         return;
     }
 
@@ -6105,6 +7151,9 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     code_buffer.buf.insert(code_buffer.buf.end(), return_sequence, return_sequence + return_sequence_size);
 
     m_buffer_size = code_buffer.buf.size();
+    if (compilation.fail_executable_allocation()) {
+        throw std::bad_alloc();
+    }
     auto buffer = get_executable_buffer(m_buffer_size);
 
 #ifdef _WIN32
@@ -6119,8 +7168,17 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 
     memcpy(buffer, code_buffer.buf.data(), m_buffer_size);
 
-    evaluate_fptr = lock_executable_buffer(buffer, m_buffer_size);
-    m_backend_used = backend_type::x87;
+    if (compilation.fail_executable_finalization()) {
+        free_executable_buffer(
+            reinterpret_cast<double (*)()>(buffer),
+            m_buffer_size,
+            compilation.protected_wipe());
+        throw Executable_memory_error("Injected executable finalization failure");
+    }
+
+    evaluate_fptr = lock_executable_buffer(
+        buffer, m_buffer_size, compilation.protected_wipe());
+    compiled_backend = backend_type::x87;
 }
 
 } // mexce

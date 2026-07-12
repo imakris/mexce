@@ -1,56 +1,250 @@
-name: Build, Test, and Benchmark mexce
+name: Build, Test, Install, and Diagnose mexce
 
-# Trigger the workflow on push or pull request events for the main/master branch
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
+
+permissions:
+  contents: read
 
 jobs:
-  build-and-benchmark:
-    name: Build and Benchmark on ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-
+  release-matrix:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }} / ${{ matrix.configuration }}
     runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            compiler: msvc
+            cc: cl
+            cxx: cl
+            configuration: ordinary
+          - os: windows-2022
+            compiler: msvc
+            cc: cl
+            cxx: cl
+            configuration: protected
+          - os: ubuntu-latest
+            compiler: gcc
+            cc: gcc
+            cxx: g++
+            configuration: ordinary
+          - os: ubuntu-latest
+            compiler: gcc
+            cc: gcc
+            cxx: g++
+            configuration: protected
+          - os: ubuntu-latest
+            compiler: clang
+            cc: clang
+            cxx: clang++
+            configuration: ordinary
+          - os: ubuntu-latest
+            compiler: clang
+            cc: clang
+            cxx: clang++
+            configuration: protected
 
     steps:
-      # 1. Checks out your repository
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Configure the project using CMake
-      - name: Configure CMake
-        run: cmake -B build -S .
+      - name: Install Conan
+        if: matrix.configuration == 'protected'
+        run: pip install conan==2.20.1
 
-      # 3. Build the project and all targets
-      - name: Build with CMake
-        run: cmake --build build --config Release
-
-      # 4. Run the quick validation tests
-      - name: Run Quick Tests with CTest
-        run: ctest --test-dir build -C Release --output-on-failure
-      
-      # 5. Run a short benchmark
-      - name: Run Short Benchmark
-        run: cmake --build build --config Release --target run_benchmarks
-      
-      # 6. Display Benchmark Summary in Log
-      #    FIX: Use the 'head' command to show only the first 58 lines of the
-      #    results file, which contains the summary tables.
-      - name: Display Benchmark Summary
-        shell: bash
+      - name: Install Linux Clang dependencies
+        if: runner.os == 'Linux' && matrix.compiler == 'clang'
         run: |
-          echo "--- Benchmark Summary (first 58 lines) ---"
-          head -n 58 build/benchmark_results.txt
-          echo "------------------------------------------"
+          sudo apt-get update
+          sudo apt-get install -y clang libomp-dev
 
-      # 7. Upload Full Benchmark Results as an Artifact
-      #    This still saves the complete file for detailed analysis.
-      - name: Upload Benchmark Artifact
+      - name: Resolve libsodium 1.0.22 on Windows
+        if: runner.os == 'Windows' && matrix.configuration == 'protected'
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $installationPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          & "$installationPath\Common7\Tools\Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          conan profile detect --force
+          conan install --requires=libsodium/1.0.22 --output-folder=deps `
+            --generator=CMakeDeps --generator=CMakeToolchain `
+            --settings=build_type=Release --build=missing
+
+      - name: Resolve libsodium 1.0.22 on Linux
+        if: runner.os == 'Linux' && matrix.configuration == 'protected'
+        run: |
+          conan profile detect --force
+          conan install --requires=libsodium/1.0.22 --output-folder=deps \
+            --generator=CMakeDeps --generator=CMakeToolchain \
+            --settings=build_type=Release --build=missing
+        shell: bash
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+
+      - name: Configure ordinary Windows release
+        if: runner.os == 'Windows' && matrix.configuration == 'ordinary'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Configure ordinary Linux release
+        if: runner.os == 'Linux' && matrix.configuration == 'ordinary'
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=${{ matrix.cc }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+
+      - name: Configure protected Windows release and issuer
+        if: runner.os == 'Windows' && matrix.configuration == 'protected'
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
+          -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON
+          -DMEXCE_BUILD_ISSUER_TOOLS=ON
+
+      - name: Configure protected Linux release and issuer
+        if: runner.os == 'Linux' && matrix.configuration == 'protected'
+        run: >-
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=${{ matrix.cc }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
+          -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON
+          -DMEXCE_BUILD_ISSUER_TOOLS=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Install
+        run: cmake --install build --config Release --prefix "${{ runner.temp }}/mexce-install"
+
+      - name: Check installed notice surface
+        env:
+          EXPECT_NOTICE: ${{ matrix.configuration == 'protected' && '1' || '0' }}
+        run: >-
+          python -c "import os, pathlib;
+          p=pathlib.Path(r'${{ runner.temp }}')/'mexce-install/share/licenses/mexce/THIRD_PARTY_NOTICES.md';
+          assert p.exists() == (os.environ['EXPECT_NOTICE'] == '1')"
+
+      - name: Configure installed Windows consumer
+        if: runner.os == 'Windows' && matrix.configuration == 'ordinary'
+        run: >-
+          cmake -S test/install_consumer -B consumer-build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
+          -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
+
+      - name: Configure installed Linux consumer
+        if: runner.os == 'Linux' && matrix.configuration == 'ordinary'
+        run: >-
+          cmake -S test/install_consumer -B consumer-build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
+          -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
+
+      - name: Configure installed protected Windows consumer
+        if: runner.os == 'Windows' && matrix.configuration == 'protected'
+        run: >-
+          cmake -S test/install_consumer -B consumer-build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
+          -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
+          -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
+          -DMEXCE_CONSUMER_PROTECTED=ON
+
+      - name: Configure installed protected Linux consumer
+        if: runner.os == 'Linux' && matrix.configuration == 'protected'
+        run: >-
+          cmake -S test/install_consumer -B consumer-build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
+          -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
+          -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
+          -DMEXCE_CONSUMER_PROTECTED=ON
+
+      - name: Build installed consumer
+        run: cmake --build consumer-build --config Release --parallel
+
+      - name: Run installed consumers on Linux
+        if: runner.os == 'Linux'
+        run: |
+          ./consumer-build/mexce_ordinary_consumer
+          if [ "${{ matrix.configuration }}" = protected ]; then
+            ./consumer-build/mexce_protected_consumer
+          fi
+        shell: bash
+
+      - name: Run installed consumers on Windows
+        if: runner.os == 'Windows'
+        run: |
+          .\consumer-build\Release\mexce_ordinary_consumer.exe
+          if ('${{ matrix.configuration }}' -eq 'protected') {
+            .\consumer-build\Release\mexce_protected_consumer.exe
+          }
+
+      - name: Create documented issuer inputs
+        if: matrix.configuration == 'protected'
+        run: >-
+          python -c "from pathlib import Path;
+          Path('expression.txt').write_bytes(b'value+1\n');
+          Path('bindings.txt').write_bytes(b'value=0\n')"
+
+      - name: Run installed issuer and file consumer on Linux
+        if: runner.os == 'Linux' && matrix.configuration == 'protected'
+        run: |
+          "${{ runner.temp }}/mexce-install/bin/mexce_protect" expression.txt bindings.txt expression.mxp expression.key
+          ./consumer-build/mexce_protected_file_consumer expression.mxp expression.key
+        shell: bash
+
+      - name: Run installed issuer and file consumer on Windows
+        if: runner.os == 'Windows' && matrix.configuration == 'protected'
+        run: |
+          & "${{ runner.temp }}\mexce-install\bin\mexce_protect.exe" expression.txt bindings.txt expression.mxp expression.key
+          .\consumer-build\Release\mexce_protected_file_consumer.exe expression.mxp expression.key
+
+      - name: Run clear performance diagnostic
+        run: cmake --build build --config Release --target run_benchmarks
+
+      - name: Run protected performance diagnostic
+        if: matrix.configuration == 'protected'
+        run: ctest --test-dir build -C Release -R mexce_protected_benchmark --verbose > build/protected_benchmark_results.txt
+
+      - name: Run phase-isolated protected performance diagnostic on Linux
+        if: runner.os == 'Linux' && matrix.configuration == 'protected'
+        run: >-
+          python analysis/run_protected_benchmarks.py
+          build/protected_benchmark
+          build/protected_benchmark_results.json
+          --repeats 3
+          --resource-repeats 1
+
+      - name: Run phase-isolated protected performance diagnostic on Windows
+        if: runner.os == 'Windows' && matrix.configuration == 'protected'
+        run: >-
+          python analysis/run_protected_benchmarks.py
+          build/Release/protected_benchmark.exe
+          build/protected_benchmark_results.json
+          --repeats 3
+          --resource-repeats 1
+
+      - name: Upload diagnostic results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results-${{ matrix.os }}
-          path: build/benchmark_results.txt
+          name: diagnostics-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.configuration }}
+          if-no-files-found: warn
+          path: |
+            build/benchmark_results.txt
+            build/protected_benchmark_results.txt
+            build/protected_benchmark_results.json

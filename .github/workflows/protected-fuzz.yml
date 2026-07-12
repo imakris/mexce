@@ -1,0 +1,66 @@
+name: Protected decoder extended fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install compiler and dependency tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libomp-dev
+          pip install conan==2.20.1
+
+      - name: Resolve libsodium 1.0.22
+        run: |
+          conan profile detect --force
+          conan install --requires=libsodium/1.0.22 --output-folder=deps \
+            --generator=CMakeDeps --generator=CMakeToolchain \
+            --settings=build_type=RelWithDebInfo --build=missing
+
+      - name: Configure sanitizer build
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
+          -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON
+
+      - name: Build fuzz target
+        run: cmake --build build --target protected_decoder_fuzz --parallel
+
+      - name: Seed authenticated format corpus
+        run: |
+          test -s test/fixtures/protected_format_1_0.bin
+          mkdir -p fuzz-corpus
+          cp test/fixtures/protected_format_1_0.bin fuzz-corpus/format-1.0.bin
+          cmp test/fixtures/protected_format_1_0.bin fuzz-corpus/format-1.0.bin
+
+      - name: Run extended decoder fuzzing
+        run: |
+          mkdir -p fuzz-artifacts
+          ./build/protected_decoder_fuzz \
+            fuzz-corpus \
+            -max_total_time=900 \
+            -timeout=10 \
+            -artifact_prefix=fuzz-artifacts/
+
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: protected-fuzz-artifacts
+          if-no-files-found: ignore
+          path: fuzz-artifacts/
