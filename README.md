@@ -195,17 +195,26 @@ eval.set_expression("x + y");      // Options take effect here
 
 ## Protected Expressions
 
-Protected expressions are an advanced, opt-in feature for distributing an
-authenticated semantic program without its original expression text. They are
-x64-only and use libsodium 1.0.22.
+Protected expressions let an application distribute a formula without shipping
+its original expression text. The `mexce_protect` tool turns the formula into
+an encrypted, authenticated `.mxp` program and a 32-byte key. The application
+loads that pair, binds values by numeric slot, and evaluates the formula through
+the usual `mexce::evaluator` interface.
+
+This feature is optional, available on x64, and uses libsodium 1.0.22. Ordinary
+users can continue to include only `mexce.h` with no external dependency.
 
 ### Build and install
 
-Make libsodium 1.0.22 available through Conan, vcpkg, or pkg-config, then
-configure the source build with:
+Make libsodium 1.0.22 available through Conan, vcpkg, or pkg-config. For
+example, with Conan:
 
 ```sh
+conan install --requires=libsodium/1.0.22 --output-folder=deps \
+  --generator=CMakeDeps --generator=CMakeToolchain \
+  --settings=build_type=Release --build=missing
 cmake -S . -B build \
+  -DCMAKE_TOOLCHAIN_FILE=deps/conan_toolchain.cmake \
   -DBUILD_TESTING=OFF \
   -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON \
   -DMEXCE_BUILD_ISSUER_TOOLS=ON
@@ -213,22 +222,18 @@ cmake --build build --config Release
 cmake --install build --config Release --prefix install
 ```
 
-Protected consumers link `mexce::protected`; ordinary consumers continue to
-link `mexce::mexce` without a cryptographic dependency. The
-`MEXCE_BUILD_ISSUER_TOOLS` option adds and installs `mexce_protect`, and requires
-protected expressions to be enabled.
+Protected consumers link `mexce::protected`. The `MEXCE_BUILD_ISSUER_TOOLS`
+option builds and installs the `mexce_protect` command used to create programs.
 
 ### Creating a protected program
 
-`mexce_protect` is an issuer-side build tool, not a licence system. It accepts
-an expression file, a binding-schema file, a program output, and a key output.
-For `expression.txt`:
+Create an expression file, for example `expression.txt`:
 
 ```text
 value+1
 ```
 
-For `bindings.txt`:
+Then assign each variable a numeric runtime slot in `bindings.txt`:
 
 ```text
 value=0
@@ -238,31 +243,15 @@ value=0
 mexce_protect expression.txt bindings.txt expression.mxp expression.key
 ```
 
-Schema entries use `name=decimal_slot`, one per line. Names use
-`[A-Za-z_][A-Za-z0-9_]*`, slots are unique and dense from zero, and the schema
-must exactly describe the variables used by the expression. The tool removes
-one terminal LF, plus its preceding CR when present, from the expression. It
-does not otherwise normalize source whitespace.
-
-The command-line issuer encodes `Protected_math_mode::STRICT`. Applications
-that intentionally require `FAST` policy can use the issuer-side encoder API.
-
-The program and key destinations must be distinct and absent. The tool rejects
-symlink or reparse-point traversal, never overwrites a destination, restricts
-the 32-byte raw key file to the current owner, and publishes the key before the
-program. A failed publication can therefore leave a key without a program, but
-not a program published by that invocation without its key. Remove an orphan
-key explicitly before retrying; the tool will not guess or overwrite partial
-state. Filesystem or machine power-loss atomicity is not claimed.
-
-Immediately import the raw key into the host product's key-wrapping or secure
-delivery system. After confirming that import, remove the caller-owned final
-key file according to the host platform's data-retention policy. Do not ship
-the raw key beside the protected program.
+The command writes `expression.mxp` and `expression.key`. Keep the key separate
+from the program and import it into the application's key-delivery system. The
+slot schema must list every variable exactly once, using consecutive slots from
+zero. The command uses strict math semantics; applications that need fast-math
+semantics can use the encoder API directly.
 
 ### Loading a protected program
 
-The complete example is in `protected_example.cpp`. The runtime sequence is:
+At runtime, bind application values to the same slots and load the program:
 
 ```cpp
 const std::vector<uint8_t> program = read_file("expression.mxp");
@@ -279,27 +268,13 @@ evaluator.set_protected_expression(
 const double result = evaluator.evaluate();
 ```
 
-The key is move-only. `set_protected_expression` consumes it, authenticates and
-compiles the program, and leaves the evaluator empty on failure. Runtime slots
-are authenticated numbers, not source variable names or C++ types.
-Construct the caller-owned raw-key wipe guard before `from_bytes`, as in the
-example, so invalid keys and allocation or locking failures also wipe the vector.
-
-### Security boundary
-
-Protected artifacts conceal and authenticate semantic operations, literal
-bits, variable-slot use, and compiler policy against someone who can inspect or
-modify stored artifacts but does not have the matching key and cannot modify
-the trusted process. Variable names, comments, whitespace, parentheses, and
-original spelling are not stored in the artifact.
-
-This does not provide confidentiality against an attacker who controls the
-licensed process, debugger, process memory, registers, libsodium calls, or
-emitted native code. It is not virtual-black-box obfuscation, anti-debugging,
-white-box cryptography, issuer authentication, freshness, rollback protection,
-revocation, device binding, or a licence system. Key storage, transport,
-wrapping, device and licence policy, and issuer security belong to the host
-product. A valid replayed program and matching key are accepted.
+`set_protected_expression` verifies and compiles the program, then consumes the
+move-only key. The `.mxp` file keeps the formula encrypted and detects
+modification when it is loaded. The application process supplies the key and is
+the trusted endpoint. See the
+[protected-expression guide](docs/protected-expressions.md) and the complete
+[`protected_example.cpp`](protected_example.cpp) for input rules, key handling,
+error behavior, and a reusable key-wiping guard.
 
 ## Performance Analysis
 
@@ -320,6 +295,23 @@ product. A valid replayed program and matching key are accepted.
 *   The SSE2 backend is faster than the x87 backend due to better pipelining on modern CPUs
 *   The `fast_math` option provides modest improvement through algebraic simplification
 *   Compilation time is in the microsecond range, negligible for most use cases
+
+### Protected-expression overhead
+
+Protected programs add work when they are created and loaded, but execute the
+same generated code as clear expressions after compilation. Release benchmarks
+measured six representative formulas on x64 with MSVC, GCC, and Clang. Each
+phase ran in an isolated process, with seven retained runs per formula.
+
+| Phase | Observed median range |
+| :--- | ---: |
+| Create protected program | 17.1-66.3 us per expression |
+| Load and compile | 1.32-2.65x clear compilation |
+| Repeated evaluation | 0.94-1.03x clear evaluation |
+
+The cost is therefore concentrated at program creation and startup. No material
+steady-state evaluation penalty appeared in the retained measurements. See the
+[full methodology and per-compiler results](analysis/performance_acceptance.md).
 
 ### Accuracy
 
@@ -353,6 +345,16 @@ ctest --test-dir build
 
 # Run the full performance benchmark
 cmake --build build --target run_benchmarks
+```
+
+Using the protected build above with `BUILD_TESTING=ON`, run the protected
+benchmark with:
+
+```bash
+ctest --test-dir build -C Release -R mexce_protected_benchmark --verbose
+python analysis/run_protected_benchmarks.py \
+  build/protected_benchmark protected_benchmark_results.json \
+  --repeats 3 --resource-repeats 1
 ```
 
 ## License
