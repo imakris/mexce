@@ -243,11 +243,13 @@ value=0
 mexce_protect expression.txt bindings.txt expression.mxp expression.key
 ```
 
-The command writes `expression.mxp` and `expression.key`. Keep the key separate
-from the program and import it into the application's key-delivery system. The
-slot schema must list every variable exactly once, using consecutive slots from
-zero. The command uses strict math semantics; applications that need fast-math
-semantics can use the encoder API directly.
+The command writes `expression.mxp` and `expression.key`. The two output paths
+must be different and must not exist; remove an orphaned key before retrying an
+interrupted run. Keep the key separate from the program and import it into the
+application's key-delivery system. The slot schema must list every variable
+exactly once, using consecutive slots from zero. The command uses strict math
+semantics; applications that need fast-math semantics can use the encoder API
+directly.
 
 ### Loading a protected program
 
@@ -270,11 +272,11 @@ const double result = evaluator.evaluate();
 
 `set_protected_expression` verifies and compiles the program, then consumes the
 move-only key. The `.mxp` file keeps the formula encrypted and detects
-modification when it is loaded. The application process supplies the key and is
-the trusted endpoint. See the
-[protected-expression guide](docs/protected-expressions.md) and the complete
-[`protected_example.cpp`](protected_example.cpp) for input rules, key handling,
-error behavior, and a reusable key-wiping guard.
+modification when it is loaded. A failed load leaves the evaluator without an
+executable expression. The application process supplies the key and is the
+trusted endpoint. The complete
+[`protected_example.cpp`](protected_example.cpp) includes file loading and a
+reusable key-wiping guard.
 
 ## Performance Analysis
 
