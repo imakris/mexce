@@ -95,6 +95,7 @@ if(BUILD_TESTING)
 
     if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
         set(MEXCE_PROTECTED_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
         add_executable(protected_codec_tests test/protected_codec_tests.cpp)
         target_link_libraries(protected_codec_tests PRIVATE mexce_protected)
@@ -188,6 +189,11 @@ if(BUILD_TESTING)
     target_compile_definitions(benchmark PRIVATE
         BENCHMARK_COMPILER="${MEXCE_BENCHMARK_COMPILER}"
         BENCHMARK_COMPILER_FLAGS="${MEXCE_BENCHMARK_FLAGS}")
+    if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
+        target_compile_definitions(protected_benchmark PRIVATE
+            BENCHMARK_COMPILER="${MEXCE_BENCHMARK_COMPILER}"
+            BENCHMARK_COMPILER_FLAGS="${MEXCE_BENCHMARK_FLAGS}")
+    endif()
 
     add_test(NAME mexce_unit_tests COMMAND unit_tests)
     add_test(NAME mexce_ordinary_no_sodium COMMAND ordinary_no_sodium_test)
@@ -199,11 +205,15 @@ if(BUILD_TESTING)
         add_test(NAME mexce_mixed_translation_units COMMAND mixed_tu_test)
         add_test(NAME mexce_protected_decoder_fuzz_smoke
             COMMAND protected_decoder_fuzz_smoke)
-        add_test(NAME mexce_protected_benchmark COMMAND protected_benchmark)
-        add_test(NAME mexce_protected_maximum_valid
-            COMMAND protected_benchmark maximum-valid)
-        add_test(NAME mexce_protected_late_invalid
-            COMMAND protected_benchmark late-invalid)
+        add_test(NAME mexce_protected_benchmark
+            COMMAND
+                ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/analysis/run_protected_benchmarks.py
+                $<TARGET_FILE:protected_benchmark>
+                ${CMAKE_CURRENT_BINARY_DIR}/protected_benchmark_ctest.json
+                --repeats 1
+                --resource-repeats 1
+                --diagnostic-only)
         if(MEXCE_BUILD_ISSUER_TOOLS)
             add_test(NAME mexce_protect_utility COMMAND mexce_protect_tests)
         endif()

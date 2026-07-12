@@ -208,7 +208,26 @@ jobs:
         if: matrix.configuration == 'protected'
         run: ctest --test-dir build -C Release -R mexce_protected_benchmark --verbose > build/protected_benchmark_results.txt
 
+      - name: Run phase-isolated protected performance diagnostic on Linux
+        if: runner.os == 'Linux' && matrix.configuration == 'protected'
+        run: >-
+          python analysis/run_protected_benchmarks.py
+          build/protected_benchmark
+          build/protected_benchmark_results.json
+          --repeats 3
+          --resource-repeats 1
+
+      - name: Run phase-isolated protected performance diagnostic on Windows
+        if: runner.os == 'Windows' && matrix.configuration == 'protected'
+        run: >-
+          python analysis/run_protected_benchmarks.py
+          build/Release/protected_benchmark.exe
+          build/protected_benchmark_results.json
+          --repeats 3
+          --resource-repeats 1
+
       - name: Upload diagnostic results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.configuration }}
@@ -216,3 +235,4 @@ jobs:
           path: |
             build/benchmark_results.txt
             build/protected_benchmark_results.txt
+            build/protected_benchmark_results.json

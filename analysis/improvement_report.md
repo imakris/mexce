@@ -5,6 +5,10 @@ full architecture map of mexce.h, benchmark-infrastructure audit, 4 performance-
 per-idea adversarial verification against the actual code, reorganization proposal, and an
 optimization-process runbook with a completeness-critic pass.
 
+Status: historical reference only. Its proposed optimization process and critic
+appendix are superseded by `analysis/optimization_runbook.md`; current release
+evidence and limits are in `analysis/performance_acceptance.md`.
+
 Companion files:
 - `analysis/optimization_runbook.md` — the iterative benchmark-driven optimization process (with required amendments appended)
 - `analysis/perf_ideas_verified.json` — full detail for every verified performance idea (seed for the runbook's idea bank)

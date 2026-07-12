@@ -2,10 +2,16 @@
 
 Last updated: 2026-06-10, on branch `claude/verified-fixes-and-sse2-fusion`.
 
-This is the tracking document for the improvement campaign. Detailed evidence lives in:
+Status: historical reference only; this is no longer an active tracking or
+implementation document. The active performance procedure and release decision
+are in [`optimization_runbook.md`](optimization_runbook.md) and
+[`performance_acceptance.md`](performance_acceptance.md). The unchecked items
+below preserve the June campaign's state and are not current prerequisites.
+
+Historical evidence lives in:
 
 - [`improvement_report.md`](improvement_report.md) — branch harvest verdict, master bugs B1–B7, verified performance ideas, reorg plan, verification addendum
-- [`optimization_runbook.md`](optimization_runbook.md) — the LLM-executable benchmark-driven optimization loop (apply its 19-amendment appendix before first use)
+- Git history for the former optimization-runbook proposal and critic appendix;
 - [`perf_ideas_verified.json`](perf_ideas_verified.json) — all 22 verified performance ideas with code locations, impact estimates, and adversarial verdicts (the idea bank)
 
 Ground truth used throughout: 44,229-expression benchmark corpus; dev box (Windows,
