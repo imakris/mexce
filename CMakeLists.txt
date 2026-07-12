@@ -51,6 +51,10 @@ add_library(mexce INTERFACE)
 add_library(mexce::mexce ALIAS mexce)
 target_include_directories(mexce INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
+add_executable(ordinary_no_sodium_test test/ordinary_no_sodium_test.cpp)
+target_link_libraries(ordinary_no_sodium_test PRIVATE mexce)
+target_compile_options(ordinary_no_sodium_test PRIVATE ${MEXCE_WARNING_FLAGS})
+
 if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
     set(MEXCE_SODIUM_TARGET "")
     find_package(libsodium 1.0.22 EXACT CONFIG QUIET)
@@ -97,6 +101,50 @@ if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
     target_compile_definitions(protected_sodium_init_failure_test PRIVATE
         MEXCE_PROTECTED_TESTING)
     target_compile_options(protected_sodium_init_failure_test PRIVATE ${MEXCE_WARNING_FLAGS})
+
+    add_executable(protected_runtime_tests test/protected_runtime_tests.cpp)
+    target_link_libraries(protected_runtime_tests PRIVATE mexce_protected)
+    target_compile_definitions(protected_runtime_tests PRIVATE
+        MEXCE_PROTECTED_TESTING
+        MEXCE_PROTECTED_FIXTURE_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.bin")
+    target_compile_options(protected_runtime_tests PRIVATE ${MEXCE_WARNING_FLAGS})
+
+    add_executable(mixed_tu_test
+        test/mixed_tu_test.cpp
+        test/mixed_tu_ordinary.cpp
+        test/mixed_tu_protected.cpp)
+    target_link_libraries(mixed_tu_test PRIVATE mexce_protected)
+    target_compile_definitions(mixed_tu_test PRIVATE
+        MEXCE_PROTECTED_FIXTURE_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.bin")
+    target_compile_options(mixed_tu_test PRIVATE ${MEXCE_WARNING_FLAGS})
+
+    add_executable(protected_benchmark test/protected_benchmark.cpp)
+    target_link_libraries(protected_benchmark PRIVATE mexce_protected)
+    if(WIN32)
+        target_link_libraries(protected_benchmark PRIVATE Psapi)
+    endif()
+    if(NOT ENABLE_COVERAGE)
+        target_compile_options(protected_benchmark PRIVATE ${MEXCE_OPTIMIZATION_FLAGS})
+    endif()
+    target_compile_options(protected_benchmark PRIVATE ${MEXCE_WARNING_FLAGS})
+
+    add_executable(protected_decoder_fuzz_smoke test/protected_decoder_fuzz.cpp)
+    target_link_libraries(protected_decoder_fuzz_smoke PRIVATE mexce_protected)
+    target_compile_definitions(protected_decoder_fuzz_smoke PRIVATE
+        MEXCE_FUZZ_SMOKE_MAIN
+        MEXCE_PROTECTED_FIXTURE_PATH="${MEXCE_PROTECTED_FIXTURE_DIR}/protected_format_1_0.bin")
+    target_compile_options(protected_decoder_fuzz_smoke PRIVATE ${MEXCE_WARNING_FLAGS})
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND UNIX)
+        add_executable(protected_decoder_fuzz EXCLUDE_FROM_ALL
+            test/protected_decoder_fuzz.cpp)
+        target_link_libraries(protected_decoder_fuzz PRIVATE mexce_protected)
+        target_compile_options(protected_decoder_fuzz PRIVATE
+            -fsanitize=fuzzer,address,undefined
+            -fno-omit-frame-pointer)
+        target_link_options(protected_decoder_fuzz PRIVATE
+            -fsanitize=fuzzer,address,undefined)
+    endif()
 endif()
 
 # Capture compiler info for benchmark output
@@ -131,10 +179,20 @@ target_compile_definitions(benchmark PRIVATE
 
 enable_testing()
 add_test(NAME mexce_unit_tests COMMAND unit_tests)
+add_test(NAME mexce_ordinary_no_sodium COMMAND ordinary_no_sodium_test)
 if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
     add_test(NAME mexce_protected_codec_tests COMMAND protected_codec_tests)
     add_test(NAME mexce_protected_sodium_init_failure
         COMMAND protected_sodium_init_failure_test)
+    add_test(NAME mexce_protected_runtime COMMAND protected_runtime_tests)
+    add_test(NAME mexce_mixed_translation_units COMMAND mixed_tu_test)
+    add_test(NAME mexce_protected_decoder_fuzz_smoke
+        COMMAND protected_decoder_fuzz_smoke)
+    add_test(NAME mexce_protected_benchmark COMMAND protected_benchmark)
+    add_test(NAME mexce_protected_maximum_valid
+        COMMAND protected_benchmark maximum-valid)
+    add_test(NAME mexce_protected_late_invalid
+        COMMAND protected_benchmark late-invalid)
 endif()
 add_test(NAME benchmark_quick
          COMMAND benchmark 5 ${CMAKE_BINARY_DIR}/benchmark_quick_results.txt)

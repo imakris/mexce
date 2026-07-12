@@ -24,77 +24,7 @@ static_assert(crypto_secretstream_xchacha20poly1305_ABYTES == 17,
     "Protected-expression format 1.0 requires 17-byte secretstream overhead");
 
 
-enum class Protected_expression_error_category
-{
-    INVALID_ARGUMENT,
-    UNSUPPORTED_FORMAT,
-    SIZE_LIMIT,
-    AUTHENTICATION_FAILED,
-    MALFORMED_PROGRAM,
-    MISSING_BINDING,
-    INTROSPECTION_DISABLED,
-    CRYPTOGRAPHY_UNAVAILABLE,
-    COMPILATION_FAILED,
-    RESOURCE_FAILURE,
-};
-
-
-class Protected_expression_error: public std::runtime_error
-{
-public:
-    Protected_expression_error(
-        Protected_expression_error_category category,
-        const char* message)
-    :
-        std::runtime_error(message),
-        m_category(category),
-        m_has_record_index(false),
-        m_record_index(0)
-    {}
-
-    Protected_expression_error(
-        Protected_expression_error_category category,
-        const char* message,
-        uint32_t record_index)
-    :
-        std::runtime_error(message),
-        m_category(category),
-        m_has_record_index(true),
-        m_record_index(record_index)
-    {}
-
-    Protected_expression_error_category category() const noexcept { return m_category; }
-    bool has_record_index() const noexcept                         { return m_has_record_index; }
-
-    uint32_t record_index() const
-    {
-        if (!m_has_record_index) {
-            throw std::logic_error("No protected-expression record index is available.");
-        }
-        return m_record_index;
-    }
-
-private:
-    Protected_expression_error_category m_category;
-    bool                                m_has_record_index;
-    uint32_t                            m_record_index;
-};
-
-
 namespace impl {
-
-
-enum class Protected_wipe_context
-{
-    KEY,
-    PULL_STATE,
-    PUSH_STATE,
-    CLEAR_RECORD,
-    ADDITIONAL_DATA,
-    DECODED_SCALAR,
-    VALIDATOR_STATE,
-    COUNT,
-};
 
 
 #ifdef MEXCE_PROTECTED_TESTING
@@ -104,7 +34,11 @@ public:
     void observe(Protected_wipe_context context, const uint8_t* bytes, size_t size)
     {
         const size_t context_index = static_cast<size_t>(context);
+        const size_t sequence = ++m_sequence;
         ++m_counts[context_index];
+        if (m_first_sequence[context_index] == 0) {
+            m_first_sequence[context_index] = sequence;
+        }
         for (size_t i = 0; i < size; ++i) {
             m_saw_nonzero_after_wipe[context_index] |= bytes[i] != 0;
         }
@@ -113,13 +47,29 @@ public:
     void reset()
     {
         std::memset(m_counts, 0, sizeof(m_counts));
+        std::memset(m_first_sequence, 0, sizeof(m_first_sequence));
         std::memset(
             m_saw_nonzero_after_wipe, 0, sizeof(m_saw_nonzero_after_wipe));
+        m_sequence = 0;
     }
 
     size_t count(Protected_wipe_context context) const
     {
         return m_counts[static_cast<size_t>(context)];
+    }
+
+    size_t first_sequence(Protected_wipe_context context) const
+    {
+        return m_first_sequence[static_cast<size_t>(context)];
+    }
+
+    bool observed_before(
+        Protected_wipe_context first,
+        Protected_wipe_context second) const
+    {
+        const size_t first_value  = first_sequence(first);
+        const size_t second_value = first_sequence(second);
+        return first_value != 0 && second_value != 0 && first_value < second_value;
     }
 
     bool all_observed_regions_are_zero() const
@@ -134,17 +84,21 @@ public:
 
 private:
     size_t m_counts[static_cast<size_t>(Protected_wipe_context::COUNT)] = {};
+    size_t m_first_sequence[static_cast<size_t>(Protected_wipe_context::COUNT)] = {};
     bool   m_saw_nonzero_after_wipe[
         static_cast<size_t>(Protected_wipe_context::COUNT)] = {};
+    size_t m_sequence = 0;
 };
 
 
 struct protected_test_faults_t
 {
-    bool   fail_sodium_init = false;
-    bool   fail_malloc      = false;
-    bool   fail_mlock       = false;
-    bool   fail_init_pull   = false;
+    bool fail_sodium_init             = false;
+    bool fail_malloc                  = false;
+    bool fail_mlock                   = false;
+    bool fail_init_pull               = false;
+    bool fail_executable_allocation   = false;
+    bool fail_executable_finalization = false;
 };
 
 
@@ -494,9 +448,131 @@ public:
     ~Protected_wipe_guard() { protected_memzero(m_bytes, m_size, m_context); }
 
 private:
-    void*  m_bytes;
-    size_t m_size;
+    void*                  m_bytes;
+    size_t                 m_size;
     Protected_wipe_context m_context;
+};
+
+
+inline const char* protected_operation_name(Protected_operation operation)
+{
+    switch (operation) {
+        case Protected_operation::ADD:   return "add";
+        case Protected_operation::SUB:   return "sub";
+        case Protected_operation::MUL:   return "mul";
+        case Protected_operation::DIV:   return "div";
+        case Protected_operation::NEG:   return "neg";
+        case Protected_operation::POW:   return "pow";
+        case Protected_operation::SIN:   return "sin";
+        case Protected_operation::COS:   return "cos";
+        case Protected_operation::TAN:   return "tan";
+        case Protected_operation::ABS:   return "abs";
+        case Protected_operation::SIGN:  return "sign";
+        case Protected_operation::SIGNP: return "signp";
+        case Protected_operation::EXPN:  return "expn";
+        case Protected_operation::SFC:   return "sfc";
+        case Protected_operation::SQRT:  return "sqrt";
+        case Protected_operation::EXP:   return "exp";
+        case Protected_operation::LT:    return "lt";
+        case Protected_operation::GT:    return "gt";
+        case Protected_operation::LE:    return "le";
+        case Protected_operation::GE:    return "ge";
+        case Protected_operation::EQ:    return "eq";
+        case Protected_operation::NE:    return "ne";
+        case Protected_operation::LOG:   return "log";
+        case Protected_operation::LOG2:  return "log2";
+        case Protected_operation::LOG10: return "log10";
+        case Protected_operation::LOGB:  return "logb";
+        case Protected_operation::YLOG2: return "ylog2";
+        case Protected_operation::MAX:   return "max";
+        case Protected_operation::MIN:   return "min";
+        case Protected_operation::FLOOR: return "floor";
+        case Protected_operation::CEIL:  return "ceil";
+        case Protected_operation::ROUND: return "round";
+        case Protected_operation::INT:   return "int";
+        case Protected_operation::TRUNC: return "trunc";
+        case Protected_operation::MOD:   return "mod";
+        case Protected_operation::BND:   return "bnd";
+        case Protected_operation::BIAS:  return "bias";
+        case Protected_operation::GAIN:  return "gain";
+        default:
+            assert(false);
+            return "";
+    }
+}
+
+
+class Protected_semantic_sink
+{
+public:
+    explicit Protected_semantic_sink(evaluator& owner)
+    :
+        m_owner(owner)
+    {}
+
+    void manifest(uint32_t, bool fast_math, uint32_t)
+    {
+        options effective_options = m_owner.m_options;
+        Protected_wipe_guard effective_options_wipe(
+            &effective_options,
+            sizeof(effective_options),
+            Protected_wipe_context::OPTIONS_STORAGE);
+        effective_options.fast_math = fast_math;
+        Compilation_test_fault test_fault = Compilation_test_fault::NONE;
+#ifdef MEXCE_PROTECTED_TESTING
+        const auto& faults = protected_test_faults();
+        if (faults.fail_executable_allocation) {
+            test_fault = Compilation_test_fault::EXECUTABLE_ALLOCATION;
+        }
+        else
+        if (faults.fail_executable_finalization) {
+            test_fault = Compilation_test_fault::EXECUTABLE_FINALIZATION;
+        }
+#endif
+        m_compiler.reset(new Semantic_compiler(
+            m_owner,
+            effective_options,
+            m_owner.m_next_variable_id,
+            protected_memzero,
+            test_fault));
+    }
+
+    void literal(double value, uint32_t)
+    {
+        m_compiler->consume_literal(value);
+    }
+
+    void variable(uint32_t slot, uint32_t record_index)
+    {
+        const auto binding = m_owner.m_protected_variables.find(slot);
+        if (binding == m_owner.m_protected_variables.end()) {
+            throw Protected_expression_error(
+                Protected_expression_error_category::MISSING_BINDING,
+                "A protected-expression binding is missing.",
+                record_index);
+        }
+        m_compiler->consume_variable(binding->second);
+    }
+
+    void call(Protected_operation operation, uint32_t)
+    {
+        m_compiler->consume_call(protected_operation_name(operation));
+    }
+
+    void end(uint32_t)
+    {
+        m_result = m_compiler->finish();
+    }
+
+    Semantic_compilation_result take_result()
+    {
+        return std::move(m_result);
+    }
+
+private:
+    evaluator&                         m_owner;
+    std::unique_ptr<Semantic_compiler> m_compiler;
+    Semantic_compilation_result        m_result;
 };
 
 
@@ -730,6 +806,46 @@ void decode_protected_expression(
 
 
 } // namespace impl
+
+
+inline void evaluator::set_protected_expression(
+    const uint8_t* program,
+    size_t program_size,
+    Protected_expression_key key)
+{
+    reset_compiled_expression();
+
+    if (m_options.enable_cse) {
+        throw Protected_expression_error(
+            Protected_expression_error_category::INVALID_ARGUMENT,
+            "Protected expressions do not support common subexpression elimination.");
+    }
+
+    try {
+        impl::Protected_semantic_sink sink(*this);
+        impl::decode_protected_expression(
+            program, program_size, std::move(key), sink);
+        publish_semantic_compilation(sink.take_result());
+    }
+    catch (const Protected_expression_error&) {
+        throw;
+    }
+    catch (const std::bad_alloc&) {
+        throw Protected_expression_error(
+            Protected_expression_error_category::RESOURCE_FAILURE,
+            "Protected-expression compilation exhausted a resource.");
+    }
+    catch (const impl::Executable_memory_error&) {
+        throw Protected_expression_error(
+            Protected_expression_error_category::RESOURCE_FAILURE,
+            "Protected-expression executable memory could not be finalized.");
+    }
+    catch (const std::exception&) {
+        throw Protected_expression_error(
+            Protected_expression_error_category::COMPILATION_FAILED,
+            "Protected-expression compilation failed.");
+    }
+}
 
 
 } // namespace mexce
