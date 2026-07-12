@@ -12,7 +12,9 @@ A single-header, dependency-free JIT compiler for mathematical expressions.
 
 Once an expression is compiled, subsequent evaluations are direct function calls, which avoids parsing and interpretation overhead. This makes `mexce` well-suited for applications that repeatedly evaluate the same formula with different inputs, such as numerical simulations, data processing kernels, or graphics.
 
-The library is contained in a single header file (`mexce.h`) with no external dependencies.
+The ordinary library is contained in a single header file (`mexce.h`) with no
+external dependencies. An opt-in protected-expression surface uses libsodium
+1.0.22 to load authenticated, encrypted semantic programs.
 
 ### Requirements
 *   **Platforms:** Windows, Linux
@@ -22,6 +24,109 @@ The library is contained in a single header file (`mexce.h`) with no external de
 ## Installation
 
 Copy `mexce.h` into your project's include path and `#include "mexce.h"`. No other steps are needed.
+
+### Protected-expression build
+
+Protected expressions are x64-only and remain off by default. Make libsodium
+1.0.22 available through Conan, vcpkg, or pkg-config, then configure the source
+build with:
+
+```sh
+cmake -S . -B build \
+  -DBUILD_TESTING=OFF \
+  -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON \
+  -DMEXCE_BUILD_ISSUER_TOOLS=ON
+cmake --build build --config Release
+cmake --install build --config Release --prefix install
+```
+
+Protected consumers link `mexce::protected`; ordinary consumers continue to
+link `mexce::mexce` without a cryptographic dependency. The
+`MEXCE_BUILD_ISSUER_TOOLS` option adds and installs `mexce_protect`, and requires
+protected expressions to be enabled.
+
+### Creating a protected program
+
+`mexce_protect` is an issuer-side build tool, not a licence system. It accepts
+an expression file, a binding-schema file, a program output, and a key output.
+For `expression.txt`:
+
+```text
+value+1
+```
+
+For `bindings.txt`:
+
+```text
+value=0
+```
+
+```sh
+mexce_protect expression.txt bindings.txt expression.mxp expression.key
+```
+
+Schema entries use `name=decimal_slot`, one per line. Names use
+`[A-Za-z_][A-Za-z0-9_]*`, slots are unique and dense from zero, and the schema
+must exactly describe the variables used by the expression. The tool removes
+one terminal LF, plus its preceding CR when present, from the expression. It
+does not otherwise normalize source whitespace.
+
+The command-line issuer encodes `Protected_math_mode::STRICT`. Applications
+that intentionally require `FAST` policy can use the issuer-side encoder API.
+
+The program and key destinations must be distinct and absent. The tool rejects
+symlink or reparse-point traversal, never overwrites a destination, restricts
+the 32-byte raw key file to the current owner, and publishes the key before the
+program. A failed publication can therefore leave a key without a program, but
+not a program published by that invocation without its key. Remove an orphan
+key explicitly before retrying; the tool will not guess or overwrite partial
+state. Filesystem or machine power-loss atomicity is not claimed.
+
+Immediately import the raw key into the host product's key-wrapping or secure
+delivery system. After confirming that import, remove the caller-owned final
+key file according to the host platform's data-retention policy. Do not ship
+the raw key beside the protected program.
+
+### Loading a protected program
+
+The complete example is in `protected_example.cpp`. The runtime sequence is:
+
+```cpp
+const std::vector<uint8_t> program = read_file("expression.mxp");
+std::vector<uint8_t> raw_key = obtain_unwrapped_key_from_host();
+Raw_key_wipe_guard raw_key_wipe(raw_key); // Defined in protected_example.cpp.
+auto key = mexce::Protected_expression_key::from_bytes(
+    raw_key.data(), raw_key.size());
+
+double value = 2.0;
+mexce::evaluator evaluator;
+evaluator.bind_protected(value, 0);
+evaluator.set_protected_expression(
+    program.data(), program.size(), std::move(key));
+const double result = evaluator.evaluate();
+```
+
+The key is move-only. `set_protected_expression` consumes it, authenticates and
+compiles the program, and leaves the evaluator empty on failure. Runtime slots
+are authenticated numbers, not source variable names or C++ types.
+Construct the caller-owned raw-key wipe guard before `from_bytes`, as in the
+example, so invalid keys and allocation or locking failures also wipe the vector.
+
+### Protected-expression security boundary
+
+Protected artifacts conceal and authenticate semantic operations, literal
+bits, variable-slot use, and compiler policy against someone who can inspect or
+modify stored artifacts but does not have the matching key and cannot modify
+the trusted process. Variable names, comments, whitespace, parentheses, and
+original spelling are not stored in the artifact.
+
+This does not provide confidentiality against an attacker who controls the
+licensed process, debugger, process memory, registers, libsodium calls, or
+emitted native code. It is not virtual-black-box obfuscation, anti-debugging,
+white-box cryptography, issuer authentication, freshness, rollback protection,
+revocation, device binding, or a licence system. Key storage, transport,
+wrapping, device and licence policy, and issuer security belong to the host
+product. A valid replayed program and matching key are accepted.
 
 ## Quick Start
 

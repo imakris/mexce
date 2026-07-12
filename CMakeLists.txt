@@ -7,6 +7,12 @@ include(GNUInstallDirs)
 
 option(ENABLE_COVERAGE "Build with coverage instrumentation" OFF)
 option(MEXCE_ENABLE_PROTECTED_EXPRESSIONS "Build protected-expression targets" OFF)
+option(MEXCE_BUILD_ISSUER_TOOLS "Build the protected-expression issuer tool" OFF)
+
+if(MEXCE_BUILD_ISSUER_TOOLS AND NOT MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
+    message(FATAL_ERROR
+        "MEXCE_BUILD_ISSUER_TOOLS requires MEXCE_ENABLE_PROTECTED_EXPRESSIONS")
+endif()
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,6 +44,21 @@ if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
     add_library(mexce::protected ALIAS mexce_protected)
     set_target_properties(mexce_protected PROPERTIES EXPORT_NAME protected)
     target_link_libraries(mexce_protected INTERFACE mexce mexce::_sodium)
+endif()
+
+if(MEXCE_BUILD_ISSUER_TOOLS)
+    add_library(mexce_protect_lib STATIC tools/mexce_protect_lib.cpp)
+    target_include_directories(mexce_protect_lib PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+    target_link_libraries(mexce_protect_lib PUBLIC mexce_protected)
+    target_compile_options(mexce_protect_lib PRIVATE ${MEXCE_WARNING_FLAGS})
+    if(WIN32)
+        target_link_libraries(mexce_protect_lib PRIVATE Advapi32)
+    endif()
+
+    add_executable(mexce_protect tools/mexce_protect.cpp)
+    target_link_libraries(mexce_protect PRIVATE mexce_protect_lib)
+    target_compile_options(mexce_protect PRIVATE ${MEXCE_WARNING_FLAGS})
 endif()
 
 if(BUILD_TESTING)
@@ -138,6 +159,12 @@ if(BUILD_TESTING)
             target_link_options(protected_decoder_fuzz PRIVATE
                 -fsanitize=fuzzer,address,undefined)
         endif()
+
+        if(MEXCE_BUILD_ISSUER_TOOLS)
+            add_executable(mexce_protect_tests test/mexce_protect_tests.cpp)
+            target_link_libraries(mexce_protect_tests PRIVATE mexce_protect_lib)
+            target_compile_options(mexce_protect_tests PRIVATE ${MEXCE_WARNING_FLAGS})
+        endif()
     endif()
 
     set(MEXCE_BENCHMARK_COMPILER "${CMAKE_CXX_COMPILER_ID}")
@@ -177,6 +204,9 @@ if(BUILD_TESTING)
             COMMAND protected_benchmark maximum-valid)
         add_test(NAME mexce_protected_late_invalid
             COMMAND protected_benchmark late-invalid)
+        if(MEXCE_BUILD_ISSUER_TOOLS)
+            add_test(NAME mexce_protect_utility COMMAND mexce_protect_tests)
+        endif()
     endif()
     add_test(NAME benchmark_quick
         COMMAND benchmark 5 ${CMAKE_BINARY_DIR}/benchmark_quick_results.txt)
@@ -195,6 +225,9 @@ if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
     list(APPEND mexce_install_targets mexce_protected)
 endif()
 install(TARGETS ${mexce_install_targets} EXPORT mexce_targets)
+if(MEXCE_BUILD_ISSUER_TOOLS)
+    install(TARGETS mexce_protect RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
 install(EXPORT mexce_targets
     FILE mexce-targets.cmake
     NAMESPACE mexce::
@@ -208,6 +241,8 @@ if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
     install(FILES cmake/mexce-sodium.cmake
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mexce)
+    install(FILES THIRD_PARTY_NOTICES.md
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/mexce)
 endif()
 install(FILES LICENSE.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/mexce)
 

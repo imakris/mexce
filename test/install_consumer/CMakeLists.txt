@@ -46,6 +46,10 @@ if(MEXCE_CONSUMER_PROTECTED)
 
     add_executable(mexce_protected_consumer protected.cpp)
     target_link_libraries(mexce_protected_consumer PRIVATE mexce::protected)
+
+    add_executable(mexce_protected_file_consumer
+        ${CMAKE_CURRENT_LIST_DIR}/../../protected_example.cpp)
+    target_link_libraries(mexce_protected_file_consumer PRIVATE mexce::protected)
 elseif(TARGET mexce::protected)
     message(FATAL_ERROR "The ordinary installed package unexpectedly provides mexce::protected")
 endif()

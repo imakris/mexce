@@ -19,6 +19,7 @@ class MexceConan(ConanFile):
     exports_sources = (
         "CMakeLists.txt",
         "LICENSE.txt",
+        "THIRD_PARTY_NOTICES.md",
         "cmake/*",
         "mexce.h",
         "mexce_protected.h",
