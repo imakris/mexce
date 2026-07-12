@@ -1090,32 +1090,24 @@ normalized transitive dependency.
 
 ### Performance and resource behavior
 
-The semantic refactor compares Release baseline and candidate builds using the
-existing corpus and identical compiler flags. Five measured runs alternate
-baseline and candidate after a discarded warm-up. The decision value is the
-median. The noise band is the greater of 2 percent or three times baseline
-median absolute deviation divided by baseline median.
-
-Acceptance for clear behavior:
-
-- evaluate regression does not exceed the noise band;
-- clear compile regression does not exceed 5 percent; and
-- backend selection and correctness counts are unchanged.
+Release baseline and candidate builds use the existing corpus, identical
+compiler flags, discarded warm-ups, alternating run order, and enough repeated
+runs to distinguish persistent movement from system noise. Reports retain the
+per-run values, medians, dispersion, backend selection, and correctness counts.
+During functional implementation these measurements are diagnostic: batches
+1 through 5 record changes and suspected causes but do not use fixed percentage
+limits as closure gates.
 
 Protected benchmarks run clear and protected compilation in isolated processes
 with matched formulas, bindings, and options. They report per-expression
 compile ratio, evaluate timing, and peak working set as structured output.
-
-Acceptance for protected behavior:
-
-- protected/clear compile ratio at the 95th percentile is at most 10;
-- protected evaluate performance does not regress beyond the noise band from
-  matched clear native code; and
-- maximum-size valid and late-invalid artifacts complete in an isolated
-  process within the broad 2-second and 128-MiB safety fence.
+Maximum-size valid and late-invalid artifacts also report elapsed time and peak
+working set from an isolated process. Resource failures remain subject to the
+specified bounded-input and cleanup behavior even while timing and memory
+measurements are diagnostic.
 
 No native code-size measurement is required unless a harness that measures it
-is explicitly added to the affected batch.
+is explicitly added.
 
 ## Implementation batches
 
@@ -1150,7 +1142,7 @@ Gates:
 - failed-replacement and empty-state checks;
 - primary/fallback independence and complete lifetime ownership checks;
 - Windows and Linux unit/corpus runs; and
-- clear performance acceptance.
+- clear performance diagnostics with backend and correctness counts.
 
 Owned risks:
 
@@ -1228,7 +1220,7 @@ Gates:
 - focused Windows heap diagnostics;
 - structured decoder fuzz smoke;
 - Windows/Linux cross-produced artifacts; and
-- protected performance and resource acceptance.
+- protected compile, evaluate, and isolated-resource diagnostics.
 
 Owned risks:
 
@@ -1300,7 +1292,9 @@ Gates:
 - end-to-end utility output consumed through the installed protected target;
 - documented commands executed in a clean consumer;
 - default and protected release matrices; and
-- scheduled extended fuzz run.
+- scheduled extended fuzz run; and
+- complete-system clear and protected performance diagnostics on release
+  configurations.
 
 Owned risks:
 
@@ -1310,6 +1304,48 @@ Owned risks:
 - documentation overstating local-process secrecy; and
 - CI exercising source-tree headers instead of installed packages.
 
+### Batch 6: performance stabilization and release acceptance
+
+Dependency: issuer utility, documentation, and continuous gates.
+
+Outcome:
+
+- release performance characterized from the complete implementation;
+- causal regressions identified with profiles rather than timing deltas alone;
+- targeted optimizations applied without weakening semantic, cryptographic,
+  lifecycle, packaging, or portability guarantees; and
+- release acceptance based on finished-system workload evidence.
+
+Affected surfaces:
+
+- clear and protected benchmark harnesses and structured reports;
+- implementation paths demonstrated by profiles to cause material regressions;
+  and
+- release performance documentation and continuous performance jobs.
+
+Gates:
+
+- matched baseline and candidate measurements across supported release
+  configurations, with warm-up, alternating order, per-run results, medians,
+  and dispersion retained;
+- clear compile and evaluate profiles, protected encode/load profiles, and
+  maximum-size valid and late-invalid resource profiles;
+- causal explanation for every optimization and before/after evidence on the
+  workload that exposed it;
+- all functional, security, lifecycle, portability, and packaging gates affected
+  by an optimization rerun after the change; and
+- release acceptance limits selected from complete-system distributions,
+  workload requirements, platform noise, and resource-safety evidence rather
+  than preassigned percentages.
+
+Owned risks:
+
+- optimizing an intermediate architecture that later batches replace;
+- treating measurement noise as a product regression;
+- improving aggregate timing while worsening tail or maximum-size behavior;
+- duplicating clear and protected compiler paths for speed; and
+- trading away cleanup, authentication, ownership, or portability guarantees.
+
 ## Completion criteria
 
 The protected capability is complete when:
@@ -1317,11 +1353,12 @@ The protected capability is complete when:
 - format 1.0 bytes, semantic IDs, APIs, ownership, errors, limits, and security
   claims are implemented as specified;
 - normal MEXCE remains dependency-free and ODR-safe;
-- clear compilation retains adopted behavior and satisfies its performance
-  gates;
+- clear compilation retains adopted behavior;
 - protected compilation passes format, semantic, mutation, lifetime, erasure,
   fuzz, portability, and resource gates;
 - installed CMake, Conan, and vcpkg consumers use candidate artifacts;
 - the issuer utility satisfies publication and permission invariants; and
+- the complete implementation satisfies Batch 6 release performance and
+  resource acceptance; and
 - no plaintext protected overload, duplicate compiler path, temporary build
   switch, source-reparse fallback, or process-only artifact remains.
