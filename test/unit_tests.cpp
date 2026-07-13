@@ -46,7 +46,10 @@ extern "C" int mexce_test_override_mprotect(void* addr, size_t len, int prot)
 #define mprotect mexce_test_override_mprotect
 #endif
 
+// Qt defines emit as an empty macro; the public header must remain includable.
+#define emit
 #include "mexce.h"
+#undef emit
 
 #ifdef __linux__
 #undef mmap

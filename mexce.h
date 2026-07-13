@@ -6570,7 +6570,7 @@ impl::Semantic_program impl::Clear_semantic_producer::produce(
     struct semantic_traversal_t
     {
         size_t node;
-        bool   emit;
+        bool   children_visited;
     };
 
     Semantic_program result;
@@ -6581,7 +6581,7 @@ impl::Semantic_program impl::Clear_semantic_producer::produce(
         const auto step = traversal.back();
         traversal.pop_back();
         const auto& node = semantic_nodes[step.node];
-        if (step.emit || node.child_count == 0) {
+        if (step.children_visited || node.child_count == 0) {
             result.push_back(node.record);
             continue;
         }
