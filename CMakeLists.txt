@@ -17,6 +17,20 @@ endif()
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(BUILD_TESTING AND ENABLE_COVERAGE)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        add_compile_options(-O0 -g)
+
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            add_compile_options(--coverage)
+            add_link_options(--coverage)
+        else()
+            add_compile_options(-fprofile-instr-generate -fcoverage-mapping)
+            add_link_options(-fprofile-instr-generate)
+        endif()
+    endif()
+endif()
+
 if(MSVC)
     set(MEXCE_OPTIMIZATION_FLAGS /O2)
     set(MEXCE_WARNING_FLAGS /W4 /permissive- /bigobj)
@@ -62,20 +76,6 @@ if(MEXCE_BUILD_ISSUER_TOOLS)
 endif()
 
 if(BUILD_TESTING)
-    if(ENABLE_COVERAGE)
-        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-            add_compile_options(-O0 -g)
-
-            if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-                add_compile_options(--coverage)
-                add_link_options(--coverage)
-            else()
-                add_compile_options(-fprofile-instr-generate -fcoverage-mapping)
-                add_link_options(-fprofile-instr-generate)
-            endif()
-        endif()
-    endif()
-
     add_executable(benchmark test/benchmark.cpp)
     target_include_directories(benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     find_package(OpenMP REQUIRED)
@@ -216,6 +216,12 @@ if(BUILD_TESTING)
                 --diagnostic-only)
         if(MEXCE_BUILD_ISSUER_TOOLS)
             add_test(NAME mexce_protect_utility COMMAND mexce_protect_tests)
+            add_test(NAME mexce_protect_cli
+                COMMAND
+                    ${CMAKE_COMMAND}
+                    "-DMEXCE_PROTECT_EXECUTABLE=$<TARGET_FILE:mexce_protect>"
+                    "-DMEXCE_PROTECT_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/mexce_protect_cli_test"
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/test/mexce_protect_cli_test.cmake)
         endif()
     endif()
     add_test(NAME benchmark_quick

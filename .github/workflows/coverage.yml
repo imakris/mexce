@@ -15,7 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        compiler: [gcc, clang]
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
 
     env:
       BUILD_DIR: build
@@ -29,25 +35,34 @@ jobs:
         run: |
           sudo apt-get update
           if [ "${{ matrix.compiler }}" = "gcc" ]; then
-            sudo apt-get install -y gcc g++ lcov
+            sudo apt-get install -y gcc g++ lcov file
           else
             # ubuntu-24.04: get clang/llvm, OpenMP, and lcov for post-filtering
-            sudo apt-get install -y clang llvm libomp-18-dev lcov || sudo apt-get install -y libomp-dev lcov
+            sudo apt-get install -y clang llvm lcov file
+            sudo apt-get install -y libomp-18-dev || sudo apt-get install -y libomp-dev
           fi
+          pip install conan==2.20.1
+
+      - name: Resolve libsodium 1.0.22
+        run: |
+          conan profile detect --force
+          conan install --requires=libsodium/1.0.22 --output-folder=deps \
+            --generator=CMakeDeps --generator=CMakeToolchain \
+            --settings=build_type=Debug --build=missing
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
 
       - name: Configure (${{ matrix.compiler }})
         run: |
-          if [ "${{ matrix.compiler }}" = "gcc" ]; then
-            cmake -S . -B "$BUILD_DIR" \
-              -DCMAKE_BUILD_TYPE=Debug \
-              -DENABLE_COVERAGE=ON
-          else
-            cmake -S . -B "$BUILD_DIR" \
-              -DCMAKE_BUILD_TYPE=Debug \
-              -DENABLE_COVERAGE=ON \
-              -DCMAKE_C_COMPILER=clang \
-              -DCMAKE_CXX_COMPILER=clang++
-          fi
+          cmake -S . -B "$BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/deps/conan_toolchain.cmake" \
+            -DCMAKE_C_COMPILER=${{ matrix.cc }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DENABLE_COVERAGE=ON \
+            -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON \
+            -DMEXCE_BUILD_ISSUER_TOOLS=ON
 
       - name: Build
         run: cmake --build "$BUILD_DIR" -j
@@ -60,7 +75,7 @@ jobs:
           fi
           ctest --output-on-failure --output-junit test-results.xml
 
-      # GCC: strict capture (includes unexecuted lines/files), then keep only your lib header
+      # GCC: strict capture includes unexecuted lines and production files.
       - name: Coverage (lcov/gcc)
         if: matrix.compiler == 'gcc'
         working-directory: ${{ env.BUILD_DIR }}
@@ -68,24 +83,49 @@ jobs:
           lcov --quiet --capture --initial --directory . --rc geninfo_unexecuted_blocks=1 -o base.info
           lcov --quiet --capture --directory . --rc geninfo_unexecuted_blocks=1 -o test.info
           lcov --quiet -a base.info -a test.info -o lcov.all.info
-          lcov --quiet --extract lcov.all.info "*/mexce.h" -o lcov.info
-          lcov --list lcov.info || true
+          lcov --quiet --extract lcov.all.info \
+            "*/mexce.h" \
+            "*/mexce_protected.h" \
+            "*/mexce_protected_encoder.h" \
+            "*/tools/mexce_protect_lib.cpp" \
+            "*/tools/mexce_protect_lib.h" \
+            "*/tools/mexce_protect.cpp" \
+            -o lcov.info
+          lcov --list lcov.info
 
-      # Clang/LLVM: export to LCOV, then filter to mexce.h
+      # Clang/LLVM: export every instrumented executable, then keep production files.
       - name: Coverage (llvm-cov/clang)
         if: matrix.compiler == 'clang'
         working-directory: ${{ env.BUILD_DIR }}
         run: |
           llvm-profdata merge -sparse *.profraw -o default.profdata
-          BIN=./benchmark
-          if [ ! -x "$BIN" ]; then
-            echo "Expected test binary '$BIN' not found or not executable."
-            ls -la
+          mapfile -t candidates < <(find . -maxdepth 1 -type f -executable -print | sort)
+          binaries=()
+          for candidate in "${candidates[@]}"; do
+            if file "$candidate" | grep --quiet "ELF .* executable"; then
+              binaries+=( "$candidate" )
+            fi
+          done
+          if [ "${#binaries[@]}" -eq 0 ]; then
+            echo "No instrumented executables found."
             exit 1
           fi
-          llvm-cov export -format=lcov -instr-profile default.profdata "$BIN" > lcov.all.info
-          lcov --quiet --extract lcov.all.info "*/mexce.h" -o lcov.info
-          llvm-cov report -instr-profile default.profdata "$BIN" || true
+
+          object_args=()
+          for binary in "${binaries[@]:1}"; do
+            object_args+=( -object "$binary" )
+          done
+          llvm-cov export -format=lcov -instr-profile default.profdata \
+            "${binaries[0]}" "${object_args[@]}" > lcov.all.info
+          lcov --quiet --extract lcov.all.info \
+            "*/mexce.h" \
+            "*/mexce_protected.h" \
+            "*/mexce_protected_encoder.h" \
+            "*/tools/mexce_protect_lib.cpp" \
+            "*/tools/mexce_protect_lib.h" \
+            "*/tools/mexce_protect.cpp" \
+            -o lcov.info
+          lcov --list lcov.info
 
       - name: Upload coverage to Codecov
         if: always()
