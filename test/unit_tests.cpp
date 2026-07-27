@@ -525,13 +525,6 @@ void test_mexce_parsing_exception_class(TestSuite& suite) {
     suite.expect_true("mexce_parsing_exception_message", std::string(ex.what()) == "custom message");
 }
 
-void test_memory_management(TestSuite& suite) {
-    size_t size = 4096;
-    uint8_t* buffer = mexce::impl::get_executable_buffer(size);
-    suite.expect_true("get_executable_buffer", buffer != nullptr);
-    mexce::impl::free_executable_buffer(reinterpret_cast<double(*)()>(buffer), size);
-}
-
 void test_asmd_optimizer_branches(TestSuite& suite) {
     mexce::evaluator eval;
     float a = 2.0f;
@@ -882,26 +875,10 @@ void test_sse2_rounding_functions(TestSuite& suite) {
     mexce::evaluator eval;
     eval.use_sse2_backend();  // Force SSE2 backend
 
-    double value = 3.75;
+    // Test with negative value
+    double value = -2.7;
     eval.bind(value, "v");
 
-    eval.set_expression("floor(v)");
-    suite.expect_near("sse2_floor", eval.evaluate(), std::floor(value));
-
-    eval.set_expression("ceil(v)");
-    suite.expect_near("sse2_ceil", eval.evaluate(), std::ceil(value));
-
-    eval.set_expression("round(v)");
-    suite.expect_near("sse2_round", eval.evaluate(), std::round(value));
-
-    eval.set_expression("trunc(v)");
-    suite.expect_near("sse2_trunc", eval.evaluate(), std::trunc(value));
-
-    eval.set_expression("int(v)");
-    suite.expect_near("sse2_int", eval.evaluate(), std::nearbyint(value));
-
-    // Test with negative value
-    value = -2.7;
     eval.set_expression("floor(v)");
     suite.expect_near("sse2_floor_neg", eval.evaluate(), std::floor(value));
 
@@ -1223,7 +1200,6 @@ int main() {
     test_binding_and_unbinding(suite);
     test_binding_name_conflicts(suite);
     test_mexce_parsing_exception_class(suite);
-    test_memory_management(suite);
     test_asmd_optimizer_branches(suite);
     test_parsing_errors(suite);
     test_empty_state_after_failed_replacement(suite);

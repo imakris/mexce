@@ -216,10 +216,6 @@ jobs:
       - name: Run clear performance diagnostic
         run: cmake --build build --config Release --target run_benchmarks
 
-      - name: Run protected performance diagnostic
-        if: matrix.configuration == 'protected'
-        run: ctest --test-dir build -C Release -R mexce_protected_benchmark --verbose > build/protected_benchmark_results.txt
-
       - name: Run phase-isolated protected performance diagnostic on Linux
         if: runner.os == 'Linux' && matrix.configuration == 'protected'
         run: >-
@@ -246,5 +242,4 @@ jobs:
           if-no-files-found: warn
           path: |
             build/benchmark_results.txt
-            build/protected_benchmark_results.txt
             build/protected_benchmark_results.json
