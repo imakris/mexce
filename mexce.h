@@ -5400,27 +5400,24 @@ inline Function Bias()
 
 
 
-inline const map<string, Function>& make_function_map()
+// The population runs inside the static local's initializer, so the map is
+// complete before the reference escapes and concurrent first callers serialize
+// on the initialization guard rather than racing an empty() check.
+inline const map<string, Function>& function_map()
 {
-    static map<string, Function> ret;
-    if (ret.empty()) { // Initialize only once
+    static const map<string, Function> fname_map = [] {
         Function f[] = {
             Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(), Lt(), Gt(), Le(), Ge(), Eq(), Ne(),
             Log(), Log2(), Ln(), Log10(), Logb(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Trunc(), Mod(),
             Bnd(), Add(), Sub(), Neg(), Mul(), Div(), Bias(), Gain()
         };
+        map<string, Function> ret;
         for (auto& e : f) {
             assert(ret.find(e.name) == ret.end()); //if it fails, some functions share the same name.
             ret.insert(make_pair(e.name, e));
         }
-    }
-    return ret;
-}
-
-
-inline const map<string, Function>& function_map()
-{
-    static const map<string, Function>& fname_map = make_function_map();
+        return ret;
+    }();
     return fname_map;
 }
 
