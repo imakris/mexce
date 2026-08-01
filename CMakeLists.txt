@@ -93,6 +93,11 @@ if(BUILD_TESTING)
     target_link_libraries(ordinary_no_sodium_test PRIVATE mexce)
     target_compile_options(ordinary_no_sodium_test PRIVATE ${MEXCE_WARNING_FLAGS})
 
+    find_package(Threads REQUIRED)
+    add_executable(cold_start_concurrency_test test/cold_start_concurrency_test.cpp)
+    target_link_libraries(cold_start_concurrency_test PRIVATE mexce Threads::Threads)
+    target_compile_options(cold_start_concurrency_test PRIVATE ${MEXCE_WARNING_FLAGS})
+
     if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
         set(MEXCE_PROTECTED_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -197,6 +202,7 @@ if(BUILD_TESTING)
 
     add_test(NAME mexce_unit_tests COMMAND unit_tests)
     add_test(NAME mexce_ordinary_no_sodium COMMAND ordinary_no_sodium_test)
+    add_test(NAME mexce_cold_start_concurrency COMMAND cold_start_concurrency_test)
     if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
         add_test(NAME mexce_protected_codec_tests COMMAND protected_codec_tests)
         add_test(NAME mexce_protected_sodium_init_failure

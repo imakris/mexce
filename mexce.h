@@ -5654,13 +5654,17 @@ inline Semantic_compilation_result Semantic_compiler::finish()
 }
 
 
+// The map must be complete before the reference escapes, so it is brace
+// initialized inside the static local. A lazy fill guarded by empty() lets two
+// threads that each reach a cold mexce entry point insert into the same map
+// concurrently, and static local initialization is the only synchronization
+// point a header-only library with no cold-start entry point of its own has.
 inline const map<string, shared_ptr<Constant> >& built_in_constants_map()
 {
-    static map<string, shared_ptr<Constant> > cname_map;
-    if (cname_map.empty()) {
-        cname_map["pi"] = std::make_shared<Constant>(0, "3.141592653589793238462643383", "pi");
-        cname_map["e"]  = std::make_shared<Constant>(1, "2.718281828459045235360287471", "e");
-    }
+    static const map<string, shared_ptr<Constant> > cname_map = {
+        { "pi", std::make_shared<Constant>(0, "3.141592653589793238462643383", "pi") },
+        { "e",  std::make_shared<Constant>(1, "2.718281828459045235360287471", "e" ) }
+    };
     return cname_map;
 }
 
