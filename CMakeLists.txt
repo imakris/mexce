@@ -21,6 +21,15 @@ if(BUILD_TESTING AND ENABLE_COVERAGE)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         add_compile_options(-O0 -g)
 
+        # cold_start_concurrency_test drives instrumented mexce code on 16
+        # threads at once. The default non-atomic counter update loses
+        # increments under that contention: gcov then flow-solves a negative
+        # count for some derived arc and geninfo aborts, while llvm-cov
+        # silently under-reports instead. Both legs instrument that test, so
+        # both need the flag. Use atomic, not prefer-atomic, which falls back
+        # to the racy update.
+        add_compile_options(-fprofile-update=atomic)
+
         if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
             add_compile_options(--coverage)
             add_link_options(--coverage)
