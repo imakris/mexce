@@ -91,6 +91,7 @@ jobs:
             "*/tools/mexce_protect_lib.h" \
             "*/tools/mexce_protect.cpp" \
             -o lcov.info
+          grep -q '^DA:' lcov.info || { echo "lcov.info holds no coverage records"; exit 1; }
           lcov --list lcov.info
 
       # Clang/LLVM: export every instrumented executable, then keep production files.
@@ -125,6 +126,7 @@ jobs:
             "*/tools/mexce_protect_lib.h" \
             "*/tools/mexce_protect.cpp" \
             -o lcov.info
+          grep -q '^DA:' lcov.info || { echo "lcov.info holds no coverage records"; exit 1; }
           lcov --list lcov.info
 
       - name: Upload coverage to Codecov
