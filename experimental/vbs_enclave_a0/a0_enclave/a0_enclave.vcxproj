@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>18.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{B2639C62-1409-420E-A3CC-8A6DD80CC779}</ProjectGuid>
+    <RootNamespace>a0_enclave</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props"
+            Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')"
+            Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <A0RootDir>$([System.IO.Path]::GetFullPath('$(ProjectDir)..\'))</A0RootDir>
+    <OutDir>$(A0RootDir)out\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(A0RootDir)obj\$(ProjectName)\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>a0_enclave</TargetName>
+    <LinkIncremental>false</LinkIncremental>
+    <VbsEnclaveEdlPath>$([System.IO.Path]::GetFullPath('$(A0RootDir)a0_entry.edl'))</VbsEnclaveEdlPath>
+    <VbsEnclaveGeneratedFilesDir>$(IntDir)Generated Files</VbsEnclaveGeneratedFilesDir>
+    <VbsEnclaveVirtualTrustLayer>Enclave</VbsEnclaveVirtualTrustLayer>
+    <VbsEnclaveVtl0ClassName>A0_enclave_entry</VbsEnclaveVtl0ClassName>
+    <VbsEnclaveNamespace>mexce_a0</VbsEnclaveNamespace>
+    <VbsEnclaveConsumeCppSupportLib>true</VbsEnclaveConsumeCppSupportLib>
+    <A0InstalledWindowsSdkRoot>$(Registry:HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Kits\Installed Roots@KitsRoot10)</A0InstalledWindowsSdkRoot>
+    <A0VeiidPath Condition="'$(A0VeiidPath)'==''">$(A0InstalledWindowsSdkRoot)bin\10.0.26100.0\$(PlatformTarget)\veiid.exe</A0VeiidPath>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <DebugInformationFormat>None</DebugInformationFormat>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <ControlFlowGuard>Guard</ControlFlowGuard>
+      <PreprocessorDefinitions>NDEBUG;ENABLE_ENCLAVE_RESTRICT_CONTAINING_PROCESS_ACCESS=true;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
+      <IgnoreAllDefaultLibraries>true</IgnoreAllDefaultLibraries>
+      <AdditionalDependencies>$(VBS_Enclave_Dependencies);%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/ENCLAVE /INCREMENTAL:NO /INTEGRITYCHECK /GUARD:MIXED %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="a0_enclave.cpp" />
+    <None Include="..\a0_entry.edl" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.ImplementationLibrary" Version="[1.0.240803.1]" />
+    <PackageReference Include="Microsoft.Windows.SDK.CPP" Version="[10.0.26100.7463]" />
+    <PackageReference Include="Microsoft.Windows.SDK.CPP.x64" Version="[10.0.26100.7463]" />
+    <PackageReference Include="Microsoft.Windows.VbsEnclave.CodeGenerator" Version="[0.2.260211.1]" />
+    <PackageReference Include="Microsoft.Windows.VbsEnclave.SDK" Version="[0.2.260223.1]" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+  <Target Name="ApplyA0Veiid" AfterTargets="Link"
+          Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Error Condition="!Exists('$(A0VeiidPath)')"
+           Text="A0 requires the installed Windows SDK x64 VEIID tool. Set A0VeiidPath to veiid.exe." />
+    <Message Importance="high" Text="Applying VEIID to the unsigned A0 enclave image." />
+    <Exec Command="&quot;$(A0VeiidPath)&quot; &quot;$(TargetPath)&quot;" />
+  </Target>
+</Project>

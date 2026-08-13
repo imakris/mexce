@@ -1,0 +1,22 @@
+enclave
+{
+    struct a0_request_t
+    {
+        uint32_t abi_version;
+        uint32_t sequence;
+    };
+
+    struct a0_response_t
+    {
+        uint32_t abi_version;
+        uint32_t sequence;
+    };
+
+    trusted
+    {
+        HRESULT copy_request(
+            [in] a0_request_t in_request,
+            [out] a0_response_t out_response
+        );
+    };
+};

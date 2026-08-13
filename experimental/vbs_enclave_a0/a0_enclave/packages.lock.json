@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "dependencies": {
+    "native,Version=v0.0": {
+      "Microsoft.Windows.ImplementationLibrary": {
+        "type": "Direct",
+        "requested": "[1.0.240803.1, 1.0.240803.1]",
+        "resolved": "1.0.240803.1",
+        "contentHash": "RNqwQsASe40hh3AtxTbHE25pShdPpwnad4ehf3rjOB5El7++2icP4WnWyFy5LXG58VzLIsyaaIcBpvd8Kj6Xlg=="
+      },
+      "Microsoft.Windows.SDK.CPP": {
+        "type": "Direct",
+        "requested": "[10.0.26100.7463, 10.0.26100.7463]",
+        "resolved": "10.0.26100.7463",
+        "contentHash": "Y+hvp5x/AxiKe5h9HnGScDsQgh8bufxuxEJo5eMj92VYxn7O5ZmWmjwZjySLecbcpx9BPO8wBamtzwIIzSIa6w=="
+      },
+      "Microsoft.Windows.SDK.CPP.x64": {
+        "type": "Direct",
+        "requested": "[10.0.26100.7463, 10.0.26100.7463]",
+        "resolved": "10.0.26100.7463",
+        "contentHash": "R8ADM2dC6RaokwlcFHdLPyrApIJ3zN9fM7uOjelnzBDamq6LlcKaPzJrl0URRhZNMfeybrCWBrJXSokQU8EQxg==",
+        "dependencies": {
+          "Microsoft.Windows.SDK.cpp": "[10.0.26100.7463]"
+        }
+      },
+      "Microsoft.Windows.VbsEnclave.CodeGenerator": {
+        "type": "Direct",
+        "requested": "[0.2.260211.1, 0.2.260211.1]",
+        "resolved": "0.2.260211.1",
+        "contentHash": "uWWKyoBVi1qSigX/oM0/ZXK7AiNII61kYjQyT9hpn8swxCRu2YYtwk06IzdfX9WaU+boNdwt+yBDwnN4BBVNqQ==",
+        "dependencies": {
+          "Microsoft.Windows.ImplementationLibrary": "1.0.240803.1",
+          "Microsoft.Windows.SDK.CPP": "10.0.26100.7175"
+        }
+      },
+      "Microsoft.Windows.VbsEnclave.SDK": {
+        "type": "Direct",
+        "requested": "[0.2.260223.1, 0.2.260223.1]",
+        "resolved": "0.2.260223.1",
+        "contentHash": "jJ7HEaO3G50vt3gfHktUrK5J8pBxAwD5O0DZS5Jmgkf0ZMj+rOr2FJwrg9TVp6MipukbByEr3Ug7Zdes29e+0A==",
+        "dependencies": {
+          "Microsoft.Windows.ImplementationLibrary": "1.0.240803.1",
+          "Microsoft.Windows.SDK.CPP": "10.0.26100.7175"
+        }
+      }
+    }
+  }
+}
