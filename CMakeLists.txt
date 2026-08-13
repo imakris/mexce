@@ -107,6 +107,22 @@ if(BUILD_TESTING)
     target_link_libraries(cold_start_concurrency_test PRIVATE mexce Threads::Threads)
     target_compile_options(cold_start_concurrency_test PRIVATE ${MEXCE_WARNING_FLAGS})
 
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        add_executable(software_lock_b0_experimental_tests
+            test/software_lock_b0/experimental_interpreter.cpp
+            test/software_lock_b0/experimental_interpreter_tests.cpp)
+        target_link_libraries(software_lock_b0_experimental_tests PRIVATE Threads::Threads)
+        target_compile_options(software_lock_b0_experimental_tests PRIVATE ${MEXCE_WARNING_FLAGS})
+        if(MSVC)
+            target_compile_options(software_lock_b0_experimental_tests PRIVATE /fp:strict)
+        else()
+            target_compile_options(software_lock_b0_experimental_tests PRIVATE
+                -ffp-contract=off
+                -fno-fast-math
+                -frounding-math)
+        endif()
+    endif()
+
     if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
         set(MEXCE_PROTECTED_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -212,6 +228,10 @@ if(BUILD_TESTING)
     add_test(NAME mexce_unit_tests COMMAND unit_tests)
     add_test(NAME mexce_ordinary_no_sodium COMMAND ordinary_no_sodium_test)
     add_test(NAME mexce_cold_start_concurrency COMMAND cold_start_concurrency_test)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        add_test(NAME mexce_software_lock_b0_experimental
+            COMMAND software_lock_b0_experimental_tests)
+    endif()
     if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
         add_test(NAME mexce_protected_codec_tests COMMAND protected_codec_tests)
         add_test(NAME mexce_protected_sodium_init_failure
