@@ -414,7 +414,7 @@ void test_load_contract(Test_suite& suite)
         load_u64(owned_response.data() + 16),
         load_u32(owned_response.data() + 24),
     };
-    std::fill(owned_request.begin(), owned_request.end(), 0);
+    std::fill(owned_request.begin(), owned_request.end(), uint8_t{0});
     std::vector<uint8_t> owned_result(8, 0xa5);
     suite.expect(
         evaluate(interpreter, owned_program, k_row_major, 1, {}, owned_result) ==
