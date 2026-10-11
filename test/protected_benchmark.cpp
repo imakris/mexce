@@ -34,8 +34,9 @@ namespace {
 
 
 constexpr int k_compile_iterations = 25;
-constexpr int k_evaluate_iterations = 100000;
-constexpr int k_evaluate_warmup_iterations = 1000;
+constexpr int k_evaluate_batch_iterations = 100000;
+constexpr std::chrono::milliseconds k_evaluate_warmup_duration(25);
+constexpr std::chrono::milliseconds k_evaluate_sample_duration(100);
 constexpr size_t k_expected_maximum_size = 802880;
 constexpr uint32_t k_expected_maximum_records = 16384;
 
@@ -270,7 +271,7 @@ bool parse_case(const char* text, size_t& case_index)
 void print_common(
     const char* mode,
     size_t case_index,
-    int iterations,
+    uint64_t iterations,
     uint64_t elapsed_ns,
     mexce::backend_type backend,
     double result,
@@ -423,19 +424,28 @@ int evaluate_case(
     }
 
     volatile double result = 0.0;
-    for (int i = 0; i < k_evaluate_warmup_iterations; ++i) {
-        result = evaluator.evaluate();
-    }
-    const uint64_t elapsed_ns = elapsed_nanoseconds([&] {
-        for (int i = 0; i < k_evaluate_iterations; ++i) {
-            result = evaluator.evaluate();
-        }
-    });
+    uint64_t iterations = 0;
+    // Sub-millisecond samples can mostly measure scheduling and CPU startup.
+    // Check the clock between batches, keeping it out of the evaluation loop.
+    const auto run_for = [&](std::chrono::milliseconds duration) {
+        iterations = 0;
+        return elapsed_nanoseconds([&] {
+            const auto deadline = std::chrono::steady_clock::now() + duration;
+            do {
+                for (int i = 0; i < k_evaluate_batch_iterations; ++i) {
+                    result = evaluator.evaluate();
+                }
+                iterations += k_evaluate_batch_iterations;
+            } while (std::chrono::steady_clock::now() < deadline);
+        });
+    };
+    run_for(k_evaluate_warmup_duration);
+    const uint64_t elapsed_ns = run_for(k_evaluate_sample_duration);
     const bool correct = correct_result(case_index, result, x, y, z);
     print_common(
         protected_expression ? "protected_evaluate" : "clear_evaluate",
         case_index,
-        k_evaluate_iterations,
+        iterations,
         elapsed_ns,
         evaluator.get_backend(),
         result,

@@ -17,6 +17,11 @@ on:
         type: choice
         options: [all, ordinary, protected]
         default: all
+      checks:
+        description: Validation to run
+        type: choice
+        options: [full, protected-benchmark]
+        default: full
 
 permissions:
   contents: read
@@ -28,7 +33,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        configuration: ${{ fromJSON(inputs.configuration == 'ordinary' && '["ordinary"]' || inputs.configuration == 'protected' && '["protected"]' || '["ordinary", "protected"]') }}
+        configuration: >-
+          ${{ fromJSON(inputs.checks == 'protected-benchmark' && '["protected"]' ||
+          inputs.configuration == 'ordinary' && '["ordinary"]' ||
+          inputs.configuration == 'protected' && '["protected"]' || '["ordinary", "protected"]') }}
         toolchain: >-
           ${{ fromJSON(inputs.platform == 'macos' &&
           '[{"os":"macos-latest","compiler":"apple-clang","cc":"clang","cxx":"clang++"}]' ||
@@ -38,6 +46,13 @@ jobs:
             {"os":"macos-latest","compiler":"apple-clang","cc":"clang","cxx":"clang++"}]') }}
 
     steps:
+      - name: Validate selected checks
+        if: inputs.checks == 'protected-benchmark' && inputs.configuration == 'ordinary'
+        shell: bash
+        run: |
+          echo "::error::Protected benchmark checks require configuration=protected or all."
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -118,15 +133,23 @@ jobs:
           -DMEXCE_BUILD_ISSUER_TOOLS=ON
 
       - name: Build
+        if: inputs.checks != 'protected-benchmark'
         run: cmake --build build --config Release --parallel 3
 
+      - name: Build protected benchmark
+        if: inputs.checks == 'protected-benchmark'
+        run: cmake --build build --config Release --target protected_benchmark --parallel 3
+
       - name: Test
+        if: inputs.checks != 'protected-benchmark'
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Install
+        if: inputs.checks != 'protected-benchmark'
         run: cmake --install build --config Release --prefix "${{ runner.temp }}/mexce-install"
 
       - name: Check installed notice surface
+        if: inputs.checks != 'protected-benchmark'
         env:
           EXPECT_NOTICE: ${{ matrix.configuration == 'protected' && '1' || '0' }}
         run: >-
@@ -135,7 +158,7 @@ jobs:
           assert p.exists() == (os.environ['EXPECT_NOTICE'] == '1')"
 
       - name: Configure installed Windows consumer
-        if: runner.os == 'Windows' && matrix.configuration == 'ordinary'
+        if: runner.os == 'Windows' && matrix.configuration == 'ordinary' && inputs.checks != 'protected-benchmark'
         run: >-
           cmake -S test/install_consumer -B consumer-build
           -DCMAKE_BUILD_TYPE=Release
@@ -143,7 +166,7 @@ jobs:
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
 
       - name: Configure installed Unix consumer
-        if: runner.os != 'Windows' && matrix.configuration == 'ordinary'
+        if: runner.os != 'Windows' && matrix.configuration == 'ordinary' && inputs.checks != 'protected-benchmark'
         run: >-
           cmake -S test/install_consumer -B consumer-build
           -DCMAKE_BUILD_TYPE=Release
@@ -152,7 +175,7 @@ jobs:
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
 
       - name: Configure installed protected Windows consumer
-        if: runner.os == 'Windows' && matrix.configuration == 'protected'
+        if: runner.os == 'Windows' && matrix.configuration == 'protected' && inputs.checks != 'protected-benchmark'
         run: >-
           cmake -S test/install_consumer -B consumer-build
           -DCMAKE_BUILD_TYPE=Release
@@ -162,7 +185,7 @@ jobs:
           -DMEXCE_CONSUMER_PROTECTED=ON
 
       - name: Configure installed protected Unix consumer
-        if: runner.os != 'Windows' && matrix.configuration == 'protected'
+        if: runner.os != 'Windows' && matrix.configuration == 'protected' && inputs.checks != 'protected-benchmark'
         run: >-
           cmake -S test/install_consumer -B consumer-build
           -DCMAKE_BUILD_TYPE=Release
@@ -173,10 +196,11 @@ jobs:
           -DMEXCE_CONSUMER_PROTECTED=ON
 
       - name: Build installed consumer
+        if: inputs.checks != 'protected-benchmark'
         run: cmake --build consumer-build --config Release --parallel 3
 
       - name: Run installed consumers on Unix
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && inputs.checks != 'protected-benchmark'
         run: |
           ./consumer-build/mexce_ordinary_consumer
           if [ "${{ matrix.configuration }}" = protected ]; then
@@ -185,7 +209,7 @@ jobs:
         shell: bash
 
       - name: Run installed consumers on Windows
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && inputs.checks != 'protected-benchmark'
         run: |
           .\consumer-build\Release\mexce_ordinary_consumer.exe
           if ('${{ matrix.configuration }}' -eq 'protected') {
@@ -193,26 +217,27 @@ jobs:
           }
 
       - name: Create documented issuer inputs
-        if: matrix.configuration == 'protected'
+        if: matrix.configuration == 'protected' && inputs.checks != 'protected-benchmark'
         run: >-
           python -c "from pathlib import Path;
           Path('expression.txt').write_bytes(b'value+1\n');
           Path('bindings.txt').write_bytes(b'value=0\n')"
 
       - name: Run installed issuer and file consumer on Unix
-        if: runner.os != 'Windows' && matrix.configuration == 'protected'
+        if: runner.os != 'Windows' && matrix.configuration == 'protected' && inputs.checks != 'protected-benchmark'
         run: |
           "${{ runner.temp }}/mexce-install/bin/mexce_protect" expression.txt bindings.txt expression.mxp expression.key
           ./consumer-build/mexce_protected_file_consumer expression.mxp expression.key
         shell: bash
 
       - name: Run installed issuer and file consumer on Windows
-        if: runner.os == 'Windows' && matrix.configuration == 'protected'
+        if: runner.os == 'Windows' && matrix.configuration == 'protected' && inputs.checks != 'protected-benchmark'
         run: |
           & "${{ runner.temp }}\mexce-install\bin\mexce_protect.exe" expression.txt bindings.txt expression.mxp expression.key
           .\consumer-build\Release\mexce_protected_file_consumer.exe expression.mxp expression.key
 
       - name: Run clear performance diagnostic
+        if: inputs.checks != 'protected-benchmark'
         run: cmake --build build --config Release --target run_benchmarks --parallel 3
 
       - name: Run phase-isolated protected performance diagnostic on Unix
