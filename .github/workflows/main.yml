@@ -53,7 +53,7 @@ jobs:
 
       - name: Install Conan
         if: matrix.configuration == 'protected'
-        run: pip install conan==2.20.1
+        run: python -m pip install "conan>=2.28,<3"
 
       - name: Install Linux Clang dependencies
         if: runner.os == 'Linux' && matrix.toolchain.compiler == 'clang'
