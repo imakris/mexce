@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run protected benchmark phases in isolated processes and retain raw results."""
+"""Retain isolated phase metrics and compare evaluation in balanced paired batches."""
 
 import argparse
 import datetime
@@ -129,12 +129,21 @@ def summarize_cases(records, case_count):
         clear_results = phase_values(records, case_index, "clear_evaluate", "result")
         protected_results = phase_values(
             records, case_index, "protected_evaluate", "result")
+        paired_clear = phase_values(
+            records, case_index, "paired_evaluate", "clear_per_expression_ns")
+        paired_protected = phase_values(
+            records, case_index, "paired_evaluate", "protected_per_expression_ns")
+        paired_clear_results = phase_values(
+            records, case_index, "paired_evaluate", "clear_result")
+        paired_protected_results = phase_values(
+            records, case_index, "paired_evaluate", "protected_result")
         backend_values = []
         for mode in (
             "clear_compile",
             "protected_compile",
             "clear_evaluate",
             "protected_evaluate",
+            "paired_evaluate",
         ):
             backend_values.extend(phase_values(
                 records, case_index, mode, "backend"))
@@ -148,15 +157,28 @@ def summarize_cases(records, case_count):
                 protected_evaluate,
                 clear_results,
                 protected_results,
+                paired_clear,
+                paired_protected,
+                paired_clear_results,
+                paired_protected_results,
             )
         }
         if len(phase_lengths) != 1 or not clear_results:
             raise RuntimeError("incomplete phase records for case {}".format(case_index))
         if any(
             not math.isclose(clear, protected, rel_tol=1e-12, abs_tol=1e-12)
-            for clear, protected in zip(clear_results, protected_results)
+            for clear, protected in (
+                list(zip(clear_results, protected_results)) +
+                list(zip(clear_results, paired_clear_results)) +
+                list(zip(clear_results, paired_protected_results))
+            )
         ):
             raise RuntimeError("clear/protected result mismatch for case {}".format(case_index))
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in paired_clear + paired_protected
+        ):
+            raise RuntimeError("invalid paired evaluation timing for case {}".format(case_index))
         backend_comparable = (
             all(
                 not isinstance(backend, bool) and
@@ -171,6 +193,10 @@ def summarize_cases(records, case_count):
         protected_compile_distribution = distribution(protected_compile)
         evaluate_distribution = distribution(clear_evaluate)
         protected_evaluate_distribution = distribution(protected_evaluate)
+        paired_ratios = distribution([
+            protected / clear
+            for clear, protected in zip(paired_clear, paired_protected)
+        ])
         case_records = [
             record for record in records if record.get("case_index") == case_index
         ]
@@ -188,10 +214,14 @@ def summarize_cases(records, case_count):
             ),
             "clear_evaluate_ns": evaluate_distribution,
             "protected_evaluate_ns": protected_evaluate_distribution,
-            "evaluate_ratio": (
-                protected_evaluate_distribution["median"] /
-                evaluate_distribution["median"]
-            ),
+            "paired_evaluate": {
+                "method": "balanced_batches",
+                "clear_ns": distribution(paired_clear),
+                "protected_ns": distribution(paired_protected),
+                "ratio": paired_ratios,
+            },
+            "evaluate_ratio_source": "paired_evaluate.ratio.median",
+            "evaluate_ratio": paired_ratios["median"],
             "peak_working_set_bytes": {
                 mode: distribution(phase_values(
                     records, case_index, mode.replace("-", "_"),
@@ -339,6 +369,18 @@ def main():
                     record["repeat"] = repeat
                     record["order"] = order
                     records.append(record)
+
+                paired = invoke(
+                    binary,
+                    "paired-evaluate",
+                    case_index,
+                    args.timeout_seconds,
+                    case_files[case_index] + (
+                        "protected-first" if repeat % 2 else "clear-first",
+                    ),
+                )
+                paired["repeat"] = repeat
+                records.append(paired)
 
         for repeat in range(args.resource_repeats):
             resource_modes = list(RESOURCE_MODES)

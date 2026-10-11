@@ -1,6 +1,6 @@
 # Third-party notices
 
-Protected-expression builds use [libsodium 1.0.22](https://libsodium.org/),
+Protected-expression builds use [libsodium](https://libsodium.org/) 1.0.22 or newer,
 which is distributed under the ISC License:
 
 ```text

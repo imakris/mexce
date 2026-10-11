@@ -337,6 +337,73 @@ void test_options_and_introspection(Test_suite& suite)
     suite.expect_near(x87.evaluate(), 8.0, "prefer_x87_result");
 }
 
+void test_portable_numeric_boundaries(Test_suite& suite)
+{
+    for (bool prefer_x87 : {false, true}) {
+        mexce::evaluator evaluator;
+        evaluator.opts().prefer_x87 = prefer_x87;
+        double x = -2.0;
+        evaluator.bind_protected(x, 0);
+        for (const char* expression : {
+            "(x^1.5)^2", "(x^(1/3))^3", "(x^0.2)^5"})
+        {
+            load(evaluator, mexce::encode_protected_expression(
+                expression, {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+            suite.expect(std::isnan(evaluator.evaluate()),
+                std::string("protected_nested_fractional_domain_") + expression);
+        }
+
+        x = 2.04;
+        load(evaluator, mexce::encode_protected_expression(
+            "x^(-1000)", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+        const double actual = evaluator.evaluate();
+        const double expected = std::pow(x, -1000.0);
+        suite.expect(std::fpclassify(actual) == FP_SUBNORMAL &&
+            std::abs(actual / expected - 1.0) < 1e-12,
+            "protected_negative_integer_power_preserves_subnormal");
+
+        load(evaluator, mexce::encode_protected_expression(
+            "bnd(x,2)", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+        for (double value : {4.0, 0.0, -4.0, -0.0}) {
+            x = value;
+            const double wrapped = evaluator.evaluate();
+            suite.expect(wrapped == 0.0 &&
+                std::signbit(wrapped) == std::signbit(value),
+                "protected_bnd_multiple_is_signed_zero");
+        }
+        x = -(std::numeric_limits<double>::min)();
+        load(evaluator, mexce::encode_protected_expression(
+            "bnd(x,1)", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+        suite.expect(evaluator.evaluate() == 0.0, "protected_bnd_rounded_upper_endpoint");
+
+        x = -0.0;
+        for (const char* expression : {"x+0", "0+x", "x-neg(0)", "x+1-1"}) {
+            load(evaluator, mexce::encode_protected_expression(
+                expression, {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+            const double zero = evaluator.evaluate();
+            suite.expect(zero == 0.0 && !std::signbit(zero),
+                std::string("protected_strict_additive_zero_") + expression);
+        }
+        for (const char* expression : {"x-0", "x+neg(0)", "(x+x)+neg(0)", "x^0.5"}) {
+            load(evaluator, mexce::encode_protected_expression(
+                expression, {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+            const double zero = evaluator.evaluate();
+            suite.expect(zero == 0.0 && std::signbit(zero),
+                std::string("protected_strict_negative_zero_") + expression);
+        }
+        load(evaluator, mexce::encode_protected_expression(
+            "x^(-0.5)", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+        suite.expect(evaluator.evaluate() == -std::numeric_limits<double>::infinity(),
+            "protected_inverse_sqrt_shortcut_negative_zero");
+#if !defined(MEXCE_ARM64) && !defined(_MSC_VER)
+        x = 1e16;
+        load(evaluator, mexce::encode_protected_expression(
+            "bnd(x+1,3)", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+        suite.expect(evaluator.evaluate() == 2.0, "protected_bnd_retains_x87_extended_input");
+#endif
+    }
+}
+
 #if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
 void test_arm64_optimized_expressions(Test_suite& suite)
 {
@@ -753,6 +820,7 @@ int main(int argc, char** argv)
     test_binding_lifecycle(suite);
     test_binding_types_and_missing_binding(suite);
     test_options_and_introspection(suite);
+    test_portable_numeric_boundaries(suite);
 #if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
     test_arm64_optimized_expressions(suite);
 #endif

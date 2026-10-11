@@ -790,6 +790,19 @@ void test_reparse_traversal(Test_suite& suite)
                 fixture.expression, fixture.schema, linked_program, fixture.key);
         });
         suite.expect(!exists(fixture.key), "reparse rejection leaves no key output");
+        const Native_path physical_program = join(real_directory,
+#ifdef _WIN32
+            L"program.bin"
+#else
+            "program.bin"
+#endif
+        );
+        suite.expect(!exists(physical_program), "reparse rejection leaves no program output");
+        mexce::issuer::protect_expression(
+            fixture.expression, fixture.schema, physical_program, fixture.key);
+        suite.expect(file_size(physical_program) > 64 && file_size(fixture.key) == 32 &&
+            owner_only(fixture.key), "physical output parent permits secure publication");
+        remove_path(physical_program);
     }
     remove_path(linked_directory);
     remove_path(real_directory);
@@ -891,23 +904,24 @@ void test_temporary_replacement(Test_suite& suite)
 
 
 #ifndef _WIN32
-void test_unsupported_unnamed_temporary_filesystem(Test_suite& suite)
+void test_unsupported_publication(Test_suite& suite)
 {
     Fixture fixture;
-    const std::string suffix = std::to_string(static_cast<long long>(getpid()));
-    const Native_path program = "/proc/mexce-program-" + suffix;
-    const Native_path key     = "/proc/mexce-key-" + suffix;
     try {
-        mexce::issuer::protect_expression(
-            fixture.expression, fixture.schema, program, key);
-        suite.expect(false, "unsupported unnamed-temporary filesystem rejects");
+        // HFS+ returns ENOTSUP from fclonefileat; exercise the same failure
+        // after the normal directory pinning, temporary creation and writes.
+        fixture.protect(mexce::issuer::Test_failure::UNSUPPORTED_PUBLICATION);
+        suite.expect(false, "unsupported publication rejects");
     }
     catch (const mexce::issuer::Issuer_error& error) {
-        suite.expect(!std::string(error.what()).empty(),
-            "unsafe output filesystem reports the rejection");
-        suite.expect(!exists(program) && !exists(key),
-            "unsafe output filesystem leaves no output");
+        suite.expect(std::string(error.what()) ==
+            "the output filesystem does not support required inode-bound publication",
+            "unsupported publication reports the filesystem capability");
     }
+    suite.expect(!exists(fixture.program) && !exists(fixture.key),
+        "unsupported publication leaves no output");
+    suite.expect(temporary_count(fixture.root) == 0,
+        "unsupported publication cleans temporary files");
 }
 #endif
 
@@ -930,8 +944,8 @@ int main()
     suite.run("ancestor swap", [&] { test_ancestor_swap(suite); });
     suite.run("temporary replacement", [&] { test_temporary_replacement(suite); });
 #ifndef _WIN32
-    suite.run("unsupported unnamed temporary filesystem", [&] {
-        test_unsupported_unnamed_temporary_filesystem(suite);
+    suite.run("unsupported publication", [&] {
+        test_unsupported_publication(suite);
     });
 #endif
     return suite.finish();

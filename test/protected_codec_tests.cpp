@@ -1127,10 +1127,6 @@ int main(int argc, char** argv)
         std::cerr << "libsodium initialization failed\n";
         return 1;
     }
-    if (std::string(sodium_version_string()) != "1.0.22") {
-        std::cerr << "protected codec tests require libsodium 1.0.22\n";
-        return 1;
-    }
 
     Test_suite suite;
     try {

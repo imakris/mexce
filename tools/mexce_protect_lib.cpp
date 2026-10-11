@@ -1170,42 +1170,47 @@ public:
 
     int get() const { return m_file.get(); }
 
-    void publish(const Native_path& final_name)
+    void publish(
+        const Native_path& final_name,
+        Test_failure failure = Test_failure::NONE)
     {
+        int error = ENOTSUP;
+        if (failure != Test_failure::UNSUPPORTED_PUBLICATION) {
 #ifdef __APPLE__
-        // Copy the explicit owner-allow/everyone-deny ACL ahead of inherited
-        // grants; mode 0600 alone does not prevent inherited macOS ACL access.
-        if (fclonefileat(m_file.get(), m_directory, final_name.c_str(),
-                m_restricted ? CLONE_ACL : 0) == 0)
-        {
-            return;
-        }
-        const int error = errno;
-#else
-        if (linkat(m_file.get(), "", m_directory,
-                final_name.c_str(), AT_EMPTY_PATH) == 0)
-        {
-            return;
-        }
-        int error = errno;
-        if (error == ENOENT || error == EPERM) {
-            // Linux documents /proc/self/fd with AT_SYMLINK_FOLLOW as the
-            // unprivileged equivalent of AT_EMPTY_PATH for O_TMPFILE inodes.
-            const std::string descriptor =
-                "/proc/self/fd/" + std::to_string(m_file.get());
-            if (linkat(AT_FDCWD, descriptor.c_str(), m_directory,
-                    final_name.c_str(), AT_SYMLINK_FOLLOW) == 0)
+            // Copy the explicit owner-allow/everyone-deny ACL ahead of inherited
+            // grants; mode 0600 alone does not prevent inherited macOS ACL access.
+            if (fclonefileat(m_file.get(), m_directory, final_name.c_str(),
+                    m_restricted ? CLONE_ACL : 0) == 0)
             {
                 return;
             }
             error = errno;
-        }
+#else
+            if (linkat(m_file.get(), "", m_directory,
+                    final_name.c_str(), AT_EMPTY_PATH) == 0)
+            {
+                return;
+            }
+            error = errno;
+            if (error == ENOENT || error == EPERM) {
+                // Linux documents /proc/self/fd with AT_SYMLINK_FOLLOW as the
+                // unprivileged equivalent of AT_EMPTY_PATH for O_TMPFILE inodes.
+                const std::string descriptor =
+                    "/proc/self/fd/" + std::to_string(m_file.get());
+                if (linkat(AT_FDCWD, descriptor.c_str(), m_directory,
+                        final_name.c_str(), AT_SYMLINK_FOLLOW) == 0)
+                {
+                    return;
+                }
+                error = errno;
+            }
 #endif
+        }
         if (error == EEXIST) {
             throw Issuer_error("cannot publish an output without overwriting");
         }
         if (error == ENOENT || error == EPERM || error == EOPNOTSUPP ||
-            error == EINVAL)
+            error == ENOTSUP || error == EINVAL)
         {
             throw Issuer_error(
                 "the output filesystem does not support required inode-bound publication");
@@ -1333,7 +1338,7 @@ void protect_expression(
 #ifdef _WIN32
     key_file.publish(outputs.key_directory(), outputs.key_name());
 #else
-    key_file.publish(outputs.key_name());
+    key_file.publish(outputs.key_name(), failure);
 #endif
     if (failure == Test_failure::AFTER_KEY_PUBLICATION) {
         throw Issuer_error("injected failure after key publication");

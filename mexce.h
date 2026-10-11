@@ -9,9 +9,9 @@
  * Subsequent calls to `evaluate()` jump directly to the generated code, so
  * evaluating the same expression repeatedly is fast.
  *
- * The library targets x86 Windows and Linux, and Apple Silicon macOS. Generated
- * code uses SSE2 or x87 on x86 and scalar double-precision instructions on
- * AArch64. Executable storage follows the platform's write-protection rules.
+ * The library targets x86 Windows and Linux, and Intel or Apple Silicon macOS.
+ * Generated code uses SSE2 or x87 on x86 and scalar double-precision instructions
+ * on AArch64. Executable storage follows the platform's write-protection rules.
  *
  * ### Basic usage
  *
@@ -829,6 +829,7 @@ struct Variable
     uint64_t          id;
     string            name;
     bool              referenced;
+    bool              is_cse_temporary = false;
     // Members to provide a common interface with Constant for codegen helpers
     volatile void*    address;
     Numeric_data_type numeric_data_type;
@@ -862,6 +863,7 @@ struct Function
     string              debug_desc;
     string              cse_store_suffix;  // CSE store code to emit after function code (x87)
     double*             cse_store_addr = nullptr;  // CSE temp address for backend-agnostic store
+    bool                m_has_cse_effect = false; // survives opaque x87 lowering
 
     Function(
         uint64_t    i,
@@ -885,6 +887,7 @@ struct Function
 struct Element {
     Element_type type;
     uint64_t     id;
+    bool         asmd_placeholder = false;
 
     shared_ptr<Constant> c;
     shared_ptr<Variable> v;
@@ -1441,6 +1444,19 @@ inline double mexce_libm_ylog2(double y, double x) { return y * std::log2(x); }
 inline double mexce_libm_sin(double x) { return std::sin(x); }
 inline double mexce_libm_cos(double x) { return std::cos(x); }
 inline double mexce_libm_tan(double x) { return std::tan(x); }
+
+inline double mexce_libm_bnd(double value, double period)
+{
+    const double remainder = std::fmod(value, period);
+    if (remainder < 0.0) {
+        const double wrapped = remainder + period;
+        // A tiny negative remainder can round up to the positive period.
+        // Keep the documented upper endpoint open after double rounding.
+        return period > 0.0 && std::isfinite(period) && wrapped == period
+            ? 0.0 : wrapped;
+    }
+    return remainder;
+}
 
 // Emit a call to a libm-style unary function: st(0)=x -> st(0)=fn(x)
 inline void emit_libm_unary_call(mexce_charstream& s, void* fn_ptr)
@@ -2824,13 +2840,25 @@ void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
     }
 }
 
+inline bool has_cse_effect(elist_const_it_t first, elist_const_it_t last)
+{
+    for (auto element = first; element != last; ++element) {
+        if ((element->type == Element_type::CVAR && element->v->is_cse_temporary) ||
+            (element->type == Element_type::CFUNC && element->f->m_has_cse_effect))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 inline
 void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
 #ifdef MEXCE_ARM64
     auto f = it->f;
-    // Keep native operations in semantic form. As on x86, an integral outer
-    // exponent combines nested powers before a fractional inner power executes.
+    // Combine only the powers handled by x86 shortcuts. Generic fractional
+    // powers must keep their libm domain, including NaN for a negative base.
     if (f->args[0]->type == Element_type::CCONST &&
         f->args[1]->type == Element_type::CFUNC &&
         f->args[1]->f->name == "pow")
@@ -2841,8 +2869,13 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             std::isfinite(outer_exponent) &&
             std::trunc(outer_exponent) == outer_exponent)
         {
-            const double combined = inner->args[0]->c->value * outer_exponent;
-            if (std::isfinite(combined)) {
+            const double inner_exponent = inner->args[0]->c->value;
+            const bool inner_shortcut =
+                std::abs(inner_exponent) == 0.5 ||
+                (std::trunc(inner_exponent) == inner_exponent &&
+                    std::abs(inner_exponent) <= 65536.0);
+            const double combined = inner_exponent * outer_exponent;
+            if (inner_shortcut && std::isfinite(combined)) {
                 *f->args[0] = Element(make_intermediate_constant(ev, combined));
                 elist->erase(inner->args[0]);
                 elist->erase(f->args[1]);
@@ -2970,9 +3003,8 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 compilation.m_next_element_id++, optimized_name, 0, 0,
                 final_s.buf.size(), cc, nullptr);
             f_opt->m_requires_x87_backend = true;
+            f_opt->m_has_cse_effect = has_cse_effect(base_chunk.begin(), base_chunk.end());
             f_opt->debug_desc = debug_desc;
-            f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
-            f_opt->cse_store_addr = f->cse_store_addr;      // Preserve CSE temp address
 
             if (optimized_name == "sqrt" || optimized_name == "inv_sqrt" || optimized_name == "pow_int") {
                 compilation.m_power_terms[f_opt->id] = std::make_pair(std::move(base_chunk), v_d);
@@ -3017,8 +3049,6 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             f_opt->m_requires_x87_backend = true;
             f_opt->args[0] = f->args[0];
             f_opt->args[1] = f->args[1];
-            f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
-            f_opt->cse_store_addr = f->cse_store_addr;      // Preserve CSE temp address
             *it = Element(f_opt);
         }
     }
@@ -3511,18 +3541,54 @@ inline Function Ne()
 
 inline Function Bnd()
 {
-    uint8_t code[] = {
-        0xd9, 0xc9,                                 // fxch        st(1)
-        0xd9, 0xf8,                                 // fprem
-        0xd9, 0xc0,                                 // fld         st(0)
-        0xdc, 0xc2,                                 // fadd        st(2), st
-        0xd9, 0xee,                                 // fldz
-        0xdf, 0xf1,                                 // fcomip      st,st(1)
-        0xdd, 0xd8,                                 // fstp        st(0)
-        0xdb, 0xc1,                                 // fcmovnb     st,st(1)
-        0xdd, 0xd9                                  // fstp        st(1)
-    };
-    return Function(0, "bnd", 2, 2, sizeof(code), code);
+    mexce_charstream code;
+    code < 0xd9 < 0xc9                              // fxch st(1): value, period
+         < 0xd9 < 0xf8                              // fprem
+         < 0xd9 < 0xc1                              // fld st(1): keep original period
+         < 0xd9 < 0xc9                              // fxch st(1)
+         < 0xd9 < 0xc0                              // fld st(0)
+         < 0xdc < 0xc2                              // fadd st(2), st
+         < 0xd9 < 0xee                              // fldz
+         < 0xdf < 0xf1                              // fcomip st, st(1): 0 versus remainder
+         < 0xdd < 0xd8                              // fstp st(0)
+         < 0xdb < 0xd1                              // fcmovnbe: add period only if remainder < 0
+         < 0xdd < 0xd9;                             // fstp st(1): result, period
+
+    // Preserve extended x87 operands and intermediates. Only inspect a rounded
+    // copy of the result to keep the double upper endpoint open.
+    code < 0xd9 < 0xc1                              // fld st(1)
+         < 0xd9 < 0xe5                              // fxam period
+         < 0xdf < 0xe0                              // fnstsw ax
+         < 0xdd < 0xd8                              // fstp st(0)
+         < 0x66 < 0x25 < 0x00 < 0x07                // and ax, 0700h (class and sign)
+         < 0x66 < 0x3d < 0x00 < 0x04                // cmp ax, 0400h (positive finite nonzero)
+         < 0x0f < 0x85;
+    const size_t invalid_period = code.buf.size();
+    code << int32_t(0);
+#ifdef MEXCE_64
+    code < 0x48;
+#endif
+    code < 0x83 < 0xec < 0x08                        // sub sp, 8
+         < 0xdd < 0x14 < 0x24                       // fst qword ptr [sp]
+         < 0xdd < 0x04 < 0x24;                      // fld qword ptr [sp]
+#ifdef MEXCE_64
+    code < 0x48;
+#endif
+    code < 0x83 < 0xc4 < 0x08                        // add sp, 8
+         < 0xdf < 0xf2                              // fcomip st, st(2): rounded result versus period
+         < 0x0f < 0x85;
+    const size_t unequal_result = code.buf.size();
+    code << int32_t(0);
+    code < 0x0f < 0x8a;
+    const size_t unordered_result = code.buf.size();
+    code << int32_t(0);
+    code < 0xdd < 0xd8 < 0xd9 < 0xee;               // replace upper endpoint with +0
+    const size_t finish = code.buf.size();
+    code < 0xdd < 0xd9;                             // discard retained period
+    patch_rel32(code, invalid_period, finish);
+    patch_rel32(code, unequal_result, finish);
+    patch_rel32(code, unordered_result, finish);
+    return Function(0, "bnd", 2, 3, code.buf.size(), code.buf.data());
 }
 
 
@@ -3839,7 +3905,7 @@ inline bool is_sse2_direct_function(const string& fn_name)
     // plus SSE4.1 rounding instructions (roundsd)
     static const std::set<string> supported = {
         "add", "sub", "mul", "div", "neg", "abs",
-        "floor", "ceil", "round", "trunc", "int"
+        "floor", "ceil", "round", "trunc", "int", "cse_store"
     };
     return supported.find(fn_name) != supported.end();
 }
@@ -4877,6 +4943,9 @@ inline double arm64_gain(double value, double amount)
 inline void emit_arm64_function(mexce_charstream& code, const Function& function)
 {
     const auto& name = function.name;
+    if (name == "cse_store") {
+        return;
+    }
     if (name == "pow" && function.args[0]->type == Element_type::CCONST) {
         const double exponent = function.args[0]->c->value;
         if (exponent == 0.5 || exponent == -0.5) {
@@ -4887,8 +4956,12 @@ inline void emit_arm64_function(mexce_charstream& code, const Function& function
             }
             return;
         }
-        if (std::trunc(exponent) == exponent && std::abs(exponent) <= 65536.0) {
-            uint32_t remaining = (uint32_t)std::abs(exponent);
+        // Negative powers use libm: computing a positive power and then its
+        // reciprocal can overflow even when the final subnormal is representable.
+        if (std::trunc(exponent) == exponent &&
+            exponent >= 0.0 && exponent <= 65536.0)
+        {
+            uint32_t remaining = static_cast<uint32_t>(exponent);
             if (remaining == 0) {
                 code << uint32_t(0x1e6e1000); // fmov d0, #1.0
                 return;
@@ -4908,10 +4981,6 @@ inline void emit_arm64_function(mexce_charstream& code, const Function& function
                     remaining >>= 1;
                 }
                 code << uint32_t(0x1e604020); // fmov d0, d1
-            }
-            if (exponent < 0.0) {
-                code << uint32_t(0x1e6e1001); // fmov d1, #1.0
-                code << uint32_t(0x1e601820); // fdiv d0, d1, d0
             }
             return;
         }
@@ -4956,10 +5025,7 @@ inline void emit_arm64_function(mexce_charstream& code, const Function& function
         {"mod", static_cast<binary_function>(std::fmod)},
         {"logb", mexce_libm_logb}, {"ylog2", mexce_libm_ylog2},
         {"bias", arm64_bias}, {"gain", arm64_gain},
-        {"bnd", [](double value, double period) -> double {
-            const double remainder = std::fmod(value, period);
-            return remainder < 0.0 ? remainder + period : remainder;
-        }},
+        {"bnd", mexce_libm_bnd},
         {"lt", [](double a, double b) -> double { return a < b; }},
         {"le", [](double a, double b) -> double { return a <= b; }},
         {"gt", [](double a, double b) -> double { return !(a <= b); }},
@@ -5101,6 +5167,9 @@ string elist_to_string(const elist_t& elist)
         switch(it->type) {
             case Element_type::CFUNC: {
                 auto f = it->f;
+                if (f->name == "cse_store") {
+                    continue;
+                }
                 if (!f->debug_desc.empty()) {
                     // It's an optimized node with no children in this list (absorbed)
                     // Treat as a value node (like CVAR)
@@ -5178,16 +5247,39 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     double neutral = fclass == 1 ? 0.0 : 1.0;
     bool arg2_inv = (fname == "sub" || fname == "div");
 
+    // Definitions and uses have an evaluation order. Sorting or regrouping a
+    // chain containing either can move a load before its defining store.
+    const auto contains_cse = [](elist_it_t root) {
+        const auto chunk = get_dependent_chunk(root);
+        return has_cse_effect(chunk.first, chunk.second);
+    };
+    if (contains_cse(it)) {
+        return;
+    }
+
+    // Adding a real zero is observable for signed zero. Preserve the direct
+    // operation unless this node has already absorbed another arithmetic node.
+    if (fclass == 1 && !compilation.m_effective_options.fast_math &&
+        f->absorbed[0].empty() && f->absorbed[1].empty())
+    {
+        for (const auto argument : f->args) {
+            if (argument->type == Element_type::CCONST &&
+                !argument->asmd_placeholder && argument->c->value == 0.0)
+            {
+                return;
+            }
+        }
+    }
+
     if (f->parent != elist->end() && f->parent->type == Element_type::CFUNC) {
         shared_ptr<Function> pf = f->parent->f;
         auto pname = pf->name;
         int pclass = (pname == "add" || pname == "sub") ? 1 : (pname == "mul" || pname == "div") ? 2 : 0;
         bool parg2_inv = (pname == "sub" || pname == "div");
 
-        if (pclass && pclass == fclass && f->cse_store_suffix.empty()) {
+        if (pclass && pclass == fclass && !contains_cse(f->parent)) {
 
             // the function will be absorbed by its parent
-            // (unless it has cse_store_suffix - then it must remain standalone to emit store code)
 
             bool parent_inv_op = f->parent_arg_index == 0 && parg2_inv; // arg 0 in postfix, is the second infix argument
 
@@ -5204,6 +5296,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             pf->absorbed[!parent_inv_op].insert(pf->absorbed[!parent_inv_op].end(), f->absorbed[1].begin(), f->absorbed[1].end());
             pf->force_not_constant = true;
             *it = Element(make_intermediate_constant(ev, neutral));
+            it->asmd_placeholder = true;
             return;
         }
     }
@@ -5227,20 +5320,38 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     // reduce constants with extended precision
     long double ac[2] = {neutral, neutral};
+    bool has_additive_constant[2] = {false, false};
     for (int i = 0; i < 2; i++) {
         for (auto e = f->absorbed[i].begin(); e != f->absorbed[i].end();) {
             auto next_e = next(e);
             if (e->size() == 1 && e->front().type == Element_type::CCONST) {
                 auto v = e->front().c;
-                if (fclass == 1) { ac[i] += static_cast<long double>(v->value); }
-                else {             ac[i] *= static_cast<long double>(v->value); }
+                if (fclass == 1 && !e->front().asmd_placeholder) {
+                    ac[i] = has_additive_constant[i]
+                        ? ac[i] + static_cast<long double>(v->value)
+                        : static_cast<long double>(v->value);
+                    has_additive_constant[i] = true;
+                }
+                else if (fclass == 2) {
+                    ac[i] *= static_cast<long double>(v->value);
+                }
                 f->absorbed[i].erase(e);
             }
             e = next_e;
         }
     }
-    long double ac_final_ld = (fclass == 1) ? (ac[0] - ac[1]) : (ac[0] / ac[1]);
+    long double ac_final_ld;
+    if (fclass == 1) {
+        ac_final_ld = has_additive_constant[0] && has_additive_constant[1]
+            ? ac[0] - ac[1] : has_additive_constant[0] ? ac[0] : -ac[1];
+    }
+    else {
+        ac_final_ld = ac[0] / ac[1];
+    }
     double ac_final = static_cast<double>(ac_final_ld);
+    const bool retain_additive_constant = ac_final != neutral ||
+        ((has_additive_constant[0] || has_additive_constant[1]) &&
+            !compilation.m_effective_options.fast_math);
 
     struct absorbed_term {
         elist_t chunk;
@@ -5308,7 +5419,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             // Build postfix: [ac_final] [term1] [*factor1 if needed] [neg if negative] [add if not first] ...
             bool have_value = false;
 
-            if (ac_final != neutral) {
+            if (retain_additive_constant) {
                 result.push_back(Element(make_intermediate_constant(ev, ac_final)));
                 have_value = true;
             }
@@ -5394,18 +5505,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             }
         }
 
-        // Transfer CSE store info to the last function in result (if any)
-        // The last function produces the final value that needs to be stored
-        if (f->cse_store_addr != nullptr) {
-            for (auto rit = result.rbegin(); rit != result.rend(); ++rit) {
-                if (rit->type == Element_type::CFUNC) {
-                    rit->f->cse_store_addr = f->cse_store_addr;
-                    rit->f->cse_store_suffix = f->cse_store_suffix;
-                    break;
-                }
-            }
-        }
-
         // Replace current function node with the simplified elist
         // First, erase the current node, then insert result elements
         auto insert_pos = elist->erase(it);
@@ -5436,16 +5535,16 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     if (fclass == 1) {
         bool have_value = false;
-        bool constant_added = (ac_final == neutral);
+        bool constant_added = !retain_additive_constant;
         auto ensure_constant = [&]() {
-            if (have_value && !constant_added && ac_final != neutral) {
+            if (have_value && !constant_added) {
                 emit_apply_op_with_constant<0x00>(ev, s, ac_final);
                 invalidate_rax_cache();
                 constant_added = true;
             }
         };
 
-        if (build_debug && ac_final != neutral) {
+        if (build_debug && retain_additive_constant) {
             debug_ss << double_to_pretty_string(ac_final);
             debug_first = false;
         }
@@ -5490,7 +5589,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             if (!have_value) {
                 have_value = true;
-                if (ac_final != neutral) {
+                if (retain_additive_constant) {
                     emit_apply_op_with_constant<0x00>(ev, s, ac_final);
                     invalidate_rax_cache();
                     constant_added = true;
@@ -5603,8 +5702,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     if (build_debug) {
         f_opt->debug_desc = "(" + debug_ss.str() + ")";
     }
-    f_opt->cse_store_suffix = f->cse_store_suffix;  // Preserve CSE store code
-    f_opt->cse_store_addr = f->cse_store_addr;      // Preserve CSE temp address
 
     *it = Element(f_opt);
 }
@@ -6073,46 +6170,16 @@ inline
 void run_cse(evaluator* ev, elist_t& elist)
 {
     auto& compilation = ev->active_compilation();
-    // 1. Identify common subexpressions via signature
-    // Map Signature -> Vector of (Parent Iterator, Element Pointer) pairs?
-    // No, elements are shared pointers inside the list.
-    // We need the iterator to the root of the subtree in 'elist'.
-
-    // But 'elist' is a list of roots (usually 1). The arguments are children.
-    // We need to traverse the tree.
-
-    // Map Signature -> List of occurrences.
-    // Store ID alongside pointer to avoid dereferencing freed memory.
-    // Store scan position to reliably reflect evaluation order (list order),
-    // rather than relying on Element::id allocation order.
-    // Track whether each occurrence is "absorbed" (will be merged into parent by ASMD).
-    struct Occurrence {
+    // Keep identity and list order: earlier replacements can erase later trees.
+    struct occurrence_t {
         Element*  element;
         uint64_t  id;
         size_t    position;
-        bool      absorbed;  // If true, cannot be the CSE source (but can be replaced)
     };
-    map<string, vector<Occurrence> > occurrences;
+    map<string, vector<occurrence_t>> occurrences;
 
     // Track erased element IDs to avoid accessing freed memory
     std::set<uint64_t> erased_ids;
-
-    // Helper to determine operation class (1 = add/sub, 2 = mul/div, 0 = other)
-    auto get_fclass = [](const string& name) -> int {
-        return (name == "add" || name == "sub") ? 1 : (name == "mul" || name == "div") ? 2 : 0;
-    };
-
-    // Helper to check if a function will be absorbed by its parent (same class)
-    auto will_be_absorbed = [&](const Element& e) -> bool {
-        if (e.type != Element_type::CFUNC) return false;
-        int fclass = get_fclass(e.f->name);
-        // Not add/sub/mul/div, or no function parent.
-        if (fclass == 0 || e.f->parent == elist.end() || e.f->parent->type != Element_type::CFUNC) {
-            return false;
-        }
-        int pclass = get_fclass(e.f->parent->f->name);
-        return pclass == fclass;  // Will be absorbed if same class
-    };
 
     // Skip constant-only subtrees: they'll be folded by the constant-elimination pass and
     // should not be turned into CVAR temporaries (which would block further folding).
@@ -6129,16 +6196,20 @@ void run_cse(evaluator* ev, elist_t& elist)
         return true;
     };
 
-    // Collect all CFUNC elements with their signatures.
-    // Include absorbed functions: they can't be the CSE source (since they get
-    // restructured by ASMD), but they CAN be replaced with cse_temp loads IF
-    // they appear AFTER a non-absorbed source in evaluation order.
+    // An inner power is not independently interchangeable with a temporary:
+    // its enclosing power may combine exponents before evaluating the base.
+    // Sharing the whole enclosing expression remains valid.
     size_t scan_pos = 0;
     for (auto& root : elist) {
         if (root.type == Element_type::CFUNC && !is_constant_subtree(root)) {
-            bool absorbed = will_be_absorbed(root);
-            string sig = get_element_signature(root);
-            occurrences[sig].push_back({&root, root.id, scan_pos, absorbed});
+            const bool nested_power_base = root.f->name == "pow" &&
+                root.f->parent != elist.end() &&
+                root.f->parent->type == Element_type::CFUNC &&
+                root.f->parent->f->name == "pow" && root.f->parent_arg_index == 1;
+            if (!nested_power_base) {
+                string sig = get_element_signature(root);
+                occurrences[sig].push_back({&root, root.id, scan_pos});
+            }
         }
         ++scan_pos;
     }
@@ -6147,7 +6218,7 @@ void run_cse(evaluator* ev, elist_t& elist)
     for (auto& entry : occurrences) {
         if (entry.second.size() > 1) {
             // Sort by list position to find the first occurrence (evaluation order)
-            std::sort(entry.second.begin(), entry.second.end(), [](const Occurrence& a, const Occurrence& b){
+            std::sort(entry.second.begin(), entry.second.end(), [](const occurrence_t& a, const occurrence_t& b){
                 return a.position < b.position;
             });
 
@@ -6165,10 +6236,7 @@ void run_cse(evaluator* ev, elist_t& elist)
                 }
             }
 
-            // Find the EARLIEST non-erased, still-matching element as the source.
-            // The source will have cse_store_suffix set, which prevents it from
-            // being absorbed by ASMD (see asmd_optimizer check for cse_store_suffix).
-            // This allows CSE to work even when all occurrences would be absorbed.
+            // The first surviving occurrence defines the value before every use.
             Element* source = nullptr;
             size_t source_idx = SIZE_MAX;
             for (size_t i = 0; i < entry.second.size(); ++i) {
@@ -6204,9 +6272,8 @@ void run_cse(evaluator* ev, elist_t& elist)
             compilation.m_cse_temps.push_back(0.0);
             double* temp_addr = &compilation.m_cse_temps.back();
 
-            // Transform Source: Set CSE store suffix
-            // Generate FST instruction to store result after function executes.
-            // We store this as cse_store_suffix which survives optimizer transformations.
+            // The assignment owns its store independently of the expression.
+            // Optimizers may turn that expression into a variable or constant.
             mexce_charstream store_code;
 #ifdef MEXCE_64
             store_code < 0x48 < 0xb8;
@@ -6217,14 +6284,21 @@ void run_cse(evaluator* ev, elist_t& elist)
             store_code << (void*)temp_addr;
 #endif
 
-            // Set the CSE store suffix on the source function.
-            // This will be emitted after the function's code during compilation.
-            source->f->cse_store_suffix = store_code.str();
-            source->f->cse_store_addr = temp_addr;  // For SSE2 backend
+            uint8_t unused = 0;
+            auto assignment = make_shared<Function>(
+                compilation.m_next_element_id++, "cse_store", 1, 0, 0, &unused);
+            assignment->force_not_constant = true;
+            assignment->cse_store_suffix = store_code.str();
+            assignment->cse_store_addr = temp_addr;
+            assignment->m_has_cse_effect = true;
+            const auto source_it = std::find_if(elist.begin(), elist.end(),
+                [source](const Element& element) { return &element == source; });
+            elist.insert(std::next(source_it), Element(assignment));
 
             // Shared temp variable for all subsequent replacements in this group.
             const uint64_t temp_var_id = compilation.m_next_element_id++;
             auto temp_var = make_shared<Variable>(temp_var_id, (volatile void*)temp_addr, "cse_temp_" + std::to_string(temp_var_id), M64FP);
+            temp_var->is_cse_temporary = true;
 
 
             // Transform Others: Replace with Load (only those AFTER source in eval order)
@@ -6268,6 +6342,7 @@ void run_cse(evaluator* ev, elist_t& elist)
                 other->c.reset();
                 other->f.reset();
             }
+            link_arguments(elist);
         }
     }
 }
@@ -7025,15 +7100,6 @@ compile_candidate:
     // and improves stack efficiency by computing larger operands first.
     normalize_commutative_operands(m_elist);
 
-    // Run Common Subexpression Elimination (CSE)
-    // This must run before destructive optimizers (asmd, pow) to catch
-    // identical subtrees like div(2.2, y).
-#ifndef MEXCE_ARM64
-    if (effective_options.enable_cse) {
-        run_cse(this, m_elist);
-    }
-#endif
-
     // Check if the expression is SSE2-compatible BEFORE running optimizers.
     // For SSE2, we still want the algebraic simplifications from asmd_optimizer,
     // but we want it to output a simplified elist instead of x87 code.
@@ -7164,6 +7230,14 @@ compile_candidate:
             }
         } while (modified);
     }
+
+    // Delete fast-math subtrees before assigning CSE definitions and uses.
+    // The remaining rewrites preserve each definition's private store node.
+#ifndef MEXCE_ARM64
+    if (effective_options.enable_cse) {
+        run_cse(this, m_elist);
+    }
+#endif
 
     // choose more suitable functions, where applicable
     for (auto y = m_elist.begin(); y != m_elist.end(); ) {

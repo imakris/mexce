@@ -27,6 +27,32 @@ static_assert(crypto_secretstream_xchacha20poly1305_ABYTES == 17,
 namespace impl {
 
 
+constexpr unsigned protected_sodium_version_part(const char* text, unsigned value = 0)
+{
+    return *text >= '0' && *text <= '9'
+        ? protected_sodium_version_part(text + 1, value * 10 + unsigned(*text - '0'))
+        : value;
+}
+
+
+constexpr const char* protected_sodium_next_version_part(const char* text)
+{
+    return *text && *text != '.' ? protected_sodium_next_version_part(text + 1)
+        : *text ? text + 1 : text;
+}
+
+
+constexpr unsigned protected_sodium_version_major =
+    protected_sodium_version_part(SODIUM_VERSION_STRING);
+constexpr unsigned protected_sodium_version_minor =
+    protected_sodium_version_part(protected_sodium_next_version_part(SODIUM_VERSION_STRING));
+constexpr unsigned protected_sodium_version_patch = protected_sodium_version_part(
+    protected_sodium_next_version_part(protected_sodium_next_version_part(SODIUM_VERSION_STRING)));
+static_assert(protected_sodium_version_major > 1 || (protected_sodium_version_major == 1 &&
+    (protected_sodium_version_minor > 0 || protected_sodium_version_patch >= 22)),
+    "MEXCE protected expressions require libsodium 1.0.22 or newer");
+
+
 #ifdef MEXCE_PROTECTED_TESTING
 class Protected_wipe_observer
 {

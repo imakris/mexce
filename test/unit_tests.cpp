@@ -49,6 +49,7 @@ extern "C" int mexce_test_override_mprotect(void* addr, size_t len, int prot)
 // Qt defines emit as an empty macro; the public header must remain includable.
 #define emit
 #include "mexce.h"
+#include "arm64_abi_probe.h"
 #undef emit
 
 #ifdef __linux__
@@ -425,6 +426,130 @@ void test_nested_pow_folding_sympy_semantics(TestSuite& suite) {
     eval.bind(x, "x");
     eval.set_expression("((x^0.5)^2)");
     suite.expect_near("nested_pow_negative_sqrt_squared_variable", eval.evaluate(), x);
+}
+
+void test_portable_numeric_boundaries(TestSuite& suite)
+{
+    for (bool prefer_x87 : {false, true}) {
+        mexce::evaluator eval;
+        eval.opts().prefer_x87 = prefer_x87;
+        double x = -2.0;
+        eval.bind(x, "x");
+        for (const char* expression : {
+            "(x^1.5)^2", "(x^(1/3))^3", "(x^0.2)^5"})
+        {
+            eval.set_expression(expression);
+            suite.expect_true(std::string("nested_fractional_domain_") + expression,
+                std::isnan(eval.evaluate()));
+        }
+
+        x = 2.04;
+        eval.set_expression("x^(-1000)");
+        const double actual = eval.evaluate();
+        const double expected = std::pow(x, -1000.0);
+        suite.expect_true("negative_integer_power_preserves_subnormal",
+            std::fpclassify(actual) == FP_SUBNORMAL &&
+                std::abs(actual / expected - 1.0) < 1e-12);
+
+        eval.set_expression("bnd(x,2)");
+        for (double value : {4.0, 0.0, -4.0, -0.0}) {
+            x = value;
+            const double wrapped = eval.evaluate();
+            suite.expect_true("bnd_multiple_is_signed_zero",
+                wrapped == 0.0 && std::signbit(wrapped) == std::signbit(value));
+        }
+        for (const char* expression : {
+            "bnd(4,2)", "bnd(0,2)", "bnd(-4,2)", "bnd(-0.0,2)"})
+        {
+            suite.expect_equal(std::string("bnd_literal_boundary_") + expression,
+                eval.evaluate(expression), 0.0);
+        }
+        x = -(std::numeric_limits<double>::min)();
+        eval.set_expression("bnd(x,1)");
+        suite.expect_equal("bnd_rounded_upper_endpoint_wraps_to_zero", eval.evaluate(), 0.0);
+
+        x = -0.0;
+        for (const char* expression : {"x+0", "0+x", "x-neg(0)", "x+1-1"}) {
+            eval.set_expression(expression);
+            const double zero = eval.evaluate();
+            suite.expect_true(std::string("strict_additive_zero_") + expression,
+                zero == 0.0 && !std::signbit(zero));
+        }
+        for (const char* expression : {"x-0", "x+neg(0)", "(x+x)+neg(0)", "x^0.5"}) {
+            eval.set_expression(expression);
+            const double zero = eval.evaluate();
+            suite.expect_true(std::string("strict_preserved_negative_zero_") + expression,
+                zero == 0.0 && std::signbit(zero));
+        }
+        eval.set_expression("x^(-0.5)");
+        suite.expect_equal("inverse_sqrt_shortcut_negative_zero", eval.evaluate(),
+            -std::numeric_limits<double>::infinity());
+#if !defined(MEXCE_ARM64) && !defined(_MSC_VER)
+        // Unix x87 evaluates this addition in extended precision before bnd.
+        x = 1e16;
+        eval.set_expression("bnd(x+1,3)");
+        suite.expect_equal("bnd_retains_x87_extended_input", eval.evaluate(), 2.0);
+#endif
+    }
+}
+
+void test_cse_rewrite_boundaries(TestSuite& suite)
+{
+    for (bool prefer_x87 : {false, true}) {
+        for (bool fast_math : {false, true}) {
+            mexce::evaluator eval;
+            eval.opts().prefer_x87 = prefer_x87;
+            eval.opts().fast_math = fast_math;
+            eval.opts().enable_cse = true;
+            double x = -2.0;
+            eval.bind(x, "x");
+            eval.set_expression("((x^0.5)^2)+((x^0.5)^4)");
+            for (double value : {-2.0, 4.0}) {
+                x = value;
+                suite.expect_near("cse_nested_power_keeps_combined_domain",
+                    eval.evaluate(), x + x * x);
+            }
+
+            for (const char* expression : {"(x*1)+(x*1)", "(x+0)+(x+0)"}) {
+                eval.set_expression(expression);
+                for (double value : {3.0, 5.0}) {
+                    x = value;
+                    suite.expect_equal("cse_assignment_survives_leaf_rewrite",
+                        eval.evaluate(), 2.0 * x);
+                }
+            }
+            for (const char* expression : {
+                "0*sin(x)+sin(x)", "0/sin(x)+sin(x)"})
+            {
+                eval.set_expression(expression);
+                for (double value : {0.7, -0.7}) {
+                    x = value;
+                    suite.expect_near("cse_assignment_survives_fast_math_deletion",
+                        eval.evaluate(), std::sin(x));
+                }
+            }
+            for (const char* expression : {
+                "sin(x)+(sin(x)+cos(x))^2", "sin(x)^1+(sin(x)+cos(x))^2"})
+            {
+                eval.set_expression(expression);
+                for (double value : {0.2, 0.8}) {
+                    x = value;
+                    const double sum = std::sin(x) + std::cos(x);
+                    suite.expect_near("cse_assignment_precedes_larger_use_tree",
+                        eval.evaluate(), std::sin(x) + sum * sum);
+                }
+            }
+            suite.expect_true("cse_private_assignment_hidden_from_introspection",
+                eval.get_optimized_expression().find("cse_store") == std::string::npos);
+            eval.set_expression("((sin(x)+1)^2)+cos(sin(x)^3)");
+            for (double value : {0.5, -0.25}) {
+                x = value;
+                const double sine = std::sin(x);
+                suite.expect_near("cse_assignment_order_survives_opaque_powers",
+                    eval.evaluate(), (sine + 1) * (sine + 1) + std::cos(sine * sine * sine));
+            }
+        }
+    }
 }
 
 void test_helper_functions_and_element(TestSuite& suite) {
@@ -1291,31 +1416,26 @@ void test_arm64_ieee_values(TestSuite& suite)
 
 double evaluate_with_arm64_saved_registers(TestSuite& suite, mexce::evaluator& eval)
 {
-    // AAPCS64 preserves x19-x28 and the low 64 bits of v8-v15 across calls.
-    register uint64_t saved_x19 __asm__("x19") = 0x13579;
-    register uint64_t saved_x20 __asm__("x20") = 0x24680;
-    register uint64_t saved_x27 __asm__("x27") = 0x35791;
-    register uint64_t saved_x28 __asm__("x28") = 0x46802;
-    register double saved_d8 __asm__("d8") = 1.25;
-    register double saved_d9 __asm__("d9") = -2.5;
-    register double saved_d14 __asm__("d14") = 3.75;
-    register double saved_d15 __asm__("d15") = -4.125;
-    __asm__ volatile(""
-        : "+r"(saved_x19), "+r"(saved_x20), "+r"(saved_x27), "+r"(saved_x28),
-          "+w"(saved_d8), "+w"(saved_d9), "+w"(saved_d14), "+w"(saved_d15));
-    const double result = eval.evaluate();
-    __asm__ volatile(""
-        : "+r"(saved_x19), "+r"(saved_x20), "+r"(saved_x27), "+r"(saved_x28),
-          "+w"(saved_d8), "+w"(saved_d9), "+w"(saved_d14), "+w"(saved_d15));
+    const auto result = mexce_test::evaluate_arm64_abi(eval);
     suite.expect_true("arm64_callee_saved_integer_registers",
-        saved_x19 == 0x13579 && saved_x20 == 0x24680 && saved_x27 == 0x35791 && saved_x28 == 0x46802);
+        !(result.changed_registers & mexce_test::k_arm64_integer_register_mask));
     suite.expect_true("arm64_callee_saved_fp_registers",
-        saved_d8 == 1.25 && saved_d9 == -2.5 && saved_d14 == 3.75 && saved_d15 == -4.125);
-    return result;
+        !(result.changed_registers & mexce_test::k_arm64_fp_register_mask));
+    suite.expect_true("arm64_stack_pointer_restored",
+        !(result.changed_registers & mexce_test::k_arm64_stack_pointer_mask));
+    suite.expect_true("arm64_frame_pointer_restored",
+        !(result.changed_registers & mexce_test::k_arm64_frame_pointer_mask));
+    return result.value;
 }
 
 void test_arm64_deep_calls_and_cse(TestSuite& suite)
 {
+    const auto controls = mexce_test::arm64_abi_control_results();
+    suite.expect_true("arm64_abi_clean_control",
+        controls.preserved.value == 1.0 && controls.preserved.changed_registers == 0);
+    suite.expect_true("arm64_abi_clobber_control",
+        controls.clobbered.value == 1.0 &&
+        controls.clobbered.changed_registers == mexce_test::k_arm64_all_register_mask);
     double a = 1.5;
     double b = 4.0;
     mexce::evaluator eval;
@@ -1463,6 +1583,8 @@ int main() {
     test_signed_zero_semantics(suite);
     test_pow_optimizer_special_cases(suite);
     test_nested_pow_folding_sympy_semantics(suite);
+    test_portable_numeric_boundaries(suite);
+    test_cse_rewrite_boundaries(suite);
     test_helper_functions_and_element(suite);
     test_binding_and_unbinding(suite);
     test_binding_name_conflicts(suite);

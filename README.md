@@ -16,16 +16,29 @@ Once an expression is compiled, subsequent evaluations are direct function calls
 
 The ordinary library is contained in a single header file (`mexce.h`) with no
 external dependencies. An opt-in protected-expression surface uses libsodium
-1.0.22 to load authenticated, encrypted semantic programs.
+1.0.22 or newer to load authenticated, encrypted semantic programs.
 
 ### Requirements
 *   **Platforms:** Windows, Linux, macOS
-*   **Architectures:** x86, x86-64, and ARM64 on macOS (Apple Silicon)
+*   **Architectures:** x86 and x86-64 on Windows and Linux; x86-64 and ARM64 on macOS
 *   **Compiler:** Requires a C++11 compliant compiler.
 
 ## Installation
 
 Copy `mexce.h` into your project's include path and `#include "mexce.h"`. No other steps are needed.
+
+### Building on Intel macOS
+
+Use Xcode Command Line Tools, CMake, and Ninja on an Intel Mac:
+
+```sh
+cmake -S . -B build-intel -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
+cmake --build build-intel --parallel 3
+ctest --test-dir build-intel --output-on-failure
+```
+
+Intel macOS supports both x86-64 backends: SSE2 and x87.
 
 ### Building on Apple Silicon
 
@@ -42,17 +55,36 @@ Ninja must be installed when using this generator. OpenMP is optional and is
 used only as an additional benchmark timer source; the benchmarks also work
 with the standard C++ clock supplied by Apple Clang.
 
-Apple Silicon uses native generated code without Rosetta. A host application
-signed with the hardened runtime must include the
-[`com.apple.security.cs.allow-jit` entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.allow-jit).
+Apple Silicon uses native generated code without Rosetta.
+
+### macOS executable memory
+
+Host applications signed with the hardened runtime need the entitlement for
+their native architecture:
+
+| Architecture | Required entitlement |
+| :--- | :--- |
+| Apple Silicon ARM64 | [`com.apple.security.cs.allow-jit`](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.allow-jit) |
+| Intel x86-64 | [`com.apple.security.cs.allow-unsigned-executable-memory`](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.allow-unsigned-executable-memory) |
+
 The callback-only `com.apple.security.cs.jit-write-allowlist` entitlement is not
 supported. Ordinary command-line builds do not require hardened-runtime signing.
 
-Generated code shares a JIT arena that reserves 1 GiB of virtual address space
-by default; physical pages are allocated on demand and freed code ranges are
-reused. To change the capacity in bytes, define `MEXCE_APPLE_JIT_ARENA_SIZE`
-before including `mexce.h`, with the same value in every translation unit.
-Compilation throws `std::bad_alloc` if the arena cannot satisfy an allocation.
+On Apple Silicon, generated code shares one `MAP_JIT` arena that reserves
+1 GiB of virtual address space by default. Physical pages are allocated on
+demand, and freed code ranges are reused. Each executable buffer occupies whole
+operating-system pages, even when its generated code is smaller than one page.
+To change the capacity in bytes, define `MEXCE_APPLE_JIT_ARENA_SIZE` before
+including `mexce.h`, with the same value in every translation unit. Capacity
+is rounded down to whole pages and must hold at least one page.
+Compilation throws `std::bad_alloc` when the arena cannot provide a sufficiently
+large contiguous range; a failed replacement leaves the evaluator empty.
+
+Hardened Runtime permits one `MAP_JIT` region per process. Apple Silicon
+integration requires one shared mexce arena and no independent `MAP_JIT`
+allocator in that process. The header does not coordinate arenas with other
+JIT runtimes or separately linked copies in libraries with hidden symbol
+visibility.
 
 ## Quick Start
 
@@ -204,14 +236,23 @@ x87 extended precision.
 | `ceil(x)`, `floor(x)`, `round(x)`, `trunc(x)`, `int(x)` | Rounding functions. |
 | `sign(x)` | Returns `-1.0` for negative `x`, `1.0` otherwise. |
 | `signp(x)` | Returns `1.0` for positive `x`, `0.0` otherwise. |
-| `bnd(x, period)` | Wraps `x` to the interval `[0, period)`. |
+| `bnd(x, period)` | Wraps finite `x` to `[0, period)` for a finite positive period. |
 | `bias(x, a)`, `gain(x, a)` | Common tone-mapping curves (for inputs in `[0,1]`). |
 | `expn(x)` | Returns the exponent part of `x`. |
 | `sfc(x)` | Returns the significand (fractional part) of `x`. |
 
+Constant power exponents `+0.5` and `-0.5` use `sqrt(x)` and `1/sqrt(x)`
+respectively. These shortcuts preserve the sign of zero: an input of `-0.0`
+produces `-0.0` and negative infinity respectively. A runtime-bound exponent
+uses the general power operation and can differ from these shortcuts.
+
 ## Backends
 
 `mexce` selects a code generation backend for the target architecture:
+
+Intermediate precision and platform math libraries can produce different
+floating-point results. The library does not promise bit-for-bit equality
+across architectures or backends.
 
 ### ARM64 Backend (Apple Silicon)
 *   Emits native AArch64 scalar instructions for double-precision arithmetic
@@ -219,6 +260,12 @@ x87 extended precision.
 *   Supports common subexpression elimination and fast-math optimizations
 *   Uses macOS JIT memory write protection and instruction-cache invalidation
 *   Reports `backend_type::arm64` through `get_backend()`
+
+Evaluation uses 16 bytes of stack per simultaneously live operand, plus the
+function frame and math-library calls. Clear expressions have no
+fixed operand-depth limit, so applications must provide enough thread stack for
+the expressions they evaluate. Protected programs have a validated operand-depth
+limit of 1,024; that limit does not account for the caller's existing stack use.
 
 ### SSE2 Backend (Default on x86-64)
 *   Uses SSE2 scalar instructions (`addsd`, `mulsd`, etc.) for basic arithmetic
@@ -229,7 +276,7 @@ x87 extended precision.
 
 ### x87 Backend (Default on 32-bit x86)
 *   Uses x87 FPU instructions with 80-bit internal precision
-*   All operations (including transcendentals) use native x87 instructions
+*   Uses native x87 arithmetic, including periodic wrapping, and transcendental instructions
 *   Stack-based architecture can be more compact for certain expression patterns
 *   Supports Common Subexpression Elimination (CSE)
 *   On x86-64, enable with `eval.use_x87_backend();`
@@ -242,18 +289,21 @@ an encrypted, authenticated `.mxp` program and a 32-byte key. The application
 loads that pair, binds values by numeric slot, and evaluates the formula through
 the usual `mexce::evaluator` interface.
 
-This feature is optional, available on x86-64 and Apple Silicon ARM64, and uses libsodium 1.0.22. Ordinary
-users can continue to include only `mexce.h` with no external dependency.
+This feature is optional, available on x86-64 and Apple Silicon ARM64, and uses
+libsodium 1.0.22 or newer. Ordinary users can continue to include only `mexce.h`
+with no external dependency.
 The encrypted program format is shared across architectures; programs issued
-on x86-64 can be loaded on Apple Silicon and vice versa.
+on x86-64 can be loaded on Apple Silicon and vice versa. This program portability
+does not promise identical evaluation bits: platform math libraries and
+intermediate precision, including `long double`, can differ.
 
 ### Build and install
 
-Make libsodium 1.0.22 available through Conan, vcpkg, or pkg-config. For
+Make libsodium 1.0.22 or newer available through Conan, vcpkg, or pkg-config. For
 example, with Conan:
 
 ```sh
-conan install --requires=libsodium/1.0.22 --output-folder=deps \
+conan install --requires='libsodium/[>=1.0.22]' --output-folder=deps \
   --generator=CMakeDeps --generator=CMakeToolchain \
   --settings=build_type=Release --build=missing
 cmake -S . -B build \
@@ -293,6 +343,12 @@ application's key-delivery system. The slot schema must list every variable
 exactly once, using consecutive slots from zero. The command uses strict math
 semantics; applications that need fast-math semantics can use the encoder API
 directly.
+
+Every existing output-parent component must be a real directory; the issuer
+rejects symbolic-link traversal. On macOS, `/tmp` and `/var` are symbolic-link
+aliases. Resolve the existing parent directory with `realpath`, or use its
+physical path such as `/private/tmp` or `/private/var`, then append the new
+output filename. The final output itself must not exist.
 
 On macOS, the issuer requires a filesystem with atomic file cloning, such as
 APFS. It creates the key with owner-only access and preserves that restriction

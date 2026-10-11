@@ -25,8 +25,8 @@ do not appear in the protected artifact.
    key. There is no plaintext overload or automatic input detection.
 2. Protection operates on canonical semantic records, not characters, source
    tokens, or a stable secret opcode substitution table.
-3. The wire program is backend-neutral and portable between supported Windows
-   and Linux builds.
+3. The wire program is backend-neutral and portable between supported Windows,
+   Linux, and macOS builds. This does not require bit-identical numeric results.
 4. Clear and protected compilation share semantic validation, compiler object
    construction, optimization, backend selection, and native-code emission.
    There is no protected-only compiler backend.
@@ -105,8 +105,9 @@ The cryptographic construction follows the maintained libsodium contracts:
 - https://doc.libsodium.org/secret-key_cryptography/secretstream
 - https://doc.libsodium.org/memory_management
 
-The protected dependency is libsodium 1.0.22. Conan Center and the controlled
-vcpkg baseline both provide that release.
+The protected dependency is a compatible libsodium release from 1.0.22 onward.
+The repository's Conan recipe and vcpkg manifest declare that minimum; external
+registries may select a concrete compatible version under their own policies.
 
 ## Security model
 
@@ -258,7 +259,7 @@ of one evaluator or its bound values requires external synchronization.
 ## Wire format 1.0
 
 All integers are unsigned little-endian. Floating literals are exact IEEE-754
-binary64 bits. Protected release targets are little-endian x64, but decoding
+binary64 bits. Supported protected targets are little-endian x86-64 and ARM64, but decoding
 still uses explicit byte loads rather than pointer casts.
 
 ### Version compatibility
@@ -809,19 +810,21 @@ debugger. Core-dump, swap, and hibernation policy belong to the host.
 
 ### Supported release matrix
 
-Protected format 1.0 release gates are:
+Protected format 1.0 is supported on:
 
 - Windows x64 with MSVC;
-- Linux x64 with GCC; and
-- Linux x64 with Clang.
+- Linux x64 with GCC or Clang;
+- Intel macOS with Apple Clang; and
+- Apple Silicon macOS with Apple Clang.
 
 Both SSE2 and x87 paths are exercised on x64. Ordinary MEXCE x86 support remains
 unchanged, but protected x86 headers/packages are not advertised.
 
 Cross-platform portability means the same artifact, key, bindings, and policy
-are accepted on Windows and Linux. Results follow existing backend and libm
-semantics; bit-identical results across different C libraries or x87/SSE2
-precision are not promised.
+are accepted on supported Windows, Linux, and macOS builds. Results follow
+existing backend and libm semantics; bit-identical results across C libraries,
+x87/SSE2/ARM64 backends, or platform `long double` precision are not promised.
+See the [README](../README.md) for macOS signing and memory requirements.
 
 ### Header and ODR boundary
 
@@ -851,16 +854,17 @@ The final source-build surface is:
   enabled; and
 - mexce_protect when issuer tools are enabled.
 
-MEXCE_ENABLE_PROTECTED_EXPRESSIONS is the only protected source-build option.
-It defaults OFF. Enabling it without a supported libsodium target is a configure
-error. It controls build targets and installation content, never C++ class
-layout.
+MEXCE_ENABLE_PROTECTED_EXPRESSIONS enables the protected source-build targets
+and defaults OFF. Enabling it without a supported libsodium target is a
+configure error. It controls build targets and installation content, never C++
+class layout. MEXCE_BUILD_ISSUER_TOOLS also defaults OFF and requires protected
+support when enabled.
 
 CMake normalizes supported dependency providers behind one private adapter:
 
 - Conan target libsodium::libsodium;
 - vcpkg target unofficial-sodium::sodium; or
-- a validated pkg-config imported target on Linux.
+- a validated pkg-config imported target on Linux or macOS.
 
 The installed mexce::protected configuration recreates the adapter and fails
 clearly when libsodium is absent. mexce::mexce has no transitive sodium include,
@@ -869,7 +873,7 @@ compile definition, symbol, or link item.
 ### Conan
 
 Conan adds with_protected, default false. The protected package requires
-libsodium/1.0.22 and exports mexce::protected. Package identity retains the
+`libsodium/[>=1.0.22]` and exports mexce::protected. Package identity retains the
 option and dependency; protected and ordinary packages cannot collapse to the
 same ID.
 

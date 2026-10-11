@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(mexce VERSION 1.2.0 LANGUAGES CXX)
+project(mexce VERSION 1.2.1 LANGUAGES CXX)
 
 include(CTest)
 include(CMakePackageConfigHelpers)
@@ -109,6 +109,13 @@ if(BUILD_TESTING)
     target_link_libraries(cold_start_concurrency_test PRIVATE mexce Threads::Threads)
     target_compile_options(cold_start_concurrency_test PRIVATE ${MEXCE_WARNING_FLAGS})
 
+    if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "arm64" OR
+       (NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")))
+        add_executable(apple_jit_arena_tests test/apple_jit_arena_tests.cpp)
+        target_link_libraries(apple_jit_arena_tests PRIVATE mexce Threads::Threads)
+        target_compile_options(apple_jit_arena_tests PRIVATE ${MEXCE_WARNING_FLAGS})
+    endif()
+
     if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
         set(MEXCE_PROTECTED_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -214,6 +221,9 @@ if(BUILD_TESTING)
     add_test(NAME mexce_unit_tests COMMAND unit_tests)
     add_test(NAME mexce_ordinary_no_sodium COMMAND ordinary_no_sodium_test)
     add_test(NAME mexce_cold_start_concurrency COMMAND cold_start_concurrency_test)
+    if(TARGET apple_jit_arena_tests)
+        add_test(NAME mexce_apple_jit_arena COMMAND apple_jit_arena_tests)
+    endif()
     if(MEXCE_ENABLE_PROTECTED_EXPRESSIONS)
         add_test(NAME mexce_protected_codec_tests COMMAND protected_codec_tests)
         add_test(NAME mexce_protected_sodium_init_failure

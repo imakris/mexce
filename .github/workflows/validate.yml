@@ -48,6 +48,13 @@ jobs:
           echo "::error::Protected benchmark checks require configuration=protected or all."
           exit 1
 
+      - name: Validate hardened-runtime platform
+        if: inputs.checks == 'hardened-runtime' && runner.os != 'macOS'
+        shell: bash
+        run: |
+          echo "::error::Hardened-runtime checks require a native macOS runner."
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -93,6 +100,7 @@ jobs:
           conan profile detect --force
           conan install --requires=libsodium/1.0.22 --output-folder=deps \
             --generator=CMakeDeps --generator=CMakeToolchain \
+            --options="libsodium/*:shared=False" \
             --settings=build_type=Release --conf=tools.build:jobs=3 --build=missing
         shell: bash
         env:
@@ -129,18 +137,22 @@ jobs:
           -DCMAKE_CXX_COMPILER=${{ inputs.cxx }}
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
           -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON
-          -DMEXCE_BUILD_ISSUER_TOOLS=ON
+          -DMEXCE_BUILD_ISSUER_TOOLS=${{ inputs.checks == 'hardened-runtime' && 'OFF' || 'ON' }}
 
       - name: Build
-        if: inputs.checks != 'protected-benchmark'
+        if: inputs.checks == 'full'
         run: cmake --build build --config Release --parallel 3
+
+      - name: Build ARM arena for hardened-runtime checks
+        if: inputs.checks == 'hardened-runtime' && inputs.expected-architecture == 'arm64'
+        run: cmake --build build --config Release --target apple_jit_arena_tests --parallel 3
 
       - name: Build protected benchmark
         if: inputs.checks == 'protected-benchmark'
         run: cmake --build build --config Release --target protected_benchmark --parallel 3
 
       - name: Test
-        if: inputs.checks != 'protected-benchmark'
+        if: inputs.checks == 'full'
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Install
@@ -216,31 +228,42 @@ jobs:
           }
 
       - name: Create documented issuer inputs
-        if: matrix.configuration == 'protected' && inputs.checks != 'protected-benchmark'
+        if: matrix.configuration == 'protected' && inputs.checks == 'full'
         run: >-
           python -c "from pathlib import Path;
           Path('expression.txt').write_bytes(b'value+1\n');
           Path('bindings.txt').write_bytes(b'value=0\n')"
 
       - name: Run installed issuer and file consumer on Unix
-        if: runner.os != 'Windows' && matrix.configuration == 'protected' && inputs.checks != 'protected-benchmark'
+        if: runner.os != 'Windows' && matrix.configuration == 'protected' && inputs.checks == 'full'
         run: |
           "${{ runner.temp }}/mexce-install/bin/mexce_protect" expression.txt bindings.txt expression.mxp expression.key
           ./consumer-build/mexce_protected_file_consumer expression.mxp expression.key
         shell: bash
 
       - name: Run installed issuer and file consumer on Windows
-        if: runner.os == 'Windows' && matrix.configuration == 'protected' && inputs.checks != 'protected-benchmark'
+        if: runner.os == 'Windows' && matrix.configuration == 'protected' && inputs.checks == 'full'
         run: |
           & "${{ runner.temp }}\mexce-install\bin\mexce_protect.exe" expression.txt bindings.txt expression.mxp expression.key
           .\consumer-build\Release\mexce_protected_file_consumer.exe expression.mxp expression.key
 
+      - name: Run hardened-runtime installed consumers and arena checks
+        if: runner.os == 'macOS' && inputs.checks != 'protected-benchmark'
+        run: bash .github/ci/check-hardened-runtime.sh "${{ matrix.configuration }}"
+
+      - name: Upload hardened-runtime evidence
+        if: always() && hashFiles('build/hardened-runtime/*') != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: hardened-runtime-${{ inputs.runner }}-${{ matrix.configuration }}
+          path: build/hardened-runtime
+
       - name: Run clear performance diagnostic
-        if: inputs.checks != 'protected-benchmark'
+        if: inputs.checks == 'full'
         run: cmake --build build --config Release --target run_benchmarks --parallel 3
 
-      - name: Run phase-isolated protected performance diagnostic on Unix
-        if: runner.os != 'Windows' && matrix.configuration == 'protected'
+      - name: Run protected performance diagnostic on Unix
+        if: runner.os != 'Windows' && matrix.configuration == 'protected' && inputs.checks != 'hardened-runtime'
         run: >-
           python analysis/run_protected_benchmarks.py
           build/protected_benchmark
@@ -248,8 +271,8 @@ jobs:
           --repeats 3
           --resource-repeats 1
 
-      - name: Run phase-isolated protected performance diagnostic on Windows
-        if: runner.os == 'Windows' && matrix.configuration == 'protected'
+      - name: Run protected performance diagnostic on Windows
+        if: runner.os == 'Windows' && matrix.configuration == 'protected' && inputs.checks != 'hardened-runtime'
         run: >-
           python analysis/run_protected_benchmarks.py
           build/Release/protected_benchmark.exe

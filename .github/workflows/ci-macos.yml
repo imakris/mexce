@@ -24,7 +24,7 @@ on:
       checks:
         description: Validation to run
         type: choice
-        options: [full, protected-benchmark]
+        options: [full, protected-benchmark, hardened-runtime]
         default: full
 
 permissions:

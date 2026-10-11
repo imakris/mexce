@@ -454,6 +454,91 @@ int evaluate_case(
 }
 
 
+struct evaluation_sample_t
+{
+    uint64_t elapsed_ns = 0;
+    uint64_t iterations = 0;
+    double result = 0.0;
+};
+
+
+int paired_evaluate(
+    size_t case_index,
+    const char* program_path,
+    const char* key_path,
+    bool protected_first)
+{
+    const auto program = read_binary(program_path);
+    const Key_material key(key_path);
+    double x = 0.75;
+    double y = 1.25;
+    double z = 2.5;
+    mexce::evaluator clear;
+    mexce::evaluator protected_evaluator;
+    bind_clear(clear, x, y, z);
+    clear.set_expression(k_cases[case_index].expression);
+    bind_protected(protected_evaluator, x, y, z);
+    protected_evaluator.set_protected_expression(
+        program.data(), program.size(), key.copy());
+
+    mexce::evaluator* evaluators[] = {&clear, &protected_evaluator};
+    const int order[] = {0, 1, 1, 0};
+    // A fresh process can run consistently faster or slower than another one.
+    // Balanced batches compare both evaluators under the same execution conditions.
+    const auto run_for = [&](std::chrono::milliseconds duration) {
+        std::array<evaluation_sample_t, 2> samples;
+        const auto minimum_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
+        while (samples[0].elapsed_ns < minimum_ns || samples[1].elapsed_ns < minimum_ns) {
+            for (int index : order) {
+                const int selected = protected_first ? 1 - index : index;
+                auto& sample = samples[selected];
+                volatile double result = 0.0;
+                sample.elapsed_ns += elapsed_nanoseconds([&] {
+                    for (int i = 0; i < k_evaluate_batch_iterations; ++i) {
+                        result = evaluators[selected]->evaluate();
+                    }
+                });
+                sample.iterations += k_evaluate_batch_iterations;
+                sample.result = result;
+            }
+        }
+        return samples;
+    };
+    run_for(k_evaluate_warmup_duration);
+    const auto samples = run_for(k_evaluate_sample_duration);
+    const auto clear_backend = clear.get_backend();
+    const auto protected_backend = protected_evaluator.get_backend();
+    const bool correct =
+        correct_result(case_index, samples[0].result, x, y, z) &&
+        correct_result(case_index, samples[1].result, x, y, z) &&
+        clear_backend == protected_backend;
+    std::cout << std::setprecision(17)
+        << "{\"mode\":\"paired_evaluate\",\"case_index\":" << case_index
+        << ",\"case\":\"" << k_cases[case_index].name
+        << "\",\"method\":\"balanced_batches\""
+        << ",\"batch_iterations\":" << k_evaluate_batch_iterations
+        << ",\"protected_first\":" << (protected_first ? "true" : "false")
+        << ",\"iterations\":" << samples[0].iterations
+        << ",\"clear_elapsed_ns\":" << samples[0].elapsed_ns
+        << ",\"protected_elapsed_ns\":" << samples[1].elapsed_ns
+        << ",\"clear_per_expression_ns\":"
+        << static_cast<double>(samples[0].elapsed_ns) / samples[0].iterations
+        << ",\"protected_per_expression_ns\":"
+        << static_cast<double>(samples[1].elapsed_ns) / samples[1].iterations
+        << ",\"clear_result\":" << samples[0].result
+        << ",\"protected_result\":" << samples[1].result
+        << ",\"backend\":" << static_cast<int>(clear_backend)
+        << ",\"protected_backend\":" << static_cast<int>(protected_backend)
+        << ",\"peak_working_set_bytes\":" << peak_working_set_bytes()
+        << ",\"correct\":" << (correct ? "true" : "false")
+        << ",\"compiler\":\"" << compiler_name()
+        << "\",\"compiler_flags\":\"" << compiler_flags()
+        << "\"}\n";
+    return correct ? 0 : 1;
+}
+
+
 std::string maximum_expression()
 {
     constexpr size_t k_variable_count = 8191;
@@ -543,7 +628,8 @@ int resource_diagnostic(
 void print_usage()
 {
     std::cerr
-        << "usage: protected_benchmark <mode> [case-index] [program-file] [key-file]\n";
+        << "usage: protected_benchmark <mode> [case-index] [program-file] [key-file]"
+        << " [clear-first|protected-first]\n";
 }
 
 
@@ -582,6 +668,12 @@ int run(int argc, char** argv)
     }
     if (mode == "protected-evaluate" && argc == 5) {
         return evaluate_case(case_index, true, argv[3], argv[4]);
+    }
+    if (mode == "paired-evaluate" && argc == 6 &&
+        (std::string(argv[5]) == "clear-first" || std::string(argv[5]) == "protected-first"))
+    {
+        return paired_evaluate(
+            case_index, argv[3], argv[4], std::string(argv[5]) == "protected-first");
     }
     if (argc != 3) {
         print_usage();

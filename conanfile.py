@@ -6,7 +6,7 @@ from conan.tools.layout import basic_layout
 
 class MexceConan(ConanFile):
     name = "mexce"
-    version = "1.2.0"
+    version = "1.2.1"
     license = "BSD-2-Clause"
     homepage = "https://github.com/imakris/mexce"
     url = "https://github.com/conan-io/conan-center-index"
@@ -29,7 +29,7 @@ class MexceConan(ConanFile):
 
     def requirements(self):
         if self.options.with_protected:
-            self.requires("libsodium/1.0.22")
+            self.requires("libsodium/[>=1.0.22]")
 
     def layout(self):
         basic_layout(self)

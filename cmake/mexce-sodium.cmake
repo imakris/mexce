@@ -5,7 +5,7 @@ function(mexce_find_sodium adapter_target)
         return()
     endif()
 
-    find_package(libsodium 1.0.22 EXACT CONFIG QUIET)
+    find_package(libsodium 1.0.22 CONFIG QUIET)
     if(TARGET libsodium::libsodium)
         set(provider_target libsodium::libsodium)
     else()
@@ -16,7 +16,7 @@ function(mexce_find_sodium adapter_target)
         else()
             find_package(PkgConfig QUIET)
             if(PkgConfig_FOUND)
-                pkg_check_modules(MEXCE_SODIUM QUIET IMPORTED_TARGET libsodium=1.0.22)
+                pkg_check_modules(MEXCE_SODIUM QUIET IMPORTED_TARGET libsodium>=1.0.22)
             endif()
             if(TARGET PkgConfig::MEXCE_SODIUM)
                 set(provider_target PkgConfig::MEXCE_SODIUM)
@@ -26,7 +26,7 @@ function(mexce_find_sodium adapter_target)
 
     if(NOT provider_target)
         message(FATAL_ERROR
-            "MEXCE protected expressions require libsodium 1.0.22 via "
+            "MEXCE protected expressions require libsodium 1.0.22 or newer via "
             "libsodium::libsodium, unofficial-sodium::sodium, or pkg-config")
     endif()
 
