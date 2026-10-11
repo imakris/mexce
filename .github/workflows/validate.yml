@@ -6,6 +6,9 @@ on:
       runner:
         required: true
         type: string
+      expected-architecture:
+        type: string
+        default: ''
       compiler:
         required: true
         type: string
@@ -48,9 +51,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Verify native Apple Silicon runner
+      - name: Verify native macOS architecture
         if: runner.os == 'macOS'
-        run: test "$(uname -m)" = arm64
+        env:
+          EXPECTED_ARCHITECTURE: ${{ inputs.expected-architecture }}
+        run: |
+          uname -m
+          test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
 
       - name: Set up Python on macOS
         if: runner.os == 'macOS' && matrix.configuration == 'protected'
