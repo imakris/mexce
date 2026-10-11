@@ -1,10 +1,10 @@
 {
   "name": "mexce",
-  "version": "1.0.1",
+  "version": "1.2.0",
   "description": "Header-only JIT compiler for scalar mathematical expressions.",
   "homepage": "https://github.com/imakris/mexce",
   "license": "BSD-2-Clause",
-  "supports": "(windows | linux) & (x86 | x64)",
+  "supports": "((windows | linux) & (x86 | x64)) | (osx & arm64)",
   "dependencies": [
     {
       "name": "vcpkg-cmake",
@@ -18,7 +18,7 @@
   "features": {
     "protected": {
       "description": "Install protected-expression support.",
-      "supports": "x64",
+      "supports": "x64 | (osx & arm64)",
       "dependencies": [
         {
           "name": "libsodium",
