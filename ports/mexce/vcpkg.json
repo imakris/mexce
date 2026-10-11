@@ -1,10 +1,10 @@
 {
   "name": "mexce",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Header-only JIT compiler for scalar mathematical expressions.",
   "homepage": "https://github.com/imakris/mexce",
   "license": "BSD-2-Clause",
-  "supports": "((windows | linux) & (x86 | x64)) | (osx & arm64)",
+  "supports": "((windows | linux) & (x86 | x64)) | (osx & (arm64 | x64))",
   "dependencies": [
     {
       "name": "vcpkg-cmake",
