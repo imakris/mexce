@@ -234,8 +234,12 @@ static void print_usage(const char* prog) {
     std::cerr << "Options:\n";
     std::cerr << "  --comprehensive, -c   Run comprehensive comparison (default)\n";
     std::cerr << "  --single              Run single-configuration benchmark\n";
+#ifdef MEXCE_ARM64
+    std::cerr << "  --x87, --sse2         Accepted for compatibility; ARM64 is always used\n";
+#else
     std::cerr << "  --x87                 Force x87 backend (with --single)\n";
     std::cerr << "  --sse2                Force SSE2 backend (with --single, default)\n";
+#endif
     std::cerr << "  --fast-math           Enable fast-math optimizations (with --single)\n";
     std::cerr << "  --help, -h            Show this help message\n";
     std::cerr << "\n";
@@ -387,6 +391,7 @@ struct benchmark_result {
     size_t eval_fail_count = 0;
     size_t sse2_backend_count = 0;  // Expressions that actually used SSE2 backend
     size_t x87_backend_count = 0;   // Expressions that actually used x87 backend
+    size_t arm64_backend_count = 0;
 
     // Timing stats
     long long total_compile_ns = 0;
@@ -571,8 +576,14 @@ static benchmark_result run_benchmark(
 
                 if (rec.backend_used == mexce::backend_type::sse2) {
                     result.sse2_backend_count++;
-                } else if (rec.backend_used == mexce::backend_type::x87) {
+                }
+                else
+                if (rec.backend_used == mexce::backend_type::x87) {
                     result.x87_backend_count++;
+                }
+                else
+                if (rec.backend_used == mexce::backend_type::arm64) {
+                    result.arm64_backend_count++;
                 }
             }
             catch (const std::exception& e) {
@@ -640,7 +651,8 @@ static benchmark_result run_benchmark(
 
             result.total_eval_ns += representative;
 
-            bool used_requested_backend = (cfg.prefer_x87 && rec.backend_used == mexce::backend_type::x87) ||
+            bool used_requested_backend = rec.backend_used == mexce::backend_type::arm64 ||
+                                          (cfg.prefer_x87 && rec.backend_used == mexce::backend_type::x87) ||
                                           (!cfg.prefer_x87 && rec.backend_used == mexce::backend_type::sse2);
             if (used_requested_backend) {
                 result.total_eval_ns_actual_backend += representative;
@@ -686,7 +698,8 @@ static benchmark_result run_benchmark(
             result.records[idx].native_avg_ns = (uint64_t)((long double)native_dur / (long double)iterations_u + 0.5L);
 
             const auto& rec = result.records[idx];
-            bool used_requested_backend = (cfg.prefer_x87 && rec.backend_used == mexce::backend_type::x87) ||
+            bool used_requested_backend = rec.backend_used == mexce::backend_type::arm64 ||
+                                          (cfg.prefer_x87 && rec.backend_used == mexce::backend_type::x87) ||
                                           (!cfg.prefer_x87 && rec.backend_used == mexce::backend_type::sse2);
             if (used_requested_backend && rec.native_available) {
                 result.total_native_ns_actual_backend += native_dur;
@@ -714,6 +727,10 @@ static benchmark_result run_benchmark(
     } else if (result.x87_backend_count > 0) {
         progress_out << ", all x87";
     }
+    else
+    if (result.arm64_backend_count > 0) {
+        progress_out << ", all ARM64";
+    }
     progress_out << ", " << num_rounds << " timing rounds, median-of-rounds)\n";
     return result;
 }
@@ -721,10 +738,15 @@ static benchmark_result run_benchmark(
 // Print explanatory notes about backends and options
 static void print_backend_notes(std::ostream& out) {
     out << "\nBackend notes:\n";
+#ifdef MEXCE_ARM64
+    out << "  ARM64:     Uses double-precision scalar instructions for arithmetic\n";
+    out << "             and C library math functions for transcendentals.\n";
+#else
     out << "  SSE2:      Uses SSE2 scalar instructions (addsd, mulsd, etc.) for arithmetic,\n";
     out << "             plus SSE4.1 roundsd for rounding functions (floor, ceil, round, trunc).\n";
     out << "  x87:       Uses the legacy x87 FPU stack. May produce different precision results\n";
     out << "             due to 80-bit extended precision intermediate calculations.\n";
+#endif
     out << "  fast-math: Enables algebraic optimizations (e.g., x*0=0, x+0=x) that assume\n";
     out << "             no NaN/Inf values, similar to compiler -ffast-math behavior.\n";
     out << "  Native:    Compiler-generated code using the same flags shown above.\n";
@@ -1357,10 +1379,15 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
 
     // Define configurations to test (same configs used in both modes)
     std::vector<mexce_config> configs = {
+#ifdef MEXCE_ARM64
+        {"ARM64",           false, false},
+        {"ARM64+fast-math", false, true}
+#else
         {"SSE2",            false, false},
         {"SSE2+fast-math",  false, true},
         {"x87",             true,  false},
         {"x87+fast-math",   true,  true}
+#endif
     };
 
     std::vector<benchmark_result> results;
@@ -1624,8 +1651,12 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     out << "\n" << line << "\n";
     out << "Notes:\n";
     out << "  Native:    Compiler-generated code (baseline for comparison)\n";
+#ifdef MEXCE_ARM64
+    out << "  ARM64:     Uses double-precision arithmetic, libm for transcendentals\n";
+#else
     out << "  SSE2:      Uses SSE2 for basic arithmetic, libm for transcendentals\n";
     out << "  x87:       Uses x87 FPU for all operations (80-bit internal precision)\n";
+#endif
     out << "  fast-math: Enables algebraic simplifications (x-x=0, x/x=1, etc.)\n";
     out << line << "\n";
 
@@ -1662,11 +1693,15 @@ int main(int argc, char* argv[])
         prefer_x87 = false;  // Default to SSE2
     }
 
+#ifdef MEXCE_ARM64
+    config_name = config.fast_math ? "ARM64+fast-math" : "ARM64";
+#else
     if (prefer_x87) {
         config_name = config.fast_math ? "x87+fast-math" : "x87";
     } else {
         config_name = config.fast_math ? "SSE2+fast-math" : "SSE2";
     }
+#endif
 
     const std::string resolved_output = config.output_path.empty() ? std::string() : resolve_full_path(config.output_path);
 
@@ -1682,7 +1717,11 @@ int main(int argc, char* argv[])
     }
 
     std::cout << "Configuration:" << std::endl;
+#ifdef MEXCE_ARM64
+    std::cout << "  Backend: ARM64" << std::endl;
+#else
     std::cout << "  Backend: " << (prefer_x87 ? "x87" : "SSE2") << std::endl;
+#endif
     std::cout << "  Fast-math: " << (config.fast_math ? "enabled" : "disabled") << std::endl;
 
     // Set up output stream

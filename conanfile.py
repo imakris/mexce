@@ -36,12 +36,14 @@ class MexceConan(ConanFile):
 
     def validate(self):
         allowed_architectures = {"x86", "x86_64"}
+        if str(self.settings.os) == "Macos":
+            allowed_architectures.add("armv8")
         if str(self.settings.arch) not in allowed_architectures:
             raise ConanInvalidConfiguration(
-                "mexce only supports x86 and x86_64 architectures")
-        if self.options.with_protected and str(self.settings.arch) != "x86_64":
+                "mexce supports x86, x86_64, and macOS armv8 architectures")
+        if self.options.with_protected and str(self.settings.arch) == "x86":
             raise ConanInvalidConfiguration(
-                "mexce protected expressions support x86_64 packages only")
+                "mexce protected expressions require a 64-bit architecture")
 
     def generate(self):
         toolchain = CMakeToolchain(self)

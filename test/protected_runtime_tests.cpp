@@ -26,6 +26,12 @@ namespace {
 
 const char* g_fixture_path = MEXCE_PROTECTED_FIXTURE_PATH;
 
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+constexpr auto k_preferred_x87_backend = mexce::backend_type::arm64;
+#else
+constexpr auto k_preferred_x87_backend = mexce::backend_type::x87;
+#endif
+
 
 struct Test_suite
 {
@@ -326,10 +332,35 @@ void test_options_and_introspection(Test_suite& suite)
         x87,
         mexce::encode_protected_expression(
             "x+1", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
-    suite.expect(x87.get_backend() == mexce::backend_type::x87, "prefer_x87_preserved");
+    suite.expect(x87.get_backend() == k_preferred_x87_backend, "prefer_x87_platform_backend");
     suite.expect(x87.get_options().prefer_x87, "prefer_x87_option_unchanged");
     suite.expect_near(x87.evaluate(), 8.0, "prefer_x87_result");
 }
+
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+void test_arm64_optimized_expressions(Test_suite& suite)
+{
+    double x = -2.0;
+    mexce::evaluator evaluator;
+    evaluator.bind_protected(x, 0);
+    load(
+        evaluator,
+        mexce::encode_protected_expression(
+            "((x^0.5)^2)+((x^0.5)^4)", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+    suite.expect_near(evaluator.evaluate(), 2.0, "arm64_protected_nested_power_folding");
+    x = -3.0;
+    suite.expect_near(evaluator.evaluate(), 6.0, "arm64_protected_nested_power_refresh");
+
+    x = 3.0;
+    load(
+        evaluator,
+        mexce::encode_protected_expression(
+            "(x+0)+(x+0)", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+    suite.expect_near(evaluator.evaluate(), 6.0, "arm64_protected_rewritten_producer");
+    x = 5.0;
+    suite.expect_near(evaluator.evaluate(), 10.0, "arm64_protected_rewritten_producer_refresh");
+}
+#endif
 
 
 void test_runtime_libm_selection(Test_suite& suite)
@@ -365,10 +396,15 @@ void test_runtime_libm_selection(Test_suite& suite)
         libm.bind(x, "x", y, "y");
         libm.set_expression(test_case.expression);
         const double expected = libm.evaluate();
+#if !defined(__APPLE__) || (!defined(__aarch64__) && !defined(__arm64__))
         const std::string libm_code = libm.get_byte_representation();
+#endif
         suite.expect(std::isfinite(expected),
             std::string("libm_finite_") + test_case.expression);
-#ifdef MEXCE_64
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+        suite.expect(libm.get_backend() == mexce::backend_type::arm64,
+            std::string("libm_backend_") + test_case.expression);
+#elif defined(MEXCE_64)
         suite.expect(
             libm.get_backend() == (test_case.libm_uses_sse2
                 ? mexce::backend_type::sse2
@@ -382,12 +418,14 @@ void test_runtime_libm_selection(Test_suite& suite)
         clear_inline.set_options(inline_options);
         clear_inline.bind(x, "x", y, "y");
         clear_inline.set_expression(test_case.expression);
-        suite.expect(clear_inline.get_backend() == mexce::backend_type::x87,
+        suite.expect(clear_inline.get_backend() == k_preferred_x87_backend,
             std::string("inline_backend_") + test_case.expression);
         suite.expect_near(clear_inline.evaluate(), expected,
             std::string("inline_result_") + test_case.expression);
+#if !defined(__APPLE__) || (!defined(__aarch64__) && !defined(__arm64__))
         suite.expect(clear_inline.get_byte_representation() != libm_code,
             std::string("runtime_selection_") + test_case.expression);
+#endif
 
         std::vector<mexce::Protected_binding> bindings = {{"x", 0}};
         if (test_case.uses_y) {
@@ -405,7 +443,10 @@ void test_runtime_libm_selection(Test_suite& suite)
                 mexce::Protected_math_mode::STRICT));
         suite.expect_near(protected_libm.evaluate(), expected,
             std::string("protected_libm_result_") + test_case.expression);
-#ifdef MEXCE_64
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+        suite.expect(protected_libm.get_backend() == mexce::backend_type::arm64,
+            std::string("protected_libm_backend_") + test_case.expression);
+#elif defined(MEXCE_64)
         suite.expect(
             protected_libm.get_backend() == (test_case.libm_uses_sse2
                 ? mexce::backend_type::sse2
@@ -426,7 +467,7 @@ void test_runtime_libm_selection(Test_suite& suite)
                 test_case.expression,
                 bindings,
                 mexce::Protected_math_mode::STRICT));
-        suite.expect(protected_inline.get_backend() == mexce::backend_type::x87,
+        suite.expect(protected_inline.get_backend() == k_preferred_x87_backend,
             std::string("protected_inline_backend_") + test_case.expression);
         suite.expect_near(protected_inline.evaluate(), expected,
             std::string("protected_inline_result_") + test_case.expression);
@@ -591,7 +632,7 @@ void test_fallback_and_wipes(Test_suite& suite)
         evaluator,
         mexce::encode_protected_expression(
             polynomial, {{"x", 0}}, mexce::Protected_math_mode::STRICT));
-    suite.expect(evaluator.get_backend() == mexce::backend_type::x87, "protected_fallback_backend");
+    suite.expect(evaluator.get_backend() == k_preferred_x87_backend, "protected_polynomial_backend");
     const double result = evaluator.evaluate();
     suite.expect(std::isfinite(result) && result == expected, "protected_fallback_exact_value");
     suite.expect(!evaluator.get_options().prefer_x87, "fallback_preserves_stored_preference");
@@ -599,6 +640,13 @@ void test_fallback_and_wipes(Test_suite& suite)
     observer.reset();
     evaluator.set_expression("3.5");
     suite.expect_near(evaluator.evaluate(), 3.5, "protected_replacement_value");
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+    suite.expect(
+        observer.observed_before(
+            mexce::impl::Protected_wipe_context::EXECUTABLE,
+            mexce::impl::Protected_wipe_context::CONSTANT_STORAGE),
+        "polynomial_executable_wiped_before_constants");
+#else
     suite.expect(
         observer.observed_before(
             mexce::impl::Protected_wipe_context::EXECUTABLE,
@@ -607,6 +655,7 @@ void test_fallback_and_wipes(Test_suite& suite)
     suite.expect(
         observer.count(mexce::impl::Protected_wipe_context::CONSTANT_STORAGE) == 0,
         "fallback_wipe_not_satisfied_by_primary_storage");
+#endif
     suite.expect(observer.all_observed_regions_are_zero(), "fallback_replacement_wipes_zero");
 
     observer.reset();
@@ -616,9 +665,11 @@ void test_fallback_and_wipes(Test_suite& suite)
         primary,
         mexce::encode_protected_expression(
             "x+1", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+#if !defined(__APPLE__) || (!defined(__aarch64__) && !defined(__arm64__))
     suite.expect(
         observer.count(mexce::impl::Protected_wipe_context::FALLBACK_STORAGE) > 0,
         "unused_fallback_owner_wiped_during_load");
+#endif
     suite.expect(
         observer.count(mexce::impl::Protected_wipe_context::EXECUTABLE) == 0,
         "unused_fallback_not_satisfied_by_executable_wipe");
@@ -702,6 +753,9 @@ int main(int argc, char** argv)
     test_binding_lifecycle(suite);
     test_binding_types_and_missing_binding(suite);
     test_options_and_introspection(suite);
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+    test_arm64_optimized_expressions(suite);
+#endif
     test_runtime_libm_selection(suite);
     test_failure_and_key_consumption(suite);
     test_compilation_resource_failures(suite);

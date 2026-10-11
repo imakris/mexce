@@ -5,59 +5,58 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platforms to validate
+        type: choice
+        options: [all, macos]
+        default: all
+      configuration:
+        description: Suites to validate
+        type: choice
+        options: [all, ordinary, protected]
+        default: all
 
 permissions:
   contents: read
 
 jobs:
   release-matrix:
-    name: ${{ matrix.os }} / ${{ matrix.compiler }} / ${{ matrix.configuration }}
-    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.toolchain.os }} / ${{ matrix.toolchain.compiler }} / ${{ matrix.configuration }}
+    runs-on: ${{ matrix.toolchain.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-2022
-            compiler: msvc
-            cc: cl
-            cxx: cl
-            configuration: ordinary
-          - os: windows-2022
-            compiler: msvc
-            cc: cl
-            cxx: cl
-            configuration: protected
-          - os: ubuntu-latest
-            compiler: gcc
-            cc: gcc
-            cxx: g++
-            configuration: ordinary
-          - os: ubuntu-latest
-            compiler: gcc
-            cc: gcc
-            cxx: g++
-            configuration: protected
-          - os: ubuntu-latest
-            compiler: clang
-            cc: clang
-            cxx: clang++
-            configuration: ordinary
-          - os: ubuntu-latest
-            compiler: clang
-            cc: clang
-            cxx: clang++
-            configuration: protected
+        configuration: ${{ fromJSON(inputs.configuration == 'ordinary' && '["ordinary"]' || inputs.configuration == 'protected' && '["protected"]' || '["ordinary", "protected"]') }}
+        toolchain: >-
+          ${{ fromJSON(inputs.platform == 'macos' &&
+          '[{"os":"macos-latest","compiler":"apple-clang","cc":"clang","cxx":"clang++"}]' ||
+          '[{"os":"windows-2022","compiler":"msvc","cc":"cl","cxx":"cl"},
+            {"os":"ubuntu-latest","compiler":"gcc","cc":"gcc","cxx":"g++"},
+            {"os":"ubuntu-latest","compiler":"clang","cc":"clang","cxx":"clang++"},
+            {"os":"macos-latest","compiler":"apple-clang","cc":"clang","cxx":"clang++"}]') }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Verify native Apple Silicon runner
+        if: runner.os == 'macOS'
+        run: test "$(uname -m)" = arm64
+
+      - name: Set up Python on macOS
+        if: runner.os == 'macOS' && matrix.configuration == 'protected'
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
 
       - name: Install Conan
         if: matrix.configuration == 'protected'
         run: pip install conan==2.20.1
 
       - name: Install Linux Clang dependencies
-        if: runner.os == 'Linux' && matrix.compiler == 'clang'
+        if: runner.os == 'Linux' && matrix.toolchain.compiler == 'clang'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libomp-dev
@@ -72,31 +71,31 @@ jobs:
           conan profile detect --force
           conan install --requires=libsodium/1.0.22 --output-folder=deps `
             --generator=CMakeDeps --generator=CMakeToolchain `
-            --settings=build_type=Release --build=missing
+            --settings=build_type=Release --conf=tools.build:jobs=3 --build=missing
 
-      - name: Resolve libsodium 1.0.22 on Linux
-        if: runner.os == 'Linux' && matrix.configuration == 'protected'
+      - name: Resolve libsodium 1.0.22 on Unix
+        if: runner.os != 'Windows' && matrix.configuration == 'protected'
         run: |
           conan profile detect --force
           conan install --requires=libsodium/1.0.22 --output-folder=deps \
             --generator=CMakeDeps --generator=CMakeToolchain \
-            --settings=build_type=Release --build=missing
+            --settings=build_type=Release --conf=tools.build:jobs=3 --build=missing
         shell: bash
         env:
-          CC: ${{ matrix.cc }}
-          CXX: ${{ matrix.cxx }}
+          CC: ${{ matrix.toolchain.cc }}
+          CXX: ${{ matrix.toolchain.cxx }}
 
       - name: Configure ordinary Windows release
         if: runner.os == 'Windows' && matrix.configuration == 'ordinary'
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
-      - name: Configure ordinary Linux release
-        if: runner.os == 'Linux' && matrix.configuration == 'ordinary'
+      - name: Configure ordinary Unix release
+        if: runner.os != 'Windows' && matrix.configuration == 'ordinary'
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_COMPILER=${{ matrix.cc }}
-          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_C_COMPILER=${{ matrix.toolchain.cc }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.toolchain.cxx }}
 
       - name: Configure protected Windows release and issuer
         if: runner.os == 'Windows' && matrix.configuration == 'protected'
@@ -107,19 +106,19 @@ jobs:
           -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON
           -DMEXCE_BUILD_ISSUER_TOOLS=ON
 
-      - name: Configure protected Linux release and issuer
-        if: runner.os == 'Linux' && matrix.configuration == 'protected'
+      - name: Configure protected Unix release and issuer
+        if: runner.os != 'Windows' && matrix.configuration == 'protected'
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_COMPILER=${{ matrix.cc }}
-          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_C_COMPILER=${{ matrix.toolchain.cc }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.toolchain.cxx }}
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
           -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON
           -DMEXCE_BUILD_ISSUER_TOOLS=ON
 
       - name: Build
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --config Release --parallel 3
 
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
@@ -143,12 +142,12 @@ jobs:
           -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
 
-      - name: Configure installed Linux consumer
-        if: runner.os == 'Linux' && matrix.configuration == 'ordinary'
+      - name: Configure installed Unix consumer
+        if: runner.os != 'Windows' && matrix.configuration == 'ordinary'
         run: >-
           cmake -S test/install_consumer -B consumer-build
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.toolchain.cxx }}
           -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
 
@@ -162,22 +161,22 @@ jobs:
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
           -DMEXCE_CONSUMER_PROTECTED=ON
 
-      - name: Configure installed protected Linux consumer
-        if: runner.os == 'Linux' && matrix.configuration == 'protected'
+      - name: Configure installed protected Unix consumer
+        if: runner.os != 'Windows' && matrix.configuration == 'protected'
         run: >-
           cmake -S test/install_consumer -B consumer-build
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.toolchain.cxx }}
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
           -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
           -DMEXCE_CONSUMER_PROTECTED=ON
 
       - name: Build installed consumer
-        run: cmake --build consumer-build --config Release --parallel
+        run: cmake --build consumer-build --config Release --parallel 3
 
-      - name: Run installed consumers on Linux
-        if: runner.os == 'Linux'
+      - name: Run installed consumers on Unix
+        if: runner.os != 'Windows'
         run: |
           ./consumer-build/mexce_ordinary_consumer
           if [ "${{ matrix.configuration }}" = protected ]; then
@@ -200,8 +199,8 @@ jobs:
           Path('expression.txt').write_bytes(b'value+1\n');
           Path('bindings.txt').write_bytes(b'value=0\n')"
 
-      - name: Run installed issuer and file consumer on Linux
-        if: runner.os == 'Linux' && matrix.configuration == 'protected'
+      - name: Run installed issuer and file consumer on Unix
+        if: runner.os != 'Windows' && matrix.configuration == 'protected'
         run: |
           "${{ runner.temp }}/mexce-install/bin/mexce_protect" expression.txt bindings.txt expression.mxp expression.key
           ./consumer-build/mexce_protected_file_consumer expression.mxp expression.key
@@ -214,10 +213,10 @@ jobs:
           .\consumer-build\Release\mexce_protected_file_consumer.exe expression.mxp expression.key
 
       - name: Run clear performance diagnostic
-        run: cmake --build build --config Release --target run_benchmarks
+        run: cmake --build build --config Release --target run_benchmarks --parallel 3
 
-      - name: Run phase-isolated protected performance diagnostic on Linux
-        if: runner.os == 'Linux' && matrix.configuration == 'protected'
+      - name: Run phase-isolated protected performance diagnostic on Unix
+        if: runner.os != 'Windows' && matrix.configuration == 'protected'
         run: >-
           python analysis/run_protected_benchmarks.py
           build/protected_benchmark
@@ -238,7 +237,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: diagnostics-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.configuration }}
+          name: diagnostics-${{ matrix.toolchain.os }}-${{ matrix.toolchain.compiler }}-${{ matrix.configuration }}
           if-no-files-found: warn
           path: |
             build/benchmark_results.txt

@@ -5,14 +5,13 @@
  *
  * mexce is a single-header, dependency-free runtime compiler for scalar
  * mathematical expressions.  It can compile and evaluate expressions at
- * runtime, emitting compact machine code that primarily uses the x87 FPU.
+ * runtime, emitting native x86, x86-64, or AArch64 machine code.
  * Subsequent calls to `evaluate()` jump directly to the generated code, so
  * evaluating the same expression repeatedly is fast.
  *
- * The library targets x86 (32-bit and 64-bit) Windows and Linux.  It requests a
- * writable/executable buffer with the appropriate platform APIs and relies on
- * the x87 floating-point stack, which makes it well suited for compact
- * numerical kernels and environments where adding a full parser is excessive.
+ * The library targets x86 Windows and Linux, and Apple Silicon macOS. Generated
+ * code uses SSE2 or x87 on x86 and scalar double-precision instructions on
+ * AArch64. Executable storage follows the platform's write-protection rules.
  *
  * ### Basic usage
  *
@@ -141,6 +140,9 @@
 
 #if defined(_M_X64) || defined(__x86_64__)
     #define MEXCE_64
+#elif defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+    #define MEXCE_64
+    #define MEXCE_ARM64
 #elif defined(_M_IX86) || defined(__i386__)
     #define MEXCE_32
 #else
@@ -149,9 +151,14 @@
 
 #ifdef _WIN32
     #include <Windows.h>
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
     #include <unistd.h>
     #include <sys/mman.h>
+#endif
+#ifdef MEXCE_ARM64
+    #include <libkern/OSCacheControl.h>
+    #include <mutex>
+    #include <pthread.h>
 #endif
 
 
@@ -266,10 +273,10 @@ struct options {
     // Common subexpression elimination
     bool enable_cse = false;
 
-    // Force x87 backend even when SSE2 is available
+    // Force x87 when available; ignored on Apple Silicon.
     bool prefer_x87 = false;
 
-    // Use libm functions instead of the inline x87 implementation.
+    // Use libm functions instead of inline x87. AArch64 always uses libm.
     bool use_libm_sin        = MEXCE_USE_LIBM_SIN != 0;
     bool use_libm_cos        = MEXCE_USE_LIBM_COS != 0;
     bool use_libm_tan        = MEXCE_USE_LIBM_TAN != 0;
@@ -377,7 +384,8 @@ namespace impl {
 enum class backend_type {
     none,   ///< No expression compiled yet
     sse2,   ///< SSE2 scalar backend (x86-64 only)
-    x87     ///< x87 FPU backend (default on 32-bit, fallback on 64-bit)
+    x87,    ///< x87 FPU backend (default on 32-bit, fallback on x86-64)
+    arm64   ///< Native AArch64 scalar backend on Apple Silicon
 };
 
 class evaluator
@@ -454,13 +462,13 @@ public:
     evaluator& enable_fast_math() { m_options.fast_math = true; return *this; }
     evaluator& disable_fast_math() { m_options.fast_math = false; return *this; }
 
-    /** Enable common subexpression elimination (requires x87 backend). */
+    /** Enable common subexpression elimination. */
     evaluator& enable_cse() { m_options.enable_cse = true; return *this; }
     evaluator& disable_cse() { m_options.enable_cse = false; return *this; }
 
-    /** Use x87 FPU backend instead of SSE2 (always used on 32-bit x86). */
+    /** Prefer x87 on x86; Apple Silicon continues to use its native backend. */
     evaluator& use_x87_backend() { m_options.prefer_x87 = true; return *this; }
-    /** Use SSE2 backend (default on x86-64, not available on 32-bit x86). */
+    /** Prefer SSE2 on x86-64; Apple Silicon continues to use its native backend. */
     evaluator& use_sse2_backend() { m_options.prefer_x87 = false; return *this; }
 
     /**
@@ -540,6 +548,82 @@ double evaluator::evaluate(const std::string& expression)
 namespace impl {
 
 
+#ifdef MEXCE_ARM64
+// Hardened Runtime permits one MAP_JIT region per process. Keep a single
+// reservation and reuse page ranges; mmap commits physical pages on demand.
+// The arena outlives static evaluators, including those in other translation units.
+#ifndef MEXCE_APPLE_JIT_ARENA_SIZE
+#define MEXCE_APPLE_JIT_ARENA_SIZE (size_t(1024) * 1024 * 1024)
+#endif
+class Apple_jit_arena
+{
+public:
+    Apple_jit_arena()
+    :
+        m_page_size((size_t)sysconf(_SC_PAGESIZE)),
+        m_used_pages(MEXCE_APPLE_JIT_ARENA_SIZE / m_page_size, 0),
+        m_buffer((uint8_t*)mmap(
+            nullptr, m_used_pages.size() * m_page_size,
+            PROT_READ | PROT_WRITE | PROT_EXEC,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0))
+    {
+        if (m_buffer == MAP_FAILED) {
+            throw std::bad_alloc();
+        }
+    }
+
+    uint8_t* allocate(size_t size)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (size > m_used_pages.size() * m_page_size) {
+            return (uint8_t*)MAP_FAILED;
+        }
+        const size_t required = (size + m_page_size - 1) / m_page_size;
+        size_t available = 0;
+        for (size_t page = 0; page < m_used_pages.size(); ++page) {
+            available = m_used_pages[page] ? 0 : available + 1;
+            if (available == required) {
+                const size_t first = page + 1 - required;
+                std::fill(m_used_pages.begin() + first, m_used_pages.begin() + page + 1, 1);
+                return m_buffer + first * m_page_size;
+            }
+        }
+        return (uint8_t*)MAP_FAILED;
+    }
+
+    void release(void* buffer, size_t size)
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const size_t first = ((uint8_t*)buffer - m_buffer) / m_page_size;
+        const size_t count = (size + m_page_size - 1) / m_page_size;
+        std::fill(m_used_pages.begin() + first, m_used_pages.begin() + first + count, 0);
+    }
+
+private:
+    const size_t          m_page_size;
+    std::vector<uint8_t>  m_used_pages;
+    uint8_t*              m_buffer;
+    std::mutex            m_mutex;
+};
+
+inline Apple_jit_arena& apple_jit_arena()
+{
+    static Apple_jit_arena* arena = new Apple_jit_arena;
+    return *arena;
+}
+
+class Apple_jit_write_scope
+{
+public:
+    Apple_jit_write_scope()  { pthread_jit_write_protect_np(0); }
+    ~Apple_jit_write_scope() { pthread_jit_write_protect_np(1); }
+
+    Apple_jit_write_scope(const Apple_jit_write_scope&) = delete;
+    Apple_jit_write_scope& operator=(const Apple_jit_write_scope&) = delete;
+};
+#endif
+
+
 #ifdef _WIN32
 inline
 size_t get_page_size()
@@ -557,9 +641,20 @@ uint8_t* get_executable_buffer(size_t sz)
 #ifdef _WIN32
     (void)sz; // prevent warning
     return (uint8_t*)VirtualAlloc(0, sz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-#elif defined(__linux__)
+#elif defined(MEXCE_ARM64)
+    return apple_jit_arena().allocate(sz);
+#elif defined(__linux__) || defined(__APPLE__)
     return (uint8_t*)mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 #endif
+}
+
+
+inline void copy_executable_buffer(uint8_t* buffer, const uint8_t* source, size_t size)
+{
+#ifdef MEXCE_ARM64
+    Apple_jit_write_scope writable;
+#endif
+    memcpy(buffer, source, size);
 }
 
 
@@ -592,7 +687,10 @@ double (*lock_executable_buffer(
         throw Executable_memory_error("VirtualProtect(PAGE_EXECUTE_READ) failed");
     }
     FlushInstructionCache(GetCurrentProcess(), buffer, sz);
-#elif defined(__linux__)
+#elif defined(MEXCE_ARM64)
+    (void)wipe;
+    sys_icache_invalidate(buffer, sz);
+#elif defined(__linux__) || defined(__APPLE__)
     if (mprotect((void*)buffer, sz, PROT_READ | PROT_EXEC) != 0) {
         if (wipe) {
             wipe(buffer, sz, Protected_wipe_context::EXECUTABLE);
@@ -631,7 +729,13 @@ void free_executable_buffer(
         }
     }
     VirtualFree( (void*) buffer, 0, MEM_RELEASE);
-#elif defined(__linux__)
+#elif defined(MEXCE_ARM64)
+    if (wipe) {
+        Apple_jit_write_scope writable;
+        wipe((void*)buffer, sz, Protected_wipe_context::EXECUTABLE);
+    }
+    apple_jit_arena().release((void*)buffer, sz);
+#elif defined(__linux__) || defined(__APPLE__)
     if (wipe && mprotect((void*)buffer, sz, PROT_READ | PROT_WRITE) == 0) {
         wipe((void*)buffer, sz, Protected_wipe_context::EXECUTABLE);
     }
@@ -862,7 +966,7 @@ public:
     options                 m_effective_options;
     bool                    m_is_constant_expression    = false;
     double                  m_constant_expression_value = 0.0;
-    bool                    m_sse2_simplify_mode        = false;
+    bool                    m_semantic_simplify_mode     = false;
     backend_type            m_backend_used              = backend_type::none;
     size_t                  m_buffer_size               = 0;
     elist_t                 m_elist;
@@ -2723,6 +2827,30 @@ void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
 inline
 void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
+#ifdef MEXCE_ARM64
+    auto f = it->f;
+    // Keep native operations in semantic form. As on x86, an integral outer
+    // exponent combines nested powers before a fractional inner power executes.
+    if (f->args[0]->type == Element_type::CCONST &&
+        f->args[1]->type == Element_type::CFUNC &&
+        f->args[1]->f->name == "pow")
+    {
+        auto inner = f->args[1]->f;
+        const double outer_exponent = f->args[0]->c->value;
+        if (inner->args[0]->type == Element_type::CCONST &&
+            std::isfinite(outer_exponent) &&
+            std::trunc(outer_exponent) == outer_exponent)
+        {
+            const double combined = inner->args[0]->c->value * outer_exponent;
+            if (std::isfinite(combined)) {
+                *f->args[0] = Element(make_intermediate_constant(ev, combined));
+                elist->erase(inner->args[0]);
+                elist->erase(f->args[1]);
+                link_arguments(*elist);
+            }
+        }
+    }
+#else
     auto& compilation = ev->active_compilation();
     auto f = it->f;
 
@@ -2894,6 +3022,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             *it = Element(f_opt);
         }
     }
+#endif
 }
 
 
@@ -3756,7 +3885,7 @@ inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::e
 {
     using namespace impl;
 
-#ifndef MEXCE_64
+#if !defined(MEXCE_64) || defined(MEXCE_ARM64)
     // SSE2 backend is only available on x64
     (void)first; (void)last; (void)prefer_x87;
     return false;
@@ -4714,6 +4843,198 @@ inline void compile_elist_sse2(impl::mexce_charstream& code_buffer, const impl::
 #endif
 
 
+#ifdef MEXCE_ARM64
+inline void emit_arm64_address(mexce_charstream& code, uintptr_t address)
+{
+    // x16 is an ABI scratch register; x18 is reserved by Apple.
+    code << (uint32_t)(0xd2800010 | ((address & 0xffff) << 5)); // movz x16, low16
+    for (unsigned half = 1; half < 4; ++half) {
+        code << (uint32_t)(0xf2800010 | (half << 21) |
+            (((address >> (half * 16)) & 0xffff) << 5));         // movk x16
+    }
+}
+
+inline double arm64_significand(double value)
+{
+    if (!std::isfinite(value)) {
+        return value;
+    }
+    int exponent;
+    return std::frexp(value, &exponent) * 2.0;
+}
+
+inline double arm64_bias(double value, double amount)
+{
+    return value / ((1.0 / amount - 2.0) * (1.0 - value) + 1.0);
+}
+
+inline double arm64_gain(double value, double amount)
+{
+    const double term = (1.0 / amount - 2.0) * (1.0 - 2.0 * value);
+    return value < 0.5 ? value / (term + 1.0) : (term - value) / (term - 1.0);
+}
+
+inline void emit_arm64_function(mexce_charstream& code, const Function& function)
+{
+    const auto& name = function.name;
+    if (name == "pow" && function.args[0]->type == Element_type::CCONST) {
+        const double exponent = function.args[0]->c->value;
+        if (exponent == 0.5 || exponent == -0.5) {
+            code << uint32_t(0x1e61c000); // fsqrt d0, d0
+            if (exponent < 0.0) {
+                code << uint32_t(0x1e6e1001); // fmov d1, #1.0
+                code << uint32_t(0x1e601820); // fdiv d0, d1, d0
+            }
+            return;
+        }
+        if (std::trunc(exponent) == exponent && std::abs(exponent) <= 65536.0) {
+            uint32_t remaining = (uint32_t)std::abs(exponent);
+            if (remaining == 0) {
+                code << uint32_t(0x1e6e1000); // fmov d0, #1.0
+                return;
+            }
+            while ((remaining & 1) == 0) {
+                code << uint32_t(0x1e600800); // fmul d0, d0, d0
+                remaining >>= 1;
+            }
+            if (remaining > 1) {
+                code << uint32_t(0x1e604001); // fmov d1, d0
+                remaining >>= 1;
+                while (remaining != 0) {
+                    code << uint32_t(0x1e600800); // fmul d0, d0, d0
+                    if (remaining & 1) {
+                        code << uint32_t(0x1e600821); // fmul d1, d1, d0
+                    }
+                    remaining >>= 1;
+                }
+                code << uint32_t(0x1e604020); // fmov d0, d1
+            }
+            if (exponent < 0.0) {
+                code << uint32_t(0x1e6e1001); // fmov d1, #1.0
+                code << uint32_t(0x1e601820); // fdiv d0, d1, d0
+            }
+            return;
+        }
+    }
+    // d0 and d1 contain arguments in source order. Direct scalar operations
+    // retain double precision without implicit multiply-add contraction.
+    static const map<string, uint32_t> instructions = {
+        {"add", 0x1e612800}, {"sub", 0x1e613800},
+        {"mul", 0x1e610800}, {"div", 0x1e611800},
+        {"neg", 0x1e614000}, {"abs", 0x1e60c000}, {"sqrt", 0x1e61c000},
+        {"floor", 0x1e654000}, {"ceil", 0x1e64c000},
+        {"round", 0x1e644000}, {"int", 0x1e644000}, {"trunc", 0x1e65c000},
+    };
+    const auto instruction = instructions.find(name);
+    if (instruction != instructions.end()) {
+        code << instruction->second;
+        return;
+    }
+
+    using unary_function = double (*)(double);
+    using binary_function = double (*)(double, double);
+    static const map<string, unary_function> unary_functions = {
+        {"sin", static_cast<unary_function>(std::sin)},
+        {"cos", static_cast<unary_function>(std::cos)},
+        {"tan", static_cast<unary_function>(std::tan)},
+        {"exp", static_cast<unary_function>(std::exp)},
+        {"ln", static_cast<unary_function>(std::log)},
+        {"log", static_cast<unary_function>(std::log)},
+        {"log2", static_cast<unary_function>(std::log2)},
+        {"log10", static_cast<unary_function>(std::log10)},
+        {"expn", static_cast<unary_function>(std::logb)},
+        {"sfc", arm64_significand},
+        {"sign", [](double value) -> double {
+            return std::isnan(value) ? 1.0 : (double)((value > 0.0) - (value < 0.0));
+        }},
+        {"signp", [](double value) -> double { return !(value <= 0.0); }},
+    };
+    // Preserve the existing x87 unordered-comparison and operand-selection
+    // semantics, including the choice of operand for NaNs and signed zeros.
+    static const map<string, binary_function> binary_functions = {
+        {"pow", static_cast<binary_function>(std::pow)},
+        {"mod", static_cast<binary_function>(std::fmod)},
+        {"logb", mexce_libm_logb}, {"ylog2", mexce_libm_ylog2},
+        {"bias", arm64_bias}, {"gain", arm64_gain},
+        {"bnd", [](double value, double period) -> double {
+            const double remainder = std::fmod(value, period);
+            return remainder < 0.0 ? remainder + period : remainder;
+        }},
+        {"lt", [](double a, double b) -> double { return a < b; }},
+        {"le", [](double a, double b) -> double { return a <= b; }},
+        {"gt", [](double a, double b) -> double { return !(a <= b); }},
+        {"ge", [](double a, double b) -> double { return !(a < b); }},
+        {"eq", [](double a, double b) -> double { return !(a < b) && !(a > b); }},
+        {"ne", [](double a, double b) -> double { return a < b || a > b; }},
+        {"min", [](double a, double b) -> double { return !(b >= a) ? b : a; }},
+        {"max", [](double a, double b) -> double { return !(b >= a) ? a : b; }},
+    };
+    if (function.num_args == 1) {
+        emit_arm64_address(code, reinterpret_cast<uintptr_t>(unary_functions.at(name)));
+    }
+    else {
+        emit_arm64_address(code, reinterpret_cast<uintptr_t>(binary_functions.at(name)));
+    }
+    code << uint32_t(0xd63f0200); // blr x16; result in d0
+}
+
+inline void compile_elist_arm64(
+    mexce_charstream& code,
+    elist_const_it_t first,
+    elist_const_it_t last)
+{
+    code << uint32_t(0xa9bf7bfd); // stp x29, x30, [sp, #-16]!
+    code << uint32_t(0x910003fd); // mov x29, sp
+    // Each live value has its own 16-byte stack slot. This keeps SP aligned
+    // across libm calls and removes the x87/SSE register-depth limitation.
+    for (auto it = first; it != last; ++it) {
+        if (it->type == Element_type::CFUNC) {
+            if (it->f->num_args == 2) {
+                code << uint32_t(0xfc4107e1); // ldr d1, [sp], #16
+            }
+            code << uint32_t(0xfd4003e0);     // ldr d0, [sp]
+            emit_arm64_function(code, *it->f);
+            if (it->f->cse_store_addr) {
+                emit_arm64_address(code, reinterpret_cast<uintptr_t>(it->f->cse_store_addr));
+                code << uint32_t(0xfd000200); // str d0, [x16]
+            }
+            code << uint32_t(0xfd0003e0);     // str d0, [sp]
+            continue;
+        }
+
+        const auto address = it->type == Element_type::CCONST ? it->c->address : it->v->address;
+        const auto type = it->type == Element_type::CCONST ? M64FP : it->v->numeric_data_type;
+        emit_arm64_address(code, reinterpret_cast<uintptr_t>(address));
+        switch (type) {
+            case M64FP:
+                code << uint32_t(0xfd400200); // ldr d0, [x16]
+                break;
+            case M32FP:
+                code << uint32_t(0xbd400200); // ldr s0, [x16]
+                code << uint32_t(0x1e22c000); // fcvt d0, s0
+                break;
+            case M16INT:
+                code << uint32_t(0x79800210); // ldrsh x16, [x16]
+                code << uint32_t(0x9e620200); // scvtf d0, x16
+                break;
+            case M32INT:
+                code << uint32_t(0xb9800210); // ldrsw x16, [x16]
+                code << uint32_t(0x9e620200); // scvtf d0, x16
+                break;
+            case M64INT:
+                code << uint32_t(0xf9400210); // ldr x16, [x16]
+                code << uint32_t(0x9e620200); // scvtf d0, x16
+                break;
+        }
+        code << uint32_t(0xfc1f0fe0);         // str d0, [sp, #-16]!
+    }
+    code << uint32_t(0xfc4107e0);             // ldr d0, [sp], #16
+    code << uint32_t(0xa8c17bfd);             // ldp x29, x30, [sp], #16
+    code << uint32_t(0xd65f03c0);             // ret
+}
+#endif
+
+
 inline string infix_operator_to_function_name(const string& op)
 {
     static map<string, string> op_map = {
@@ -4971,9 +5292,9 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         }
     }
 
-    // === SSE2 simplification: reconstruct simplified elist ===
+    // Reconstruct a semantic list for SSE2 and AArch64 lowering.
     // Instead of generating x87 code, build a new elist from the simplified terms.
-    if (compilation.m_sse2_simplify_mode) {
+    if (compilation.m_semantic_simplify_mode) {
         // Reconstruct elist in postfix order
         elist_t result;
 
@@ -5406,6 +5727,26 @@ inline Function Bias()
 inline const map<string, Function>& function_map()
 {
     static const map<string, Function> fname_map = [] {
+#ifdef MEXCE_ARM64
+        map<string, Function> ret;
+        uint8_t unused = 0;
+        for (const char* name : {
+            "sin", "cos", "tan", "abs", "sign", "signp", "expn", "sfc", "sqrt",
+            "exp", "log", "log2", "ln", "log10", "floor", "ceil", "round", "int", "trunc", "neg"})
+        {
+            ret.emplace(name, Function(0, name, 1, 0, 0, &unused));
+        }
+        for (const char* name : {
+            "lt", "gt", "le", "ge", "eq", "ne", "logb", "ylog2", "max", "min",
+            "mod", "bnd", "bias", "gain"})
+        {
+            ret.emplace(name, Function(0, name, 2, 0, 0, &unused));
+        }
+        for (const char* name : {"add", "sub", "mul", "div"}) {
+            ret.emplace(name, Function(0, name, 2, 0, 0, &unused, asmd_optimizer));
+        }
+        ret.emplace("pow", Function(0, "pow", 2, 0, 0, &unused, pow_optimizer));
+#else
         Function f[] = {
             Sin(), Cos(), Tan(), Abs(), Sign(), Signp(), Expn(), Sfc(), Sqrt(), Pow(), Exp(), Lt(), Gt(), Le(), Ge(), Eq(), Ne(),
             Log(), Log2(), Ln(), Log10(), Logb(), Ylog2(), Max(), Min(), Floor(), Ceil(), Round(), Int(), Trunc(), Mod(),
@@ -5416,6 +5757,7 @@ inline const map<string, Function>& function_map()
             assert(ret.find(e.name) == ret.end()); //if it fails, some functions share the same name.
             ret.insert(make_pair(e.name, e));
         }
+#endif
         return ret;
     }();
     return fname_map;
@@ -5427,6 +5769,7 @@ inline shared_ptr<Function> make_function(evaluator* ev, const string& name) {
     auto fn_it = function_map().find(name);
     assert(fn_it != function_map().end());
     Function configured = fn_it->second;
+#ifndef MEXCE_ARM64
     const auto& selected = compilation.m_effective_options;
     if (name == "sin") {
         configured = Sin(selected.use_libm_sin);
@@ -5470,6 +5813,7 @@ inline shared_ptr<Function> make_function(evaluator* ev, const string& name) {
         configured = Pow(selected.use_libm_generic_pow);
         configured.m_requires_x87_backend = !selected.use_libm_generic_pow;
     }
+#endif
     auto new_func = make_shared<Function>(configured);
     new_func->id = compilation.m_next_element_id++;
     return new_func;
@@ -5533,6 +5877,7 @@ inline Semantic_compiler::Semantic_compiler(
 {
     m_active_compilation_reset.set(m_candidate.get());
     m_graph_builder.reset(*m_candidate);
+#ifndef MEXCE_ARM64
     if (protected_wipe) {
         options fallback_options = effective_options;
         fallback_options.prefer_x87 = true;
@@ -5544,6 +5889,7 @@ inline Semantic_compiler::Semantic_compiler(
             Compilation_state::Protected_storage_role::FALLBACK));
         m_fallback_graph_builder.reset(*m_fallback_candidate);
     }
+#endif
 }
 
 
@@ -6666,7 +7012,7 @@ impl::Semantic_compilation_result evaluator::finish_semantic_compilation(
 compile_candidate:
     auto& m_elist                   = candidate->m_elist;
     auto& effective_options         = candidate->m_effective_options;
-    auto& m_sse2_simplify_mode      = candidate->m_sse2_simplify_mode;
+    auto& m_semantic_simplify_mode   = candidate->m_semantic_simplify_mode;
     auto& is_constant_expression    = candidate->m_is_constant_expression;
     auto& constant_expression_value = candidate->m_constant_expression_value;
     auto& evaluate_fptr             = candidate->m_evaluate_fptr;
@@ -6682,17 +7028,23 @@ compile_candidate:
     // Run Common Subexpression Elimination (CSE)
     // This must run before destructive optimizers (asmd, pow) to catch
     // identical subtrees like div(2.2, y).
+#ifndef MEXCE_ARM64
     if (effective_options.enable_cse) {
         run_cse(this, m_elist);
     }
+#endif
 
     // Check if the expression is SSE2-compatible BEFORE running optimizers.
     // For SSE2, we still want the algebraic simplifications from asmd_optimizer,
     // but we want it to output a simplified elist instead of x87 code.
-    m_sse2_simplify_mode = is_sse2_compatible(
+#ifdef MEXCE_ARM64
+    m_semantic_simplify_mode = true;
+#else
+    m_semantic_simplify_mode = is_sse2_compatible(
         m_elist.begin(), m_elist.end(), effective_options.prefer_x87);
+#endif
 
-    bool need_fallback_check = m_sse2_simplify_mode;
+    bool need_fallback_check = m_semantic_simplify_mode;
 
     // Fast-math algebraic simplifications - run in a SEPARATE PASS before any optimizer
     // modifies the expression structure. This must happen before asmd_optimizer which
@@ -6859,7 +7211,7 @@ compile_candidate:
                 }
             }
 
-            // Run optimizers. asmd_optimizer checks m_sse2_simplify_mode to decide
+            // Run optimizers. asmd_optimizer checks m_semantic_simplify_mode to decide
             // whether to output x87 code (for x87 backend) or a simplified elist (for SSE2).
             // pow_optimizer always runs because it handles special cases
             // (negative bases, nested powers) that std::pow() doesn't handle correctly.
@@ -6912,6 +7264,16 @@ compile_candidate:
     }
 
     fallback_candidate.reset();
+
+#ifdef MEXCE_ARM64
+    // Native lowering retains semantic nodes throughout optimization. Share
+    // values only after rewrites, so simplification cannot erase a CSE producer
+    // or hide a nested power that must combine before evaluating its inner root.
+    if (effective_options.enable_cse) {
+        run_cse(this, m_elist);
+        link_arguments(m_elist);
+    }
+#endif
 
     is_constant_expression = m_elist.size() == 1 && m_elist.back().type == Element_type::CCONST;
     if (is_constant_expression) {
@@ -6990,11 +7352,33 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
 {
     using namespace impl;
     auto& compilation       = active_compilation();
-    auto& effective_options = compilation.m_effective_options;
     auto& m_buffer_size     = compilation.m_buffer_size;
     auto& evaluate_fptr     = compilation.m_evaluate_fptr;
     auto& compiled_backend  = compilation.m_backend_used;
 
+#ifdef MEXCE_ARM64
+    mexce_charstream code_buffer;
+    compile_elist_arm64(code_buffer, first, last);
+    m_buffer_size = code_buffer.buf.size();
+    if (compilation.fail_executable_allocation()) {
+        throw std::bad_alloc();
+    }
+    auto buffer = get_executable_buffer(m_buffer_size);
+    if (buffer == MAP_FAILED) {
+        throw std::bad_alloc();
+    }
+    copy_executable_buffer(buffer, code_buffer.buf.data(), m_buffer_size);
+    if (compilation.fail_executable_finalization()) {
+        free_executable_buffer(
+            reinterpret_cast<double (*)()>(buffer),
+            m_buffer_size,
+            compilation.protected_wipe());
+        throw Executable_memory_error("Injected executable finalization failure");
+    }
+    evaluate_fptr = lock_executable_buffer(buffer, m_buffer_size, compilation.protected_wipe());
+    compiled_backend = backend_type::arm64;
+#else
+    auto& effective_options = compilation.m_effective_options;
 #ifdef MEXCE_64
     // Check if we can use the faster SSE2 backend
     bool use_sse2 = is_sse2_compatible(first, last, effective_options.prefer_x87);
@@ -7050,13 +7434,13 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
         if (!buffer) {
             throw std::bad_alloc();
         }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
         if (buffer == MAP_FAILED) {
             throw std::bad_alloc();
         }
 #endif
 
-        memcpy(buffer, code_buffer.buf.data(), m_buffer_size);
+        copy_executable_buffer(buffer, code_buffer.buf.data(), m_buffer_size);
         if (compilation.fail_executable_finalization()) {
             free_executable_buffer(
                 reinterpret_cast<double (*)()>(buffer),
@@ -7161,13 +7545,13 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     if (!buffer) {
         throw std::bad_alloc();
     }
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(__APPLE__)
     if (buffer == MAP_FAILED) {
         throw std::bad_alloc();
     }
 #endif
 
-    memcpy(buffer, code_buffer.buf.data(), m_buffer_size);
+    copy_executable_buffer(buffer, code_buffer.buf.data(), m_buffer_size);
 
     if (compilation.fail_executable_finalization()) {
         free_executable_buffer(
@@ -7180,6 +7564,7 @@ void evaluator::compile_and_finalize_elist(impl::elist_const_it_t first, impl::e
     evaluate_fptr = lock_executable_buffer(
         buffer, m_buffer_size, compilation.protected_wipe());
     compiled_backend = backend_type::x87;
+#endif
 }
 
 } // mexce

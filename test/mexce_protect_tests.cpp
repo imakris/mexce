@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -19,6 +20,13 @@
     #include <dirent.h>
     #include <sys/stat.h>
     #include <unistd.h>
+#endif
+
+#ifdef __APPLE__
+    #include <limits.h>
+    #include <membership.h>
+    #include <sys/acl.h>
+    #include <uuid/uuid.h>
 #endif
 
 
@@ -259,11 +267,119 @@ size_t file_size(const Native_path& path)
     return stat(path.c_str(), &status) == 0 ? static_cast<size_t>(status.st_size) : 0;
 }
 
+#ifdef __APPLE__
+bool everyone_uuid(uuid_t identity)
+{
+    const char everyone[] = "everyone";
+    return mbr_identifier_to_uuid(
+        ID_TYPE_GROUPNAME, everyone, sizeof(everyone), identity) == 0;
+}
+
+
+bool acl_entry_matches(
+    acl_entry_t entry, const uuid_t identity, acl_tag_t tag, bool inherited)
+{
+    acl_tag_t actual_tag;
+    acl_permset_mask_t permissions;
+    acl_flagset_t flags;
+    if (acl_get_tag_type(entry, &actual_tag) != 0 || actual_tag != tag ||
+        acl_get_permset_mask_np(entry, &permissions) != 0 ||
+        acl_get_flagset_np(entry, &flags) != 0)
+    {
+        return false;
+    }
+    constexpr acl_permset_mask_t required = ACL_READ_DATA | ACL_WRITE_DATA | ACL_APPEND_DATA;
+    void* qualifier = acl_get_qualifier(entry);
+    const bool matches = qualifier && std::memcmp(qualifier, identity, sizeof(uuid_t)) == 0 &&
+        (permissions & required) == required &&
+        acl_get_flag_np(flags, ACL_ENTRY_INHERITED) == (inherited ? 1 : 0);
+    acl_free(qualifier);
+    return matches;
+}
+
+
+bool owner_only_acl(const Native_path& path)
+{
+    uuid_t owner;
+    uuid_t everyone;
+    if (mbr_uid_to_uuid(geteuid(), owner) != 0 || !everyone_uuid(everyone)) {
+        return false;
+    }
+    acl_t acl = acl_get_file(path.c_str(), ACL_TYPE_EXTENDED);
+    if (!acl) {
+        return false;
+    }
+    acl_entry_t allow_owner;
+    acl_entry_t deny_everyone;
+    const bool restricted = acl_get_entry(acl, 0, &allow_owner) == 0 &&
+        acl_get_entry(acl, 1, &deny_everyone) == 0 &&
+        acl_entry_matches(allow_owner, owner, ACL_EXTENDED_ALLOW, false) &&
+        acl_entry_matches(deny_everyone, everyone, ACL_EXTENDED_DENY, false);
+    acl_free(acl);
+    return restricted;
+}
+
+
+void grant_inherited_access(const Native_path& directory)
+{
+    uuid_t everyone;
+    if (!everyone_uuid(everyone)) {
+        throw std::runtime_error("test setup could not resolve the everyone principal");
+    }
+    acl_t acl = acl_init(1);
+    if (!acl) {
+        throw std::runtime_error("test setup could not allocate an ACL");
+    }
+    acl_entry_t entry;
+    acl_flagset_t flags;
+    const bool installed = acl_create_entry(&acl, &entry) == 0 &&
+        acl_set_tag_type(entry, ACL_EXTENDED_ALLOW) == 0 &&
+        acl_set_qualifier(entry, everyone) == 0 &&
+        acl_set_permset_mask_np(entry, ACL_READ_DATA | ACL_WRITE_DATA | ACL_APPEND_DATA) == 0 &&
+        acl_get_flagset_np(entry, &flags) == 0 &&
+        acl_add_flag_np(flags, ACL_ENTRY_FILE_INHERIT) == 0 &&
+        acl_add_flag_np(flags, ACL_ENTRY_DIRECTORY_INHERIT) == 0 &&
+        acl_add_flag_np(flags, ACL_ENTRY_ONLY_INHERIT) == 0 &&
+        acl_set_file(directory.c_str(), ACL_TYPE_EXTENDED, acl) == 0;
+    acl_free(acl);
+    if (!installed) {
+        throw std::runtime_error("test setup could not install an inheritable ACL");
+    }
+}
+
+
+bool has_inherited_access(const Native_path& path)
+{
+    uuid_t everyone;
+    if (!everyone_uuid(everyone)) {
+        return false;
+    }
+    acl_t acl = acl_get_file(path.c_str(), ACL_TYPE_EXTENDED);
+    if (!acl) {
+        return false;
+    }
+    bool granted = false;
+    acl_entry_t entry;
+    for (int index = 0; acl_get_entry(acl, index, &entry) == 0; ++index) {
+        if (acl_entry_matches(entry, everyone, ACL_EXTENDED_ALLOW, true)) {
+            granted = true;
+            break;
+        }
+    }
+    acl_free(acl);
+    return granted;
+}
+#endif
+
 
 bool owner_only(const Native_path& path)
 {
     struct stat status;
-    return stat(path.c_str(), &status) == 0 && (status.st_mode & 0777) == 0600;
+    return stat(path.c_str(), &status) == 0 && (status.st_mode & 0777) == 0600
+#ifdef __APPLE__
+        && owner_only_acl(path)
+#endif
+        ;
 }
 
 
@@ -274,7 +390,16 @@ Native_path make_directory()
     if (!mkdtemp(pattern.data())) {
         throw std::runtime_error("test setup could not create a directory");
     }
+#ifdef __APPLE__
+    char resolved[PATH_MAX];
+    if (!realpath(pattern.data(), resolved)) {
+        rmdir(pattern.data());
+        throw std::runtime_error("test setup could not resolve its temporary directory");
+    }
+    return resolved;
+#else
     return pattern.data();
+#endif
 }
 
 
@@ -293,8 +418,11 @@ size_t temporary_count(const Native_path& directory)
     size_t count = 0;
     while (const dirent* entry = readdir(entries)) {
         const std::string name(entry->d_name);
-        if (name.compare(0, 7, ".mexce-") == 0 &&
-            name.size() >= 4 && name.compare(name.size() - 4, 4, ".tmp") == 0)
+        if (name.compare(0, 7, ".mexce-") == 0
+#ifndef __APPLE__
+            && name.size() >= 4 && name.compare(name.size() - 4, 4, ".tmp") == 0
+#endif
+        )
         {
             ++count;
         }
@@ -463,6 +591,52 @@ void test_expression_validation(Test_suite& suite)
             "parser diagnostic does not print source content");
     }
 }
+
+
+#ifdef __APPLE__
+void test_inherited_key_permissions(Test_suite& suite)
+{
+    for (bool grant_before_publication : {false, true}) {
+        Fixture fixture;
+        const std::string scenario = grant_before_publication ? "late inherited ACL: " : "initial inherited ACL: ";
+        if (chmod(fixture.root.c_str(), 0755) != 0) {
+            throw std::runtime_error("test setup could not make its directory searchable");
+        }
+        mexce::issuer::Test_hooks hooks;
+        if (grant_before_publication) {
+            // Change inheritance after creation and writing, immediately before publication.
+            hooks.after_temporaries_written = [&](const Native_path&, const Native_path&) {
+                grant_inherited_access(fixture.root);
+            };
+        }
+        else {
+            grant_inherited_access(fixture.root);
+        }
+        char original_directory[PATH_MAX];
+        if (!getcwd(original_directory, sizeof(original_directory))) {
+            throw std::runtime_error("test setup could not read the working directory");
+        }
+        mexce::issuer::protect_expression(
+            fixture.expression, fixture.schema, fixture.program, fixture.key,
+            mexce::issuer::Test_failure::NONE, &hooks);
+        suite.expect(owner_only(fixture.key), scenario + "owner allow and everyone deny precede inherited grants");
+        suite.expect(has_inherited_access(fixture.program), scenario + "program proves parent grant is active");
+        suite.expect(file_size(fixture.key) == 32, scenario + "published key is complete");
+        FILE* key = std::fopen(fixture.key.c_str(), "rb");
+        uint8_t key_bytes[32];
+        const bool owner_can_read = key && std::fread(key_bytes, 1, sizeof(key_bytes), key) == sizeof(key_bytes);
+        if (key) {
+            std::fclose(key);
+        }
+        suite.expect(owner_can_read, scenario + "owner can read key");
+        char final_directory[PATH_MAX];
+        suite.expect(getcwd(final_directory, sizeof(final_directory)) &&
+            std::strcmp(original_directory, final_directory) == 0,
+            scenario + "caller working directory is unchanged");
+        suite.expect(temporary_count(fixture.root) == 0, scenario + "no named temporary remains");
+    }
+}
+#endif
 
 
 void test_schema_validation(Test_suite& suite)
@@ -745,6 +919,9 @@ int main()
 {
     Test_suite suite;
     suite.run("success and permissions", [&] { test_success_and_permissions(suite); });
+#ifdef __APPLE__
+    suite.run("inherited key permissions", [&] { test_inherited_key_permissions(suite); });
+#endif
     suite.run("expression validation", [&] { test_expression_validation(suite); });
     suite.run("schema validation", [&] { test_schema_validation(suite); });
     suite.run("output validation", [&] { test_output_validation(suite); });

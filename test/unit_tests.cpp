@@ -67,6 +67,7 @@ extern "C" int mexce_test_override_mprotect(void* addr, size_t len, int prot)
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Define M_PI if it's not available (e.g., on MSVC)
@@ -730,6 +731,9 @@ void test_empty_state_after_failed_replacement(TestSuite& suite)
 
 void test_late_compilation_failure_reference_state(TestSuite& suite)
 {
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+    (void)suite;
+#else
     mexce::evaluator eval;
     double a = 1.25;
     eval.bind(a, "a");
@@ -755,6 +759,7 @@ void test_late_compilation_failure_reference_state(TestSuite& suite)
         [&] { (void)eval.evaluate(); },
         "No expression has been compiled."
     );
+#endif
 }
 
 void test_unbind_referenced_and_variadic(TestSuite& suite) {
@@ -862,11 +867,16 @@ void test_fpu_stack_overflow(TestSuite& suite) {
         expr = "max(val, " + expr + ")";
     }
 
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+    eval.set_expression(expr);
+    suite.expect_equal("arm64_depth_9", eval.evaluate(), val);
+#else
     suite.expect_throw<std::overflow_error>(
         "fpu_stack_overflow_depth_9",
         [&] { eval.set_expression(expr); },
         "Expression too complex for x87 FPU (stack overflow)"
     );
+#endif
 }
 
 // Test SSE4.1 rounding functions with SSE2 backend explicitly enabled
@@ -1014,11 +1024,11 @@ void test_options_api(TestSuite& suite) {
 }
 
 // Test Common Subexpression Elimination (CSE)
-// Note: CSE uses x87 store instructions, so must use x87 backend
+// Exercise the x87 preference on x86 and native CSE stores on Apple Silicon.
 void test_cse_coverage(TestSuite& suite) {
     mexce::evaluator eval;
     eval.enable_cse();
-    eval.use_x87_backend();  // CSE requires x87 backend
+    eval.use_x87_backend();
 
     double a = 2.0, b = 3.0, c = 4.0;
     eval.bind(a, "a", b, "b", c, "c");
@@ -1056,13 +1066,18 @@ void test_source_free_fallback_ownership(TestSuite& suite)
         expected = expected * a + coefficient;
     }
 
-    suite.expect_true("post_optimizer_fallback_backend", eval.get_backend() == mexce::backend_type::x87);
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+    const auto expected_backend = mexce::backend_type::arm64;
+#else
+    const auto expected_backend = mexce::backend_type::x87;
+#endif
+    suite.expect_true("post_optimizer_backend", eval.get_backend() == expected_backend);
     suite.expect_near("post_optimizer_fallback_value", eval.evaluate(), expected);
     suite.expect_true("fallback_does_not_mutate_options", !eval.get_options().prefer_x87);
 
     eval.enable_cse();
     eval.set_expression("(" + polynomial + ")+sin(a)+sin(a)");
-    suite.expect_true("cse_fallback_backend", eval.get_backend() == mexce::backend_type::x87);
+    suite.expect_true("cse_polynomial_backend", eval.get_backend() == expected_backend);
     suite.expect_near("cse_fallback_value", eval.evaluate(), expected + 2.0 * std::sin(a));
 }
 
@@ -1180,6 +1195,258 @@ void test_numeric_data_types(TestSuite& suite) {
     suite.expect_near("x87_mixed_types", eval.evaluate(), expected);
 }
 
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+
+template<typename T>
+void test_arm64_binding_type(TestSuite& suite, const std::string& name)
+{
+    T value = 0;
+    mexce::evaluator eval;
+    eval.bind(value, "value");
+    eval.set_expression("value");
+    suite.expect_true(name + "_backend", eval.get_backend() == mexce::backend_type::arm64);
+    suite.expect_true(name + "_machine_code", !eval.get_byte_representation().empty());
+
+    const T values[] = {
+        static_cast<T>(-7), static_cast<T>(3),
+        (std::numeric_limits<T>::lowest)(), (std::numeric_limits<T>::max)()
+    };
+    for (T next : values) {
+        value = next;
+        suite.expect_equal(name + "_load", eval.evaluate(), static_cast<double>(value));
+    }
+}
+
+void test_arm64_native_arithmetic(TestSuite& suite)
+{
+    test_arm64_binding_type<double>(suite, "arm64_double");
+    test_arm64_binding_type<float>(suite, "arm64_float");
+    test_arm64_binding_type<int16_t>(suite, "arm64_int16");
+    test_arm64_binding_type<int32_t>(suite, "arm64_int32");
+    test_arm64_binding_type<int64_t>(suite, "arm64_int64");
+
+    double x = -7.5;
+    double y = 2.0;
+    mexce::evaluator eval;
+    eval.bind(x, "x", y, "y");
+    const char* expressions[] = {"x-y", "y-x", "x/y", "y/x", "logb(y,abs(x))", "ylog2(x,y)"};
+    const double expected[] = {x - y, y - x, x / y, y / x, std::log(std::abs(x)) / std::log(y), x * std::log2(y)};
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+        eval.set_expression(expressions[i]);
+        suite.expect_true("arm64_arithmetic_backend", eval.get_backend() == mexce::backend_type::arm64);
+        suite.expect_near(std::string("arm64_operand_order_") + expressions[i], eval.evaluate(), expected[i]);
+    }
+
+    for (bool prefer_x87 : {false, true}) {
+        eval.opts().prefer_x87 = prefer_x87;
+        eval.opts().set_use_libm(false);
+        eval.set_expression("sin(x)+cos(y)");
+        suite.expect_true("arm64_compatibility_preference", eval.get_backend() == mexce::backend_type::arm64);
+        suite.expect_near("arm64_compatibility_result", eval.evaluate(), std::sin(x) + std::cos(y));
+        suite.expect_true("arm64_preference_unchanged", eval.get_options().prefer_x87 == prefer_x87);
+        suite.expect_true("arm64_libm_option_unchanged", !eval.get_options().use_libm_sin);
+    }
+}
+
+void test_arm64_ieee_values(TestSuite& suite)
+{
+    double x = -0.0;
+    double y = 3.0;
+    mexce::evaluator eval;
+    eval.bind(x, "x", y, "y");
+    for (const char* expression : {"x", "x*y", "x/y", "sin(x)", "sqrt(x)"}) {
+        eval.set_expression(expression);
+        const double result = eval.evaluate();
+        suite.expect_true(std::string("arm64_negative_zero_") + expression,
+            result == 0.0 && std::signbit(result));
+    }
+    eval.set_expression("neg(x)");
+    suite.expect_true("arm64_neg_negative_zero", eval.evaluate() == 0.0 && !std::signbit(eval.evaluate()));
+    eval.set_expression("abs(x)");
+    suite.expect_true("arm64_abs_negative_zero", eval.evaluate() == 0.0 && !std::signbit(eval.evaluate()));
+
+    x = -std::numeric_limits<double>::infinity();
+    eval.set_expression("x/y");
+    suite.expect_equal("arm64_negative_infinity", eval.evaluate(), x);
+    eval.set_expression("abs(x)");
+    suite.expect_equal("arm64_abs_infinity", eval.evaluate(), -x);
+    eval.set_expression("x-x");
+    suite.expect_true("arm64_infinity_cancellation_strict", std::isnan(eval.evaluate()));
+
+    x = std::numeric_limits<double>::quiet_NaN();
+    for (const char* expression : {"x+y", "x*y", "x/y", "neg(x)", "abs(x)", "sin(x)"}) {
+        eval.set_expression(expression);
+        suite.expect_true(std::string("arm64_nan_") + expression, std::isnan(eval.evaluate()));
+    }
+    eval.enable_fast_math();
+    eval.set_expression("x-x");
+    suite.expect_equal("arm64_nan_cancellation_fast", eval.evaluate(), 0.0);
+    x = 0.0;
+    eval.set_expression("x/x");
+    suite.expect_equal("arm64_zero_division_fast", eval.evaluate(), 1.0);
+    eval.disable_fast_math();
+    eval.set_expression("x/x");
+    suite.expect_true("arm64_zero_division_strict", std::isnan(eval.evaluate()));
+}
+
+double evaluate_with_arm64_saved_registers(TestSuite& suite, mexce::evaluator& eval)
+{
+    // AAPCS64 preserves x19-x28 and the low 64 bits of v8-v15 across calls.
+    register uint64_t saved_x19 __asm__("x19") = 0x13579;
+    register uint64_t saved_x20 __asm__("x20") = 0x24680;
+    register uint64_t saved_x27 __asm__("x27") = 0x35791;
+    register uint64_t saved_x28 __asm__("x28") = 0x46802;
+    register double saved_d8 __asm__("d8") = 1.25;
+    register double saved_d9 __asm__("d9") = -2.5;
+    register double saved_d14 __asm__("d14") = 3.75;
+    register double saved_d15 __asm__("d15") = -4.125;
+    __asm__ volatile(""
+        : "+r"(saved_x19), "+r"(saved_x20), "+r"(saved_x27), "+r"(saved_x28),
+          "+w"(saved_d8), "+w"(saved_d9), "+w"(saved_d14), "+w"(saved_d15));
+    const double result = eval.evaluate();
+    __asm__ volatile(""
+        : "+r"(saved_x19), "+r"(saved_x20), "+r"(saved_x27), "+r"(saved_x28),
+          "+w"(saved_d8), "+w"(saved_d9), "+w"(saved_d14), "+w"(saved_d15));
+    suite.expect_true("arm64_callee_saved_integer_registers",
+        saved_x19 == 0x13579 && saved_x20 == 0x24680 && saved_x27 == 0x35791 && saved_x28 == 0x46802);
+    suite.expect_true("arm64_callee_saved_fp_registers",
+        saved_d8 == 1.25 && saved_d9 == -2.5 && saved_d14 == 3.75 && saved_d15 == -4.125);
+    return result;
+}
+
+void test_arm64_deep_calls_and_cse(TestSuite& suite)
+{
+    double a = 1.5;
+    double b = 4.0;
+    mexce::evaluator eval;
+    eval.bind(a, "a", b, "b");
+    std::string expression = "sin(b)";
+    for (int depth = 0; depth < 48; ++depth) {
+        expression = "logb(a,b+" + expression + ")";
+    }
+    eval.set_expression(expression);
+    suite.expect_true("arm64_deep_calls_backend", eval.get_backend() == mexce::backend_type::arm64);
+    for (int iteration = 0; iteration < 12; ++iteration) {
+        a = 1.5 + iteration * 0.01;
+        b = 4.0 + iteration * 0.125;
+        double expected = std::sin(b);
+        for (int depth = 0; depth < 48; ++depth) {
+            expected = std::log(b + expected) / std::log(a);
+        }
+        suite.expect_near("arm64_deep_libm_live_values", evaluate_with_arm64_saved_registers(suite, eval), expected);
+    }
+
+    eval.enable_cse();
+    eval.set_expression("sin(a+b)/cos(a-b)+sin(a+b)*cos(a-b)");
+    suite.expect_true("arm64_cse_backend", eval.get_backend() == mexce::backend_type::arm64);
+    for (int iteration = 0; iteration < 12; ++iteration) {
+        a = 0.25 + iteration * 0.02;
+        b = 0.75 + iteration * 0.01;
+        const double sine = std::sin(a + b);
+        const double cosine = std::cos(a - b);
+        suite.expect_near("arm64_cse_refresh_across_calls", eval.evaluate(), sine / cosine + sine * cosine);
+    }
+}
+
+void test_arm64_power_paths(TestSuite& suite)
+{
+    double base = -2.0;
+    double exponent = 3.0;
+    mexce::evaluator eval;
+    eval.bind(base, "base", exponent, "exponent");
+    eval.set_expression("pow(base,exponent)");
+    suite.expect_true("arm64_generic_power_backend", eval.get_backend() == mexce::backend_type::arm64);
+    suite.expect_equal("arm64_negative_base_integer_exponent", eval.evaluate(), -8.0);
+    exponent = 0.5;
+    suite.expect_true("arm64_negative_base_fractional_exponent", std::isnan(eval.evaluate()));
+    base = 4.0;
+    suite.expect_near("arm64_dynamic_exponent_update", eval.evaluate(), 2.0);
+
+    for (const char* power : {"-3", "0", "0.5", "-0.5", "1", "2", "7", "3.3"}) {
+        eval.set_expression(std::string("pow(base,") + power + ")");
+        suite.expect_near(std::string("arm64_constant_exponent_") + power,
+            eval.evaluate(), std::pow(base, std::stod(power)));
+    }
+
+    base = -0.0;
+    eval.set_expression("pow(base,0.5)");
+    const double square_root = eval.evaluate();
+    suite.expect_true("arm64_sqrt_power_negative_zero",
+        square_root == 0.0 && std::signbit(square_root));
+    eval.set_expression("pow(base,-0.5)");
+    suite.expect_equal("arm64_inverse_sqrt_power_negative_zero",
+        eval.evaluate(), -std::numeric_limits<double>::infinity());
+
+    for (int power : {-3, -2, -1, 0, 1, 2, 3}) {
+        eval.set_expression("pow(base," + std::to_string(power) + ")");
+        for (double zero : {0.0, -0.0}) {
+            base = zero;
+            double expected = 1.0;
+            for (int factor = 0; factor < std::abs(power); ++factor) {
+                expected *= base;
+            }
+            if (power < 0) {
+                expected = 1.0 / expected;
+            }
+            const double actual = eval.evaluate();
+            const std::string name = "arm64_integer_power_" + std::to_string(power) +
+                (std::signbit(zero) ? "_negative_zero" : "_positive_zero");
+            suite.expect_equal(name, actual, expected);
+            suite.expect_true(name + "_sign", std::signbit(actual) == std::signbit(expected));
+        }
+    }
+
+    base = -2.0;
+    eval.set_expression("((base^0.5)^2)");
+    suite.expect_equal("arm64_existing_nested_power_folding", eval.evaluate(), base);
+}
+
+void test_arm64_cse_after_optimization(TestSuite& suite)
+{
+    double x = -2.0;
+    mexce::evaluator eval;
+    eval.enable_cse();
+    eval.bind(x, "x");
+    eval.set_expression("((x^0.5)^2)+((x^0.5)^4)");
+    suite.expect_equal("arm64_cse_nested_power_folding", eval.evaluate(), 2.0);
+    x = -3.0;
+    suite.expect_equal("arm64_cse_nested_power_folding_refresh", eval.evaluate(), 6.0);
+
+    x = 3.0;
+    eval.set_expression("(x+0)+(x+0)");
+    suite.expect_equal("arm64_cse_rewritten_producer", eval.evaluate(), 6.0);
+    x = 5.0;
+    suite.expect_equal("arm64_cse_rewritten_producer_refresh", eval.evaluate(), 10.0);
+}
+
+void test_arm64_executable_lifetimes(TestSuite& suite)
+{
+    double value = 0.75;
+    std::vector<std::unique_ptr<mexce::evaluator>> evaluators;
+    for (int i = 0; i < 24; ++i) {
+        std::unique_ptr<mexce::evaluator> eval(new mexce::evaluator);
+        eval->bind(value, "value");
+        eval->set_expression("sin(value)+" + std::to_string(i));
+        evaluators.push_back(std::move(eval));
+    }
+    // Every other executable remains live while one evaluator publishes new code.
+    for (size_t replaced = 0; replaced < evaluators.size(); ++replaced) {
+        evaluators[replaced]->set_expression("cos(value)+" + std::to_string(replaced));
+        value += 0.01;
+        for (size_t i = 0; i < evaluators.size(); ++i) {
+            const double expected = (i <= replaced ? std::cos(value) : std::sin(value)) + i;
+            suite.expect_near("arm64_live_executable_replacement", evaluators[i]->evaluate(), expected);
+        }
+    }
+    evaluators.erase(evaluators.begin(), evaluators.begin() + 12);
+    for (size_t i = 0; i < evaluators.size(); ++i) {
+        suite.expect_near("arm64_live_executable_after_peer_destruction",
+            evaluators[i]->evaluate(), std::cos(value) + i + 12);
+    }
+}
+
+#endif
+
 } // namespace
 
 int main() {
@@ -1221,6 +1488,14 @@ int main() {
     test_sse2_neg_abs(suite);
     test_sse2_log_functions(suite);
     test_numeric_data_types(suite);
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+    test_arm64_native_arithmetic(suite);
+    test_arm64_ieee_values(suite);
+    test_arm64_deep_calls_and_cse(suite);
+    test_arm64_power_paths(suite);
+    test_arm64_cse_after_optimization(suite);
+    test_arm64_executable_lifetimes(suite);
+#endif
 
     if (!suite.failures.empty()) {
         std::cerr << "mexce unit tests failed (" << suite.failures.size() << ")" << std::endl;

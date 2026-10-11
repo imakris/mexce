@@ -79,7 +79,11 @@ uint64_t peak_working_set_bytes()
     if (usage.ru_maxrss <= 0) {
         throw std::runtime_error("getrusage returned an invalid peak");
     }
+#ifdef __APPLE__
+    return static_cast<uint64_t>(usage.ru_maxrss);
+#else
     return static_cast<uint64_t>(usage.ru_maxrss) * 1024;
+#endif
 #endif
 }
 

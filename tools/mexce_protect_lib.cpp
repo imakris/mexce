@@ -28,6 +28,19 @@
     #include <sys/stat.h>
     #include <unistd.h>
 #endif
+#ifdef __APPLE__
+    #include <Availability.h>
+    #include <membership.h>
+    #include <sys/acl.h>
+    #include <sys/clonefile.h>
+    #include <thread>
+#endif
+
+#ifdef __APPLE__
+// libpthread exports this per-thread cwd operation on macOS 10.12 and later;
+// its declaration lives in Apple's private/pthread/private.h, not the SDK.
+extern "C" int pthread_fchdir_np(int fd) __API_AVAILABLE(macos(10.12));
+#endif
 
 
 namespace mexce {
@@ -1013,6 +1026,118 @@ private:
 };
 
 
+#ifdef __APPLE__
+class Restricted_security
+{
+public:
+    Restricted_security()
+    :
+        m_acl(acl_init(2)),
+        m_security(filesec_init())
+    {
+        try {
+            if (!m_acl || !m_security) {
+                throw Issuer_error("cannot allocate owner-only key permissions");
+            }
+            uuid_t identities[2];
+            const char everyone[] = "everyone";
+            if (mbr_uid_to_uuid(geteuid(), identities[0]) != 0 ||
+                mbr_identifier_to_uuid(ID_TYPE_GROUPNAME, everyone,
+                    sizeof(everyone), identities[1]) != 0)
+            {
+                throw Issuer_error("cannot identify owner-only key principals");
+            }
+            const acl_permset_mask_t owner_permissions =
+                ACL_READ_DATA | ACL_WRITE_DATA | ACL_APPEND_DATA |
+                ACL_READ_EXTATTRIBUTES | ACL_WRITE_EXTATTRIBUTES |
+                ACL_READ_ATTRIBUTES | ACL_WRITE_ATTRIBUTES |
+                ACL_READ_SECURITY | ACL_WRITE_SECURITY | ACL_CHANGE_OWNER |
+                ACL_DELETE | ACL_SYNCHRONIZE;
+            for (int i = 0; i < 2; ++i) {
+                acl_entry_t entry;
+                if (acl_create_entry_np(&m_acl, &entry, i) != 0 ||
+                    acl_set_tag_type(entry,
+                        i == 0 ? ACL_EXTENDED_ALLOW : ACL_EXTENDED_DENY) != 0 ||
+                    acl_set_qualifier(entry, identities[i]) != 0 ||
+                    acl_set_permset_mask_np(entry,
+                        owner_permissions | (i == 0 ? 0 : ACL_EXECUTE)) != 0)
+                {
+                    throw Issuer_error("cannot establish owner-only key ACLs");
+                }
+            }
+            const mode_t mode = 0600;
+            if (filesec_set_property(m_security, FILESEC_MODE, &mode) != 0 ||
+                filesec_set_property(m_security, FILESEC_ACL, &m_acl) != 0)
+            {
+                throw Issuer_error("cannot establish owner-only key permissions");
+            }
+        }
+        catch (...) {
+            release();
+            throw;
+        }
+    }
+
+    ~Restricted_security() { release(); }
+
+    filesec_t get() const { return m_security; }
+
+private:
+    Restricted_security(const Restricted_security&);
+    Restricted_security& operator=(const Restricted_security&);
+
+    void release()
+    {
+        if (m_security) {
+            filesec_free(m_security);
+        }
+        if (m_acl) {
+            acl_free(m_acl);
+        }
+    }
+
+    acl_t     m_acl;
+    filesec_t m_security;
+};
+
+
+File_descriptor create_anonymous_temporary(int directory, bool restricted)
+{
+    uint8_t random[16];
+    randombytes_buf(random, sizeof(random));
+    const char hex[] = "0123456789abcdef";
+    std::string name = ".mexce-";
+    for (const uint8_t value : random) {
+        name += hex[value >> 4];
+        name += hex[value & 0x0f];
+    }
+    const int flags = O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW;
+    int descriptor = -1;
+    if (restricted) {
+        Restricted_security security;
+        // openx_np applies the ACL at creation but has no dirfd variant.
+        // A dedicated thread binds its own cwd without changing the caller's.
+        std::thread creator([&] {
+            if (pthread_fchdir_np(directory) == 0) {
+                descriptor = openx_np(name.c_str(), flags, security.get());
+            }
+        });
+        creator.join();
+    }
+    else {
+        descriptor = openat(directory, name.c_str(), flags, 0666);
+    }
+    File_descriptor file(descriptor);
+    if (!file.valid()) {
+        throw Issuer_error("cannot exclusively create an output temporary file");
+    }
+    if (unlinkat(directory, name.c_str(), 0) != 0) {
+        throw Issuer_error("cannot unlink an output temporary file before writing");
+    }
+    return file;
+}
+#endif
+
 class Temporary_file
 {
 public:
@@ -1020,7 +1145,13 @@ public:
     :
         m_directory(directory),
         m_file()
+#ifdef __APPLE__
+        , m_restricted(restricted)
+#endif
     {
+#ifdef __APPLE__
+        m_file = create_anonymous_temporary(directory, restricted);
+#else
         const mode_t mode = restricted ? 0600 : 0666;
         m_file = File_descriptor(openat(
             directory, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, mode));
@@ -1031,6 +1162,7 @@ public:
             }
             throw Issuer_error("cannot create an unnamed output temporary file");
         }
+#endif
         if (restricted && fchmod(m_file.get(), 0600) != 0) {
             throw Issuer_error("cannot establish owner-only key permissions");
         }
@@ -1040,6 +1172,16 @@ public:
 
     void publish(const Native_path& final_name)
     {
+#ifdef __APPLE__
+        // Copy the explicit owner-allow/everyone-deny ACL ahead of inherited
+        // grants; mode 0600 alone does not prevent inherited macOS ACL access.
+        if (fclonefileat(m_file.get(), m_directory, final_name.c_str(),
+                m_restricted ? CLONE_ACL : 0) == 0)
+        {
+            return;
+        }
+        const int error = errno;
+#else
         if (linkat(m_file.get(), "", m_directory,
                 final_name.c_str(), AT_EMPTY_PATH) == 0)
         {
@@ -1058,6 +1200,7 @@ public:
             }
             error = errno;
         }
+#endif
         if (error == EEXIST) {
             throw Issuer_error("cannot publish an output without overwriting");
         }
@@ -1076,6 +1219,9 @@ private:
 
     int             m_directory;
     File_descriptor m_file;
+#ifdef __APPLE__
+    bool            m_restricted;
+#endif
 };
 
 

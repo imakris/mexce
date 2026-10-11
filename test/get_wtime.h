@@ -72,8 +72,8 @@ private:
 // precision issues with large epoch times on some platforms.
 inline double get_wtime() noexcept
 {
-    static const bool use_chrono = detail::should_use_chrono();
 #ifdef _OPENMP
+    static const bool use_chrono = detail::should_use_chrono();
     if (!use_chrono) {
         return omp_get_wtime();
     }

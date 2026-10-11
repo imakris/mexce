@@ -8,7 +8,7 @@ A single-header, dependency-free JIT compiler for mathematical expressions.
 
 ## Overview
 
-`mexce` is a runtime compiler for scalar mathematical expressions written in C++. It parses standard C-like expressions and compiles them directly into x86 or x86-64 machine code. On 64-bit systems, it uses **SSE2 instructions** for basic arithmetic and calls **C standard library** math functions for transcendentals. On 32-bit systems, or when higher internal precision is desired, the **x87 FPU** backend is used.
+`mexce` is a runtime compiler for scalar mathematical expressions written in C++. It parses standard C-like expressions and compiles them directly into x86, x86-64, or Apple Silicon ARM64 machine code. The x86-64 and ARM64 backends use hardware double-precision arithmetic and **C standard library** math functions for transcendentals. On 32-bit x86, or when higher internal precision is desired on x86-64, the **x87 FPU** backend is used.
 
 Once an expression is compiled, subsequent evaluations are direct function calls, which avoids parsing and interpretation overhead. This makes `mexce` well-suited for applications that repeatedly evaluate the same formula with different inputs, such as numerical simulations, data processing kernels, or graphics.
 
@@ -17,13 +17,40 @@ external dependencies. An opt-in protected-expression surface uses libsodium
 1.0.22 to load authenticated, encrypted semantic programs.
 
 ### Requirements
-*   **Platforms:** Windows, Linux
-*   **Architectures:** x86, x86-64 (SSE2 backend requires x86-64; x87 backend works on both)
+*   **Platforms:** Windows, Linux, macOS
+*   **Architectures:** x86, x86-64, and ARM64 on macOS (Apple Silicon)
 *   **Compiler:** Requires a C++11 compliant compiler.
 
 ## Installation
 
 Copy `mexce.h` into your project's include path and `#include "mexce.h"`. No other steps are needed.
+
+### Building on Apple Silicon
+
+Use Xcode Command Line Tools and CMake from a native ARM64 terminal:
+
+```sh
+cmake -S . -B build-arm64 -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
+cmake --build build-arm64 --parallel 3
+ctest --test-dir build-arm64 --output-on-failure
+```
+
+Ninja must be installed when using this generator. OpenMP is optional and is
+used only as an additional benchmark timer source; the benchmarks also work
+with the standard C++ clock supplied by Apple Clang.
+
+Apple Silicon uses native generated code without Rosetta. A host application
+signed with the hardened runtime must include the
+[`com.apple.security.cs.allow-jit` entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.allow-jit).
+The callback-only `com.apple.security.cs.jit-write-allowlist` entitlement is not
+supported. Ordinary command-line builds do not require hardened-runtime signing.
+
+Generated code shares a JIT arena that reserves 1 GiB of virtual address space
+by default; physical pages are allocated on demand and freed code ranges are
+reused. To change the capacity in bytes, define `MEXCE_APPLE_JIT_ARENA_SIZE`
+before including `mexce.h`, with the same value in every translation unit.
+Compilation throws `std::bad_alloc` if the arena cannot satisfy an allocation.
 
 ## Quick Start
 
@@ -127,8 +154,13 @@ eval.set_expression("x + y");      // Options take effect here
 | Method | Description |
 | :--- | :--- |
 | `enable_fast_math()` | Enables algebraic simplifications that may change results for special values (NaN, Inf). Examples: `x-x → 0`, `x/x → 1`, `0*x → 0`. |
-| `use_x87_backend()` | Forces the x87 FPU backend instead of SSE2. The x87 backend uses 80-bit internal precision. On 32-bit x86, this backend is always used. |
-| `enable_cse()` | Enables Common Subexpression Elimination. Repeated identical subexpressions are computed once and reused. Only works with the x87 backend. |
+| `use_x87_backend()` | Selects the x87 FPU backend on x86, with 80-bit internal precision. On Apple Silicon this preference is accepted and the ARM64 backend is used. |
+| `enable_cse()` | Enables Common Subexpression Elimination. Repeated identical subexpressions are computed once and reused. Supported by the x87 and ARM64 backends. |
+
+On Apple Silicon, x86 backend preferences in `options` are compatibility
+no-ops; `get_backend()` reports `backend_type::arm64`. Fast-math and CSE options
+retain their meaning. ARM64 evaluates in `double` precision; it does not emulate
+x87 extended precision.
 
 ## Expression Syntax
 
@@ -177,7 +209,14 @@ eval.set_expression("x + y");      // Options take effect here
 
 ## Backends
 
-`mexce` provides two code generation backends:
+`mexce` selects a code generation backend for the target architecture:
+
+### ARM64 Backend (Apple Silicon)
+*   Emits native AArch64 scalar instructions for double-precision arithmetic
+*   Calls C standard library math functions using the macOS ARM64 ABI
+*   Supports common subexpression elimination and fast-math optimizations
+*   Uses macOS JIT memory write protection and instruction-cache invalidation
+*   Reports `backend_type::arm64` through `get_backend()`
 
 ### SSE2 Backend (Default on x86-64)
 *   Uses SSE2 scalar instructions (`addsd`, `mulsd`, etc.) for basic arithmetic
@@ -190,7 +229,7 @@ eval.set_expression("x + y");      // Options take effect here
 *   Uses x87 FPU instructions with 80-bit internal precision
 *   All operations (including transcendentals) use native x87 instructions
 *   Stack-based architecture can be more compact for certain expression patterns
-*   Required for Common Subexpression Elimination (CSE) feature
+*   Supports Common Subexpression Elimination (CSE)
 *   On x86-64, enable with `eval.use_x87_backend();`
 
 ## Protected Expressions
@@ -201,8 +240,10 @@ an encrypted, authenticated `.mxp` program and a 32-byte key. The application
 loads that pair, binds values by numeric slot, and evaluates the formula through
 the usual `mexce::evaluator` interface.
 
-This feature is optional, available on x64, and uses libsodium 1.0.22. Ordinary
+This feature is optional, available on x86-64 and Apple Silicon ARM64, and uses libsodium 1.0.22. Ordinary
 users can continue to include only `mexce.h` with no external dependency.
+The encrypted program format is shared across architectures; programs issued
+on x86-64 can be loaded on Apple Silicon and vice versa.
 
 ### Build and install
 
@@ -251,6 +292,14 @@ exactly once, using consecutive slots from zero. The command uses strict math
 semantics; applications that need fast-math semantics can use the encoder API
 directly.
 
+On macOS, the issuer requires a filesystem with atomic file cloning, such as
+APFS. It creates the key with owner-only access and preserves that restriction
+when the destination directory has inheritable ACL permissions. Filesystems
+without the required publication support produce an error.
+The macOS issuer also uses Apple's exported private `pthread_fchdir_np` API
+to create the key securely in a pinned directory without changing the caller's
+working directory. This dependency belongs to the issuer tool.
+
 ### Loading a protected program
 
 At runtime, bind application values to the same slots and load the program:
@@ -280,7 +329,7 @@ reusable key-wiping guard.
 
 ## Performance Analysis
 
-`mexce` is designed to produce code with performance comparable to a statically optimizing compiler. Its efficiency was measured using a benchmark suite of 44,229 expressions on GitHub Actions CI (Ubuntu runner).
+`mexce` is designed to produce code with performance comparable to a statically optimizing compiler. The x86-64 measurements below use a benchmark suite of 44,229 expressions on GitHub Actions CI (Ubuntu runner).
 
 ### Benchmark Results
 
@@ -317,7 +366,7 @@ steady-state evaluation penalty appeared in the retained measurements. See the
 
 ### Accuracy
 
-Both backends produce results comparable to the native compiler. The table below shows accuracy measured in **Units in the Last Place (ULP)** against a high-precision reference computed with SymPy.
+The x86-64 backends produce results comparable to the native compiler. The table below shows accuracy measured in **Units in the Last Place (ULP)** against a high-precision reference computed with SymPy.
 
 | ULP Range | Native | SSE2 | x87 |
 | :--- | ---: | ---: | ---: |
