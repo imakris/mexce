@@ -1,0 +1,36 @@
+name: Windows CI
+run-name: >-
+  Windows CI / ${{ inputs.checks == 'protected-benchmark' && 'protected' || inputs.configuration || 'all' }} /
+  ${{ inputs.checks || 'full' }}
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Suites to validate
+        type: choice
+        options: [all, ordinary, protected]
+        default: all
+      checks:
+        description: Validation to run
+        type: choice
+        options: [full, protected-benchmark]
+        default: full
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+    with:
+      runner: windows-2022
+      compiler: msvc
+      cc: cl
+      cxx: cl
+      configuration: ${{ inputs.configuration || 'all' }}
+      checks: ${{ inputs.checks || 'full' }}

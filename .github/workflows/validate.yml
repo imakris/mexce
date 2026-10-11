@@ -1,26 +1,25 @@
-name: Build, Test, Install, and Diagnose mexce
+name: Validate mexce
 
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      platform:
-        description: Platforms to validate
-        type: choice
-        options: [all, macos]
-        default: all
+      runner:
+        required: true
+        type: string
+      compiler:
+        required: true
+        type: string
+      cc:
+        required: true
+        type: string
+      cxx:
+        required: true
+        type: string
       configuration:
-        description: Suites to validate
-        type: choice
-        options: [all, ordinary, protected]
+        type: string
         default: all
       checks:
-        description: Validation to run
-        type: choice
-        options: [full, protected-benchmark]
+        type: string
         default: full
 
 permissions:
@@ -28,8 +27,8 @@ permissions:
 
 jobs:
   release-matrix:
-    name: ${{ matrix.toolchain.os }} / ${{ matrix.toolchain.compiler }} / ${{ matrix.configuration }}
-    runs-on: ${{ matrix.toolchain.os }}
+    name: ${{ inputs.runner }} / ${{ inputs.compiler }} / ${{ matrix.configuration }}
+    runs-on: ${{ inputs.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -37,13 +36,6 @@ jobs:
           ${{ fromJSON(inputs.checks == 'protected-benchmark' && '["protected"]' ||
           inputs.configuration == 'ordinary' && '["ordinary"]' ||
           inputs.configuration == 'protected' && '["protected"]' || '["ordinary", "protected"]') }}
-        toolchain: >-
-          ${{ fromJSON(inputs.platform == 'macos' &&
-          '[{"os":"macos-latest","compiler":"apple-clang","cc":"clang","cxx":"clang++"}]' ||
-          '[{"os":"windows-2022","compiler":"msvc","cc":"cl","cxx":"cl"},
-            {"os":"ubuntu-latest","compiler":"gcc","cc":"gcc","cxx":"g++"},
-            {"os":"ubuntu-latest","compiler":"clang","cc":"clang","cxx":"clang++"},
-            {"os":"macos-latest","compiler":"apple-clang","cc":"clang","cxx":"clang++"}]') }}
 
     steps:
       - name: Validate selected checks
@@ -71,7 +63,7 @@ jobs:
         run: python -m pip install "conan>=2.28,<3"
 
       - name: Install Linux Clang dependencies
-        if: runner.os == 'Linux' && matrix.toolchain.compiler == 'clang'
+        if: runner.os == 'Linux' && inputs.compiler == 'clang'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libomp-dev
@@ -97,8 +89,8 @@ jobs:
             --settings=build_type=Release --conf=tools.build:jobs=3 --build=missing
         shell: bash
         env:
-          CC: ${{ matrix.toolchain.cc }}
-          CXX: ${{ matrix.toolchain.cxx }}
+          CC: ${{ inputs.cc }}
+          CXX: ${{ inputs.cxx }}
 
       - name: Configure ordinary Windows release
         if: runner.os == 'Windows' && matrix.configuration == 'ordinary'
@@ -109,8 +101,8 @@ jobs:
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_COMPILER=${{ matrix.toolchain.cc }}
-          -DCMAKE_CXX_COMPILER=${{ matrix.toolchain.cxx }}
+          -DCMAKE_C_COMPILER=${{ inputs.cc }}
+          -DCMAKE_CXX_COMPILER=${{ inputs.cxx }}
 
       - name: Configure protected Windows release and issuer
         if: runner.os == 'Windows' && matrix.configuration == 'protected'
@@ -126,8 +118,8 @@ jobs:
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_COMPILER=${{ matrix.toolchain.cc }}
-          -DCMAKE_CXX_COMPILER=${{ matrix.toolchain.cxx }}
+          -DCMAKE_C_COMPILER=${{ inputs.cc }}
+          -DCMAKE_CXX_COMPILER=${{ inputs.cxx }}
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
           -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON
           -DMEXCE_BUILD_ISSUER_TOOLS=ON
@@ -170,7 +162,7 @@ jobs:
         run: >-
           cmake -S test/install_consumer -B consumer-build
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_CXX_COMPILER=${{ matrix.toolchain.cxx }}
+          -DCMAKE_CXX_COMPILER=${{ inputs.cxx }}
           -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
 
@@ -189,7 +181,7 @@ jobs:
         run: >-
           cmake -S test/install_consumer -B consumer-build
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_CXX_COMPILER=${{ matrix.toolchain.cxx }}
+          -DCMAKE_CXX_COMPILER=${{ inputs.cxx }}
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
           -DCMAKE_PREFIX_PATH=${{ runner.temp }}/mexce-install
           -DMEXCE_FORBIDDEN_INCLUDE_ROOT=${{ github.workspace }}
@@ -259,10 +251,10 @@ jobs:
           --resource-repeats 1
 
       - name: Upload diagnostic results
-        if: always()
+        if: always() && hashFiles('build/benchmark_results.txt', 'build/protected_benchmark_results.json') != ''
         uses: actions/upload-artifact@v6
         with:
-          name: diagnostics-${{ matrix.toolchain.os }}-${{ matrix.toolchain.compiler }}-${{ matrix.configuration }}
+          name: diagnostics-${{ inputs.runner }}-${{ inputs.compiler }}-${{ matrix.configuration }}
           if-no-files-found: warn
           path: |
             build/benchmark_results.txt

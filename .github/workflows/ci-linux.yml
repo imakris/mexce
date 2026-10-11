@@ -1,0 +1,47 @@
+name: Linux CI
+run-name: >-
+  Linux CI / ${{ inputs.checks == 'protected-benchmark' && 'protected' || inputs.configuration || 'all' }} /
+  ${{ inputs.checks || 'full' }}
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      configuration:
+        description: Suites to validate
+        type: choice
+        options: [all, ordinary, protected]
+        default: all
+      checks:
+        description: Validation to run
+        type: choice
+        options: [full, protected-benchmark]
+        default: full
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: ${{ matrix.compiler }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+    uses: ./.github/workflows/validate.yml
+    with:
+      runner: ubuntu-24.04
+      compiler: ${{ matrix.compiler }}
+      cc: ${{ matrix.cc }}
+      cxx: ${{ matrix.cxx }}
+      configuration: ${{ inputs.configuration || 'all' }}
+      checks: ${{ inputs.checks || 'full' }}
