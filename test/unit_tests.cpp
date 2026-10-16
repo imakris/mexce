@@ -606,10 +606,29 @@ void test_binding_and_unbinding(TestSuite& suite) {
     suite.expect_near("direct_int32_binding", eval.evaluate(), static_cast<double>(i32));
 
     eval.unbind_all();
+    suite.expect_near("unbind_all_referenced_sets_zero", eval.evaluate(), 0.0);
 
     suite.expect_throw<mexce::mexce_parsing_exception>("unbind_all_removes_variables", [&] {
         eval.set_expression("x");
     }, "x is not a known constant, variable or function name");
+
+    eval.unbind_all();
+    suite.expect_throw<std::logic_error>(
+        "unbind_all_preserves_empty_expression",
+        [&] { (void)eval.evaluate(); },
+        "No expression has been compiled."
+    );
+
+    eval.bind(x, "x");
+    eval.set_expression("3.25");
+    eval.unbind_all();
+    suite.expect_near("unbind_all_unused_preserves_constant", eval.evaluate(), 3.25);
+
+    eval.bind(x, "x");
+    eval.set_expression("x + 2");
+    suite.expect_near("unbind_all_rebound_expression", eval.evaluate(), 3.0);
+    eval.unbind_all();
+    suite.expect_near("unbind_all_rebound_sets_zero", eval.evaluate(), 0.0);
     
     mexce::evaluator unbind_eval;
     double y = 2.5;
@@ -626,6 +645,30 @@ void test_binding_and_unbinding(TestSuite& suite) {
     suite.expect_throw<std::logic_error>("unbind_unknown_variable", [&]() {
         unbind_eval.unbind("unknown");
     }, "Attempted to unbind an unknown variable");
+}
+
+void test_single_shot_preserves_binding_references(TestSuite& suite)
+{
+    mexce::evaluator eval;
+    double value  = 2.0;
+    double unused = 3.0;
+    eval.bind(value, "value", unused, "unused");
+    eval.set_expression("value + 5");
+
+    suite.expect_near("single_shot_uses_bound_value", eval.evaluate("value * 3"), 6.0);
+    value = 4.0;
+    suite.expect_near("single_shot_preserves_default_expression", eval.evaluate(), 9.0);
+    eval.unbind("unused");
+    suite.expect_near("single_shot_unused_unbind_preserves_default", eval.evaluate(), 9.0);
+    eval.unbind("value");
+    suite.expect_near("single_shot_referenced_unbind_sets_zero", eval.evaluate(), 0.0);
+
+    eval.bind(value, "value");
+    eval.set_expression("value + 5");
+    suite.expect_near("single_shot_constant_result", eval.evaluate("3.25"), 3.25);
+    suite.expect_near("single_shot_constant_preserves_default", eval.evaluate(), 9.0);
+    eval.unbind_all();
+    suite.expect_near("single_shot_unbind_all_sets_zero", eval.evaluate(), 0.0);
 }
 
 void test_binding_name_conflicts(TestSuite& suite) {
@@ -1587,6 +1630,7 @@ int main() {
     test_cse_rewrite_boundaries(suite);
     test_helper_functions_and_element(suite);
     test_binding_and_unbinding(suite);
+    test_single_shot_preserves_binding_references(suite);
     test_binding_name_conflicts(suite);
     test_mexce_parsing_exception_class(suite);
     test_asmd_optimizer_branches(suite);
