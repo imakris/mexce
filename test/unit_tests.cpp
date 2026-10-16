@@ -378,13 +378,70 @@ void test_constants_and_single_shot(TestSuite& suite) {
 
 void test_signed_zero_semantics(TestSuite& suite)
 {
+    for (bool prefer_x87 : {false, true}) {
+        mexce::evaluator eval;
+        eval.opts().prefer_x87 = prefer_x87;
+        double x = 0.0;
+        eval.bind(x, "x");
+        for (const char* expression : {"-0.0", "neg(0.0)", "-x", "neg(x)"}) {
+            eval.set_expression(expression);
+            const double actual = eval.evaluate();
+            suite.expect_true(std::string("unary_minus_negative_zero_") + expression,
+                actual == 0.0 && std::signbit(actual));
+        }
+        x = -0.0;
+        eval.set_expression("-x");
+        suite.expect_true("unary_minus_negative_zero_becomes_positive",
+            eval.evaluate() == 0.0 && !std::signbit(eval.evaluate()));
+        x = 3.0;
+        eval.set_expression("-x^2");
+        suite.expect_equal("unary_minus_keeps_power_precedence", eval.evaluate(), -9.0);
+    }
+}
+
+void test_strict_arithmetic_order(TestSuite& suite)
+{
+    for (bool prefer_x87 : {false, true}) {
+        mexce::evaluator eval;
+        eval.opts().prefer_x87 = prefer_x87;
+        double x = 0.0;
+        eval.bind(x, "x");
+        eval.set_expression("x * 1e+308 * 1e+308");
+        suite.expect_equal("strict_finite_factors_do_not_overflow_before_zero", eval.evaluate(), 0.0);
+
+        x = 1.0;
+        eval.set_expression("x / 1e+308 * 1e+308");
+        suite.expect_near("strict_division_keeps_nonzero_intermediate", eval.evaluate(), 1.0);
+
+        x = 1e+308;
+        eval.set_expression("x + 1e+308 - 1e+308");
+        if (eval.get_backend() == mexce::backend_type::sse2 ||
+            eval.get_backend() == mexce::backend_type::arm64)
+        {
+            suite.expect_true("strict_addition_keeps_double_overflow", std::isinf(eval.evaluate()));
+        }
+        else {
+            suite.expect_equal("strict_addition_keeps_extended_precision", eval.evaluate(), x);
+        }
+    }
+}
+
+void test_numeric_literal_validation(TestSuite& suite)
+{
+    for (const char* expression : {".", "1e+2e+3", ".e+1", "1.e+2e-3"}) {
+        suite.expect_throw<mexce::mexce_parsing_exception>(
+            std::string("malformed_numeric_literal_") + expression,
+            [&] { mexce::evaluator().set_expression(expression); },
+            "Invalid numeric literal");
+    }
+
     mexce::evaluator eval;
-
-    eval.set_expression("-0.0");
-    suite.expect_true("source_unary_minus_signed_zero", !std::signbit(eval.evaluate()));
-
-    eval.set_expression("neg(0.0)");
-    suite.expect_true("explicit_neg_signed_zero", std::signbit(eval.evaluate()));
+    suite.expect_equal("scientific_literal", eval.evaluate("1.25e+2"), 125.0);
+    suite.expect_equal("scientific_literal_negative_exponent", eval.evaluate("1.25e-2"), 0.0125);
+    suite.expect_true("numeric_literal_overflow", std::isinf(eval.evaluate("1e+309")));
+    suite.expect_equal("numeric_literal_underflow", eval.evaluate("1e-400"), 0.0);
+    suite.expect_equal("numeric_literal_subnormal", eval.evaluate("5e-324"),
+        std::numeric_limits<double>::denorm_min());
 }
 
 void test_pow_optimizer_special_cases(TestSuite& suite) {
@@ -1666,6 +1723,8 @@ int main() {
     test_min_max_and_arithmetic(suite);
     test_constants_and_single_shot(suite);
     test_signed_zero_semantics(suite);
+    test_strict_arithmetic_order(suite);
+    test_numeric_literal_validation(suite);
     test_pow_optimizer_special_cases(suite);
     test_nested_pow_folding_sympy_semantics(suite);
     test_portable_numeric_boundaries(suite);

@@ -344,6 +344,18 @@ void test_portable_numeric_boundaries(Test_suite& suite)
         evaluator.opts().prefer_x87 = prefer_x87;
         double x = -2.0;
         evaluator.bind_protected(x, 0);
+        x = 0.0;
+        load(evaluator, mexce::encode_protected_expression(
+            "x * 1e+308 * 1e+308", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+        suite.expect(evaluator.evaluate() == 0.0, "protected_strict_finite_factor_order");
+        load(evaluator, mexce::encode_protected_expression(
+            "-x", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+        suite.expect(evaluator.evaluate() == 0.0 && std::signbit(evaluator.evaluate()),
+            "protected_unary_minus_positive_zero");
+        x = -0.0;
+        suite.expect(evaluator.evaluate() == 0.0 && !std::signbit(evaluator.evaluate()),
+            "protected_unary_minus_negative_zero");
+        x = -2.0;
         for (const char* expression : {
             "(x^1.5)^2", "(x^(1/3))^3", "(x^0.2)^5"})
         {

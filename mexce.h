@@ -119,6 +119,7 @@
 #include <cassert>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -126,6 +127,7 @@
 #include <functional>
 #include <iomanip>
 #include <list>
+#include <locale.h>
 #include <map>
 #include <memory>
 #include <set>
@@ -155,6 +157,9 @@
 #elif defined(__linux__) || defined(__APPLE__)
     #include <unistd.h>
     #include <sys/mman.h>
+#endif
+#ifdef __APPLE__
+    #include <xlocale.h>
 #endif
 #ifdef MEXCE_ARM64
     #include <libkern/OSCacheControl.h>
@@ -797,8 +802,8 @@ struct Constant
     volatile void*    address;
     Numeric_data_type numeric_data_type;
 
-    Constant(uint64_t i, string num, string n):
-        id(i), name(n), value(atof(num.data())),
+    Constant(uint64_t i, double v, string n):
+        id(i), name(n), value(v),
         address((void*)&this->value), numeric_data_type(M64FP)
     {}
 
@@ -877,7 +882,6 @@ struct Function
 struct Element {
     Element_type type;
     uint64_t     id;
-    bool         asmd_placeholder = false;
 
     shared_ptr<Constant> c;
     shared_ptr<Variable> v;
@@ -5229,6 +5233,11 @@ inline
 void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
     auto& compilation = ev->active_compilation();
+    // Regrouping changes intermediate rounding, overflow and signed zeros.
+    // Strict evaluation keeps the original arithmetic tree.
+    if (!compilation.m_effective_options.fast_math) {
+        return;
+    }
     auto f = it->f;
     auto fname = f->name;
     int fclass = (fname == "add" || fname == "sub") ? 1 : (fname == "mul" || fname == "div") ? 2 : 0;
@@ -5245,20 +5254,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     };
     if (contains_cse(it)) {
         return;
-    }
-
-    // Adding a real zero is observable for signed zero. Preserve the direct
-    // operation unless this node has already absorbed another arithmetic node.
-    if (fclass == 1 && !compilation.m_effective_options.fast_math &&
-        f->absorbed[0].empty() && f->absorbed[1].empty())
-    {
-        for (const auto argument : f->args) {
-            if (argument->type == Element_type::CCONST &&
-                !argument->asmd_placeholder && argument->c->value == 0.0)
-            {
-                return;
-            }
-        }
     }
 
     if (f->parent != elist->end() && f->parent->type == Element_type::CFUNC) {
@@ -5286,7 +5281,6 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             pf->absorbed[!parent_inv_op].insert(pf->absorbed[!parent_inv_op].end(), f->absorbed[1].begin(), f->absorbed[1].end());
             pf->force_not_constant = true;
             *it = Element(make_intermediate_constant(ev, neutral));
-            it->asmd_placeholder = true;
             return;
         }
     }
@@ -5310,19 +5304,15 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     // reduce constants with extended precision
     long double ac[2] = {neutral, neutral};
-    bool has_additive_constant[2] = {false, false};
     for (int i = 0; i < 2; i++) {
         for (auto e = f->absorbed[i].begin(); e != f->absorbed[i].end();) {
             auto next_e = next(e);
             if (e->size() == 1 && e->front().type == Element_type::CCONST) {
                 auto v = e->front().c;
-                if (fclass == 1 && !e->front().asmd_placeholder) {
-                    ac[i] = has_additive_constant[i]
-                        ? ac[i] + static_cast<long double>(v->value)
-                        : static_cast<long double>(v->value);
-                    has_additive_constant[i] = true;
+                if (fclass == 1) {
+                    ac[i] += static_cast<long double>(v->value);
                 }
-                else if (fclass == 2) {
+                else {
                     ac[i] *= static_cast<long double>(v->value);
                 }
                 f->absorbed[i].erase(e);
@@ -5330,18 +5320,9 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             e = next_e;
         }
     }
-    long double ac_final_ld;
-    if (fclass == 1) {
-        ac_final_ld = has_additive_constant[0] && has_additive_constant[1]
-            ? ac[0] - ac[1] : has_additive_constant[0] ? ac[0] : -ac[1];
-    }
-    else {
-        ac_final_ld = ac[0] / ac[1];
-    }
+    const long double ac_final_ld = fclass == 1 ? ac[0] - ac[1] : ac[0] / ac[1];
     double ac_final = static_cast<double>(ac_final_ld);
-    const bool retain_additive_constant = ac_final != neutral ||
-        ((has_additive_constant[0] || has_additive_constant[1]) &&
-            !compilation.m_effective_options.fast_math);
+    const bool retain_additive_constant = ac_final != neutral;
 
     struct absorbed_term {
         elist_t chunk;
@@ -5369,22 +5350,9 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     merged.reserve(terms.size());
     for (auto &term : terms) {
         if (!merged.empty() && !comp(term.chunk, merged.back().chunk) && !comp(merged.back().chunk, term.chunk)) {
-            // Combining opposite-sign/opposite-exponent copies can erase IEEE-visible
-            // effects: x-x is NaN for x=NaN and x/x is NaN for x=0.  Keep those
-            // cancellations explicit unless the caller opted into fast_math.
-            const bool would_cancel_or_cross_zero =
-                ((merged.back().factor > 0 && term.factor < 0) ||
-                 (merged.back().factor < 0 && term.factor > 0));
-            if (!compilation.m_effective_options.fast_math && would_cancel_or_cross_zero) {
-                if (term.factor != 0) {
-                    merged.push_back({std::move(term.chunk), term.factor});
-                }
-            }
-            else {
-                merged.back().factor += term.factor;
-                if (merged.back().factor == 0) {
-                    merged.pop_back();
-                }
+            merged.back().factor += term.factor;
+            if (merged.back().factor == 0) {
+                merged.pop_back();
             }
         }
         else
@@ -6092,8 +6060,8 @@ inline Semantic_compilation_result Semantic_compiler::finish()
 inline const map<string, shared_ptr<Constant> >& built_in_constants_map()
 {
     static const map<string, shared_ptr<Constant> > cname_map = {
-        { "pi", std::make_shared<Constant>(0, "3.141592653589793238462643383", "pi") },
-        { "e",  std::make_shared<Constant>(1, "2.718281828459045235360287471", "e" ) }
+        { "pi", std::make_shared<Constant>(0, 3.141592653589793238462643383, "pi") },
+        { "e",  std::make_shared<Constant>(1, 2.718281828459045235360287471, "e" ) }
     };
     return cname_map;
 }
@@ -6121,11 +6089,11 @@ struct Token
 };
 
 
-template <typename> inline Numeric_data_type get_ndt()  {
-    // LCOV_EXCL_START
-    assert(false);
+template <typename T> inline Numeric_data_type get_ndt()
+{
+    static_assert(!std::is_same<T, T>::value,
+        "Bindings support double, float, int16_t, int32_t, and int64_t");
     return Numeric_data_type();
-    // LCOV_EXCL_STOP
 }
 template <> inline Numeric_data_type get_ndt<double >() { return M64FP;  }
 template <> inline Numeric_data_type get_ndt<float  >() { return M32FP;  }
@@ -6137,6 +6105,63 @@ template <> inline Numeric_data_type get_ndt<int64_t>() { return M64INT; }
 inline bool is_operator(  char c) { return  c=='+' || c=='-'  ||  c=='*' || c=='/'  || c=='^' || c=='<' || c=='>'; }
 inline bool is_alphabetic(char c) { return (c>='A' && c<='Z') || (c>='a' && c<='z') || c=='_'; }
 inline bool is_numeric(   char c) { return  c>='0' && c<='9'; }
+
+
+inline double parse_numeric_literal(const string& text, size_t position)
+{
+    // An explicit locale preserves strtod's range behavior without changing
+    // the process locale used by the host or other evaluator threads.
+    class Numeric_locale
+    {
+    public:
+        Numeric_locale()
+#ifdef _WIN32
+        :
+            m_locale(_create_locale(LC_NUMERIC, "C"))
+#else
+        :
+            m_locale(newlocale(LC_NUMERIC_MASK, "C", nullptr))
+#endif
+        {
+            if (!m_locale) {
+                throw std::runtime_error("Cannot create the numeric parsing locale.");
+            }
+        }
+
+        ~Numeric_locale()
+        {
+#ifdef _WIN32
+            _free_locale(m_locale);
+#else
+            freelocale(m_locale);
+#endif
+        }
+
+        double parse(const char* text, char** end) const
+        {
+#ifdef _WIN32
+            return _strtod_l(text, end, m_locale);
+#else
+            return strtod_l(text, end, m_locale);
+#endif
+        }
+
+    private:
+#ifdef _WIN32
+        _locale_t m_locale;
+#else
+        locale_t m_locale;
+#endif
+    };
+
+    static const Numeric_locale locale;
+    char* end = nullptr;
+    const double value = locale.parse(text.c_str(), &end);
+    if (end == text.c_str() || end != text.c_str() + text.size()) {
+        throw mexce_parsing_exception("Invalid numeric literal", position);
+    }
+    return value;
+}
 
 
 inline
@@ -6957,26 +6982,12 @@ impl::Semantic_program impl::Clear_semantic_producer::produce(
             }
             case UNARY:
                 if (temp.content == "-") {
-                    if (semantic_stack.empty()) {
-                        throw std::logic_error("Invalid semantic expression");
-                    }
-                    semantic_nodes.push_back({Semantic_record(0.0), 0, 0});
-                    const size_t zero = semantic_nodes.size() - 1;
-                    const size_t operand = semantic_stack.back();
-                    const size_t first_child = semantic_children.size();
-                    semantic_children.push_back(zero);
-                    semantic_children.push_back(operand);
-                    semantic_nodes.push_back({
-                        Semantic_record(&function_map().find("sub")->second),
-                        first_child,
-                        2,
-                    });
-                    semantic_stack.back() = semantic_nodes.size() - 1;
+                    emit_call(&function_map().find("neg")->second);
                 }
                 break;
             case NUMERIC_LITERAL: {
                 semantic_nodes.push_back({
-                    Semantic_record(atof(temp.content.c_str())), 0, 0});
+                    Semantic_record(parse_numeric_literal(temp.content, temp.position)), 0, 0});
                 semantic_stack.push_back(semantic_nodes.size() - 1);
                 break;
             }

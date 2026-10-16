@@ -66,6 +66,10 @@ jobs:
           uname -m
           test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
 
+      - name: Prepare numeric locale on Linux
+        if: runner.os == 'Linux'
+        run: sudo locale-gen de_DE.UTF-8
+
       - name: Set up Python on macOS
         if: runner.os == 'macOS' && matrix.configuration == 'protected'
         uses: actions/setup-python@v6

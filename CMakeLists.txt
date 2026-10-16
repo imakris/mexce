@@ -85,6 +85,8 @@ if(MEXCE_BUILD_ISSUER_TOOLS)
 endif()
 
 if(BUILD_TESTING)
+    include(cmake/check-binding-types.cmake)
+
     add_executable(benchmark test/benchmark.cpp)
     target_include_directories(benchmark PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     find_package(OpenMP QUIET COMPONENTS CXX)
@@ -103,6 +105,10 @@ if(BUILD_TESTING)
     add_executable(ordinary_no_sodium_test test/ordinary_no_sodium_test.cpp)
     target_link_libraries(ordinary_no_sodium_test PRIVATE mexce)
     target_compile_options(ordinary_no_sodium_test PRIVATE ${MEXCE_WARNING_FLAGS})
+
+    add_executable(locale_numeric_test test/locale_numeric_test.cpp)
+    target_link_libraries(locale_numeric_test PRIVATE mexce)
+    target_compile_options(locale_numeric_test PRIVATE ${MEXCE_WARNING_FLAGS})
 
     find_package(Threads REQUIRED)
     add_executable(cold_start_concurrency_test test/cold_start_concurrency_test.cpp)
@@ -220,6 +226,7 @@ if(BUILD_TESTING)
 
     add_test(NAME mexce_unit_tests COMMAND unit_tests)
     add_test(NAME mexce_ordinary_no_sodium COMMAND ordinary_no_sodium_test)
+    add_test(NAME mexce_locale_numeric COMMAND locale_numeric_test)
     add_test(NAME mexce_cold_start_concurrency COMMAND cold_start_concurrency_test)
     if(TARGET apple_jit_arena_tests)
         add_test(NAME mexce_apple_jit_arena COMMAND apple_jit_arena_tests)
