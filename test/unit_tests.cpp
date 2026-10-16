@@ -378,50 +378,51 @@ void test_constants_and_single_shot(TestSuite& suite) {
 
 void test_signed_zero_semantics(TestSuite& suite)
 {
-    for (bool prefer_x87 : {false, true}) {
-        mexce::evaluator eval;
-        eval.opts().prefer_x87 = prefer_x87;
-        double x = 0.0;
-        eval.bind(x, "x");
-        for (const char* expression : {"-0.0", "neg(0.0)", "-x", "neg(x)"}) {
-            eval.set_expression(expression);
-            const double actual = eval.evaluate();
-            suite.expect_true(std::string("unary_minus_negative_zero_") + expression,
-                actual == 0.0 && std::signbit(actual));
-        }
-        x = -0.0;
-        eval.set_expression("-x");
-        suite.expect_true("unary_minus_negative_zero_becomes_positive",
-            eval.evaluate() == 0.0 && !std::signbit(eval.evaluate()));
-        x = 3.0;
-        eval.set_expression("-x^2");
-        suite.expect_equal("unary_minus_keeps_power_precedence", eval.evaluate(), -9.0);
-    }
+    mexce::evaluator eval;
+
+    eval.set_expression("-0.0");
+    suite.expect_true("source_unary_minus_signed_zero", !std::signbit(eval.evaluate()));
+
+    eval.set_expression("neg(0.0)");
+    suite.expect_true("explicit_neg_signed_zero", std::signbit(eval.evaluate()));
 }
 
-void test_strict_arithmetic_order(TestSuite& suite)
+void test_algebraic_simplification_accuracy(TestSuite& suite)
 {
+    const double large = std::ldexp(1.0, 600);
+    const double small = std::ldexp(1.0, -600);
+    struct Range_case {
+        const char* expression;
+        double input;
+        double expected;
+    };
+    // Powers of two have exact results even when the combined constant
+    // coefficient alone is outside double's range.
+    const Range_case cases[] = {
+        {"x * 1e+308 * 1e+308", 0.0, 0.0},
+        {"x * 4.149515568880993e+180 * 4.149515568880993e+180", small, large},
+        {"x * 2.409919865102884e-181 * 2.409919865102884e-181", large, small},
+        {"x / 4.149515568880993e+180 / 4.149515568880993e+180", large, small},
+        {"x / 2.409919865102884e-181 / 2.409919865102884e-181", small, large},
+    };
     for (bool prefer_x87 : {false, true}) {
-        mexce::evaluator eval;
-        eval.opts().prefer_x87 = prefer_x87;
-        double x = 0.0;
-        eval.bind(x, "x");
-        eval.set_expression("x * 1e+308 * 1e+308");
-        suite.expect_equal("strict_finite_factors_do_not_overflow_before_zero", eval.evaluate(), 0.0);
+        for (bool fast_math : {false, true}) {
+            mexce::evaluator eval;
+            eval.opts().prefer_x87 = prefer_x87;
+            eval.opts().fast_math = fast_math;
+            double x = 0.0;
+            double y = 1.0;
+            eval.bind(x, "x", y, "y");
+            for (const auto& test : cases) {
+                x = test.input;
+                eval.set_expression(test.expression);
+                suite.expect_equal(std::string("algebraic_constant_range_") + test.expression,
+                    eval.evaluate(), test.expected);
+            }
 
-        x = 1.0;
-        eval.set_expression("x / 1e+308 * 1e+308");
-        suite.expect_near("strict_division_keeps_nonzero_intermediate", eval.evaluate(), 1.0);
-
-        x = 1e+308;
-        eval.set_expression("x + 1e+308 - 1e+308");
-        if (eval.get_backend() == mexce::backend_type::sse2 ||
-            eval.get_backend() == mexce::backend_type::arm64)
-        {
-            suite.expect_true("strict_addition_keeps_double_overflow", std::isinf(eval.evaluate()));
-        }
-        else {
-            suite.expect_equal("strict_addition_keeps_extended_precision", eval.evaluate(), x);
+            x = 1e16;
+            eval.set_expression("-(x+y)+x");
+            suite.expect_equal("unary_subtraction_retains_algebraic_accuracy", eval.evaluate(), -1.0);
         }
     }
 }
@@ -1322,8 +1323,6 @@ void test_source_free_fallback_ownership(TestSuite& suite)
     double a = 1.25;
     eval.bind(a, "a");
     eval.use_sse2_backend();
-    // Regrouping this Horner tree is what increases the register pressure.
-    eval.enable_fast_math();
 
     const std::string polynomial =
         "((((((((((2.20*a+1.1)*a+9.9)*a+8.8)*a+7.7)*a+6.6)*a+5.5)*a+4.4)*a+3.3)*a+2.2)*a+1.1)";
@@ -1725,7 +1724,7 @@ int main() {
     test_min_max_and_arithmetic(suite);
     test_constants_and_single_shot(suite);
     test_signed_zero_semantics(suite);
-    test_strict_arithmetic_order(suite);
+    test_algebraic_simplification_accuracy(suite);
     test_numeric_literal_validation(suite);
     test_pow_optimizer_special_cases(suite);
     test_nested_pow_folding_sympy_semantics(suite);

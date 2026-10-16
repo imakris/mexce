@@ -417,7 +417,7 @@ void test_fixture_and_encoder(Test_suite& suite)
         unary_minus_bundle.program.data(), unary_minus_bundle.program.size(),
         std::move(unary_minus_bundle.key), unary_minus_sink);
     const std::vector<std::string> unary_minus_expected = {
-        "manifest:1:strict", "variable:0", "call:5", "end",
+        "manifest:1:strict", "literal:0", "variable:0", "call:2", "end",
     };
     suite.expect(
         unary_minus_sink.m_records == unary_minus_expected,

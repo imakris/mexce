@@ -61,69 +61,10 @@ backend. Median protected/clear ranges were:
 | GCC 13.3.0 | 36.4-58.7 us | 2.06-2.61 | 0.95-1.02 | 15.12 MiB |
 | Clang 18.1.3 | 40.2-66.3 us | 2.12-2.65 | 0.97-1.00 | 15.12 MiB |
 
-The continuous limits are 1 ms encode time, a 4.0 compile acceptance ratio, a
-1.75 evaluate ratio, and 32 MiB peak working set. Compile acceptance uses the
-measured protected/clear ratio except for the ARM64 calibration below. The
-evaluate allowance accounts for an early single-run ratio of 1.61 that
-disappeared in the seven-run distribution; it is not derived only from the
-final favorable medians.
-
-### macOS ARM64 compile calibration (2026-10-17)
-
-The 4.0 compile limit was selected from the x64 observations above, before the
-ARM64 backend was added. Removing unsafe arithmetic regrouping from strict
-mode reduced clear compilation work. Two subsequent macOS ARM64 runs exceeded
-that ratio while arithmetic protected compilation also became faster:
-
-| Revision | Paired clear median | Paired protected median | Raw compile ratio min/median/max | Ratio MAD |
-| --- | ---: | ---: | ---: | ---: |
-| `24dd719` | 6.164 us | 18.588 us | 2.862/3.016/3.114 | 0.099 |
-| `4fb72a6` | 4.274 us | 16.814 us | 3.934/4.170/4.446 | 0.236 |
-| `e9417b2` | 3.789 us | 15.764 us | 4.033/4.161/4.544 | 0.128 |
-
-These are separate hosted runs, not a controlled same-machine comparison.
-All six protected compile medians in `e9417b2` were below their `24dd719`
-values. Evaluation, correctness, backend comparison, and resource checks
-passed. The repeated ratio failure reflects a smaller clear denominator; it
-does not establish a protected latency regression.
-
-For native macOS ARM64 only, with matching recorded ARM64 backends, each
-formula retains the latency allowance from
-the successful [baseline run 38916967385](https://github.com/imakris/mexce/actions/runs/38916967385)
-at `24dd719bdcbe903fb6faf58c32608951a487bd70`. Its three balanced-pair samples ran
-on macOS 26.6.2 ARM64 with AppleClang 21.0.0.21000101 and
-`-O3 -DNDEBUG -Wall -Wextra -Wpedantic`; the benchmark harness is unchanged
-across these revisions. The complete reports remain external build evidence.
-The baseline clear distributions and resulting fixed allowances are:
-
-| Formula | Clear min/median/max (us) | Clear MAD (us) | 4 x clear median (us) |
-| --- | ---: | ---: | ---: |
-| arithmetic | 5.878/6.164/6.610 | 0.285 | 24.655 |
-| transcendental | 11.915/12.079/12.130 | 0.051 | 48.317 |
-| power | 13.176/14.192/14.984 | 0.792 | 56.767 |
-| rounding | 7.585/7.858/9.927 | 0.273 | 31.431 |
-| comparison | 10.219/10.660/10.718 | 0.058 | 42.642 |
-| mixed | 13.483/16.535/20.806 | 3.052 | 66.139 |
-
-For each retained paired sample, the compile acceptance ratio is
-`protected_ns / max(clear_ns, baseline_clear_median_ns)`. The median of these
-sample ratios must remain at most 4.0. The baseline median is fixed from the
-accepted run, rather than fitted to either failing run. This preserves a
-previously admitted latency allowance when clear compilation becomes faster;
-when current clear compilation is slower, the original ratio rule applies.
-It keeps the existing median-based treatment of sample variation without
-adding a noise allowance or increasing the 4.0 factor. Other platforms and
-formulas without a calibration use a zero floor and retain the original rule.
-
-The report keeps schema 1 and the unadjusted `compile_ratio` with its full
-paired distribution. The separately named `compile_acceptance_ratio` controls
-the gate, and the optional `compile_calibration` metadata has its own schema
-version. The report records the acceptance distribution, denominator floor,
-and baseline provenance. Replaying the retained baseline and two subsequent
-reports yields worst formula acceptance ratios of 2.970, 2.867, and 2.558; the
-raw ratios above remain visible. All other limits and the three-repeat CI
-sampling policy are unchanged. A changed benchmark corpus needs its own
-calibration evidence; these figures are not universal API latency guarantees.
+The continuous limits are 1 ms encode time, a 4.0 compile ratio, a 1.75
+evaluate ratio, and 32 MiB peak working set. The evaluate allowance accounts
+for an early single-run ratio of 1.61 that disappeared in the seven-run
+distribution; it is not derived only from the final favorable medians.
 
 ## Exact-limit resources
 

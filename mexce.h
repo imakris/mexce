@@ -882,6 +882,7 @@ struct Function
 struct Element {
     Element_type type;
     uint64_t     id;
+    bool         asmd_placeholder = false;
 
     shared_ptr<Constant> c;
     shared_ptr<Variable> v;
@@ -3978,8 +3979,8 @@ inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::e
         }
     }
 
-    // Try x87, whose register limit can be higher. Fast-math optimization can
-    // also reduce the stack depth of arithmetic chains.
+    // If max depth exceeds register limit, use x87 with optimizer instead
+    // The x87 asmd_optimizer can reduce stack depth for chains of operations
     if (max_depth > k_sse2_max_registers) {
         return false;
     }
@@ -5233,11 +5234,6 @@ inline
 void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
     auto& compilation = ev->active_compilation();
-    // Regrouping changes intermediate rounding, overflow and signed zeros.
-    // Strict evaluation keeps the original arithmetic tree.
-    if (!compilation.m_effective_options.fast_math) {
-        return;
-    }
     auto f = it->f;
     auto fname = f->name;
     int fclass = (fname == "add" || fname == "sub") ? 1 : (fname == "mul" || fname == "div") ? 2 : 0;
@@ -5254,6 +5250,20 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     };
     if (contains_cse(it)) {
         return;
+    }
+
+    // Adding a real zero is observable for signed zero. Preserve the direct
+    // operation unless this node has already absorbed another arithmetic node.
+    if (fclass == 1 && !compilation.m_effective_options.fast_math &&
+        f->absorbed[0].empty() && f->absorbed[1].empty())
+    {
+        for (const auto argument : f->args) {
+            if (argument->type == Element_type::CCONST &&
+                !argument->asmd_placeholder && argument->c->value == 0.0)
+            {
+                return;
+            }
+        }
     }
 
     if (f->parent != elist->end() && f->parent->type == Element_type::CFUNC) {
@@ -5281,6 +5291,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             pf->absorbed[!parent_inv_op].insert(pf->absorbed[!parent_inv_op].end(), f->absorbed[1].begin(), f->absorbed[1].end());
             pf->force_not_constant = true;
             *it = Element(make_intermediate_constant(ev, neutral));
+            it->asmd_placeholder = true;
             return;
         }
     }
@@ -5304,36 +5315,65 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     // reduce constants with extended precision
     long double ac[2] = {neutral, neutral};
+    bool has_additive_constant[2] = {false, false};
+    bool finite_nonzero_factors = true;
     for (int i = 0; i < 2; i++) {
-        for (auto e = f->absorbed[i].begin(); e != f->absorbed[i].end();) {
-            auto next_e = next(e);
+        for (auto e = f->absorbed[i].begin(); e != f->absorbed[i].end(); ++e) {
             if (e->size() == 1 && e->front().type == Element_type::CCONST) {
                 auto v = e->front().c;
-                if (fclass == 1) {
-                    ac[i] += static_cast<long double>(v->value);
+                if (fclass == 1 && !e->front().asmd_placeholder) {
+                    ac[i] = has_additive_constant[i]
+                        ? ac[i] + static_cast<long double>(v->value)
+                        : static_cast<long double>(v->value);
+                    has_additive_constant[i] = true;
                 }
-                else {
+                else if (fclass == 2) {
+                    finite_nonzero_factors = finite_nonzero_factors &&
+                        std::isfinite(v->value) && v->value != 0.0;
                     ac[i] *= static_cast<long double>(v->value);
                 }
-                f->absorbed[i].erase(e);
             }
-            e = next_e;
         }
     }
-    const long double ac_final_ld = fclass == 1 ? ac[0] - ac[1] : ac[0] / ac[1];
+    long double ac_final_ld;
+    if (fclass == 1) {
+        ac_final_ld = has_additive_constant[0] && has_additive_constant[1]
+            ? ac[0] - ac[1] : has_additive_constant[0] ? ac[0] : -ac[1];
+    }
+    else {
+        ac_final_ld = ac[0] / ac[1];
+    }
     double ac_final = static_cast<double>(ac_final_ld);
-    const bool retain_additive_constant = ac_final != neutral;
+    // A finite runtime term can balance constants whose combined coefficient
+    // cannot fit in double. Keep those factors instead of replacing them with
+    // zero or infinity before evaluating the runtime terms.
+    const bool retain_multiplicative_factors = fclass == 2 && finite_nonzero_factors &&
+        (!std::isfinite(ac_final) || ac_final == 0.0);
+    if (retain_multiplicative_factors) {
+        ac_final = neutral;
+    }
+    const bool retain_additive_constant = ac_final != neutral ||
+        ((has_additive_constant[0] || has_additive_constant[1]) &&
+            !compilation.m_effective_options.fast_math);
 
     struct absorbed_term {
         elist_t chunk;
         int     factor;
     };
     vector<absorbed_term> terms;
+    vector<absorbed_term> retained_factors;
     terms.reserve(f->absorbed[0].size() + f->absorbed[1].size());
 
     auto drain_terms = [&](int index, int contribution) {
         for (auto &chunk : f->absorbed[index]) {
-            terms.push_back({std::move(chunk), contribution});
+            if (chunk.size() == 1 && chunk.front().type == Element_type::CCONST) {
+                if (retain_multiplicative_factors && chunk.front().c->value != neutral) {
+                    retained_factors.push_back({std::move(chunk), contribution});
+                }
+            }
+            else {
+                terms.push_back({std::move(chunk), contribution});
+            }
         }
         f->absorbed[index].clear();
     };
@@ -5350,15 +5390,34 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     merged.reserve(terms.size());
     for (auto &term : terms) {
         if (!merged.empty() && !comp(term.chunk, merged.back().chunk) && !comp(merged.back().chunk, term.chunk)) {
-            merged.back().factor += term.factor;
-            if (merged.back().factor == 0) {
-                merged.pop_back();
+            // Combining opposite-sign/opposite-exponent copies can erase IEEE-visible
+            // effects: x-x is NaN for x=NaN and x/x is NaN for x=0.  Keep those
+            // cancellations explicit unless the caller opted into fast_math.
+            const bool would_cancel_or_cross_zero =
+                ((merged.back().factor > 0 && term.factor < 0) ||
+                 (merged.back().factor < 0 && term.factor > 0));
+            if (!compilation.m_effective_options.fast_math && would_cancel_or_cross_zero) {
+                if (term.factor != 0) {
+                    merged.push_back({std::move(term.chunk), term.factor});
+                }
+            }
+            else {
+                merged.back().factor += term.factor;
+                if (merged.back().factor == 0) {
+                    merged.pop_back();
+                }
             }
         }
         else
         if (term.factor != 0) {
             merged.push_back({std::move(term.chunk), term.factor});
         }
+    }
+
+    // Apply unrepresentable coefficient factors after the simplified runtime
+    // terms. Merging equal factors into powers would recreate the range loss.
+    for (auto &term : retained_factors) {
+        merged.push_back(std::move(term));
     }
 
     // Reconstruct a semantic list for SSE2 and AArch64 lowering.
@@ -6982,7 +7041,21 @@ impl::Semantic_program impl::Clear_semantic_producer::produce(
             }
             case UNARY:
                 if (temp.content == "-") {
-                    emit_call(&function_map().find("neg")->second);
+                    if (semantic_stack.empty()) {
+                        throw std::logic_error("Invalid semantic expression");
+                    }
+                    semantic_nodes.push_back({Semantic_record(0.0), 0, 0});
+                    const size_t zero = semantic_nodes.size() - 1;
+                    const size_t operand = semantic_stack.back();
+                    const size_t first_child = semantic_children.size();
+                    semantic_children.push_back(zero);
+                    semantic_children.push_back(operand);
+                    semantic_nodes.push_back({
+                        Semantic_record(&function_map().find("sub")->second),
+                        first_child,
+                        2,
+                    });
+                    semantic_stack.back() = semantic_nodes.size() - 1;
                 }
                 break;
             case NUMERIC_LITERAL: {

@@ -67,7 +67,7 @@ Options can be configured before calling `set_expression()` to control code gene
 
 ```cpp
 mexce::evaluator eval;
-eval.enable_fast_math();           // Enable algebraic simplifications
+eval.enable_fast_math();           // Allow additional special-value assumptions
 eval.use_x87_backend();            // Use x87 FPU instead of SSE2
 eval.enable_cse();                 // Enable common subexpression elimination
 eval.set_expression("x + y");      // Options take effect here
@@ -75,9 +75,15 @@ eval.set_expression("x + y");      // Options take effect here
 
 | Method | Description |
 | :--- | :--- |
-| `enable_fast_math()` | Enables algebraic simplifications that may change results for special values (NaN, Inf). Examples: `x-x → 0`, `x/x → 1`, `0*x → 0`. |
+| `enable_fast_math()` | Allows additional algebraic simplifications that may change results for special values (NaN, Inf). Examples: `x-x → 0`, `x/x → 1`, `0*x → 0`. |
 | `use_x87_backend()` | Selects the x87 FPU backend on x86, with 80-bit internal precision. On Apple Silicon this preference is accepted and the ARM64 backend is used. |
 | `enable_cse()` | Enables Common Subexpression Elimination. Repeated identical subexpressions are computed once and reused. Supported by the x87 and ARM64 backends. |
+
+Algebraic simplification is enabled by default to reduce arithmetic work and
+improve numerical accuracy. Addition, subtraction, multiplication, and division
+can be regrouped and common terms combined; source grouping does not prescribe
+every floating-point intermediate. `fast_math` additionally permits the
+special-value assumptions listed above.
 
 On Apple Silicon, x86 backend preferences in `options` are compatibility
 no-ops; `get_backend()` reports `backend_type::arm64`. Fast-math and CSE options
@@ -98,6 +104,11 @@ x87 extended precision.
     | 4 (lowest) | `<`, `>` | — | Less-than and greater-than comparison |
 *   **Unary Operators:** Unary `+` and `-` are supported. Note that power operators (`^` and `**`) bind tighter than unary minus, so `-a**2` is evaluated as `-(a**2)`, matching Python semantics. Use parentheses to change the grouping: `(-a)**2`.
 *   **Comparison:** The `<` and `>` operators return a `double` (`1.0` if true, `0.0` if false).
+
+Source unary minus participates in algebraic simplification as subtraction
+from zero. In default mode, `-0.0` therefore produces positive zero. The
+explicit `neg(x)` function directly changes the sign, so `neg(0.0)` produces
+negative zero.
 
 ## Built-in Identifiers
 
@@ -183,7 +194,5 @@ check. On CPUs without SSE4.1, select `use_x87_backend()` before
 On x86, compilation is limited by simultaneously live intermediate values.
 SSE2 uses six operand registers on Windows and eight on Linux/macOS, falling
 back to x87 when needed. x87 has eight stack registers; expressions that exceed
-its capacity throw `std::overflow_error` during compilation. Strict arithmetic
-preserves grouping, so deeply balanced arithmetic trees can reach this limit.
-Fast-math permits regrouping that can reduce the required depth, with the
-floating-point tradeoffs described above.
+its capacity after algebraic simplification throw `std::overflow_error` during
+compilation.

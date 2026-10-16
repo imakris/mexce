@@ -113,6 +113,22 @@ python analysis/run_protected_benchmarks.py \
 
 ## Performance evidence
 
+For every change, carefully inspect the full benchmark's numerical accuracy
+and performance against a suitable prior baseline. Review every configuration,
+including native-compiler and reference comparisons, the complete error
+distribution and its tails, per-expression changes, compilation or evaluation
+failures, exclusions, timings, and backend coverage. Investigate and explain
+regressions; a successful benchmark exit or green CI alone is not numerical
+acceptance. Default algebraic simplification is part of MEXCE's accuracy
+design; `fast_math` adds relaxed special-value assumptions and is not required
+to obtain that simplification.
+
+Attribute comparisons to their exact source, corpus, harness, compiler, and
+build options. Reuse retained measurements when those inputs are unchanged,
+as with a documentation-only change; otherwise inspect the reports produced
+by applicable CI. This requirement does not call for duplicate benchmark runs
+with identical measured inputs.
+
 The [release performance acceptance](../analysis/performance_acceptance.md)
 records its exact candidate, baseline, compiler inputs, measurement method,
 resource checks and limitations. It is evidence for those inputs rather than a

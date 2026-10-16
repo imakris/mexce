@@ -344,17 +344,26 @@ void test_portable_numeric_boundaries(Test_suite& suite)
         evaluator.opts().prefer_x87 = prefer_x87;
         double x = -2.0;
         evaluator.bind_protected(x, 0);
-        x = 0.0;
-        load(evaluator, mexce::encode_protected_expression(
-            "x * 1e+308 * 1e+308", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
-        suite.expect(evaluator.evaluate() == 0.0, "protected_strict_finite_factor_order");
-        load(evaluator, mexce::encode_protected_expression(
-            "-x", {{"x", 0}}, mexce::Protected_math_mode::STRICT));
-        suite.expect(evaluator.evaluate() == 0.0 && std::signbit(evaluator.evaluate()),
-            "protected_unary_minus_positive_zero");
-        x = -0.0;
-        suite.expect(evaluator.evaluate() == 0.0 && !std::signbit(evaluator.evaluate()),
-            "protected_unary_minus_negative_zero");
+        for (const auto mode : {
+            mexce::Protected_math_mode::STRICT, mexce::Protected_math_mode::FAST})
+        {
+            x = 0.0;
+            load(evaluator, mexce::encode_protected_expression(
+                "x * 1e+308 * 1e+308", {{"x", 0}}, mode));
+            suite.expect(evaluator.evaluate() == 0.0, "protected_finite_factors_preserve_zero");
+
+            x = std::ldexp(1.0, -600);
+            load(evaluator, mexce::encode_protected_expression(
+                "x * 4.149515568880993e+180 * 4.149515568880993e+180", {{"x", 0}}, mode));
+            suite.expect(evaluator.evaluate() == std::ldexp(1.0, 600),
+                "protected_unrepresentable_coefficient_product");
+
+            x = std::ldexp(1.0, 600);
+            load(evaluator, mexce::encode_protected_expression(
+                "x * 2.409919865102884e-181 * 2.409919865102884e-181", {{"x", 0}}, mode));
+            suite.expect(evaluator.evaluate() == std::ldexp(1.0, -600),
+                "protected_unrepresentable_coefficient_underflow");
+        }
         x = -2.0;
         for (const char* expression : {
             "(x^1.5)^2", "(x^(1/3))^3", "(x^0.2)^5"})
@@ -702,8 +711,6 @@ void test_fallback_and_wipes(Test_suite& suite)
 
     mexce::evaluator clear;
     clear.bind(value, "x");
-    // Regrouping this Horner tree is what increases the register pressure.
-    clear.enable_fast_math();
     clear.set_expression(polynomial);
     const double expected = clear.evaluate();
 
@@ -712,7 +719,7 @@ void test_fallback_and_wipes(Test_suite& suite)
     load(
         evaluator,
         mexce::encode_protected_expression(
-            polynomial, {{"x", 0}}, mexce::Protected_math_mode::FAST));
+            polynomial, {{"x", 0}}, mexce::Protected_math_mode::STRICT));
     suite.expect(evaluator.get_backend() == k_preferred_x87_backend, "protected_polynomial_backend");
     const double result = evaluator.evaluate();
     suite.expect(std::isfinite(result) && result == expected, "protected_fallback_exact_value");
