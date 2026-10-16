@@ -83,21 +83,22 @@
  *   - `bnd(x, period)` — periodic wrap similar to `fmod`, returning `x`
  *     reduced to the `[0, period)` interval.
  *   - `ceil(x)`, `floor(x)`, `round(x)` and `int(x)` — rounding helpers.
- *   - `cos(x)`, `sin(x)`, `tan(x)` — trigonometric functions (optionally using
- *     polynomial refinements when `MEXCE_ACCURACY` is defined).
+ *   - `cos(x)`, `sin(x)`, `tan(x)` — trigonometric functions.
  *   - `exp(x)` and `pow(a, b)` — base-e exponent and exponentiation.
  *   - `expn(x)` — exponent part of `x`, and `sfc(x)` — significand/fractional
  *     component of `x` in the range `[0.5, 1)`.
  *   - `log(x)`/`ln(x)`, `log2(x)`, `log10(x)`, `logb(base, value)` and
  *     `ylog2(y, x)` (`y * log2(x)`).
  *   - `max(a, b)`, `min(a, b)` and `mod(a, b)`.
- *   - `sign(x)` — returns `1` for positive values and `-1` otherwise.
+ *   - `sign(x)` — returns `1` for positive values, `0` for zero and `-1` for
+ *     negative values.
  *   - `signp(x)` — returns `1` for positive values and `0` when `x <= 0`.
  *   - `sqrt(x)` — square root.
  *
  * The parser rejects attempts to bind variables that collide with reserved
- * names.  Additional constants produced during simplification are stored inside
- * the evaluator and re-used across compilations of the same instance.
+ * names.  Additional constants produced during simplification are owned by the
+ * compilation state of the current expression and are released when it is
+ * replaced or reset.
  *
  * ### API surface
  *

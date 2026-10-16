@@ -234,7 +234,7 @@ x87 extended precision.
 | `logb(base, value)` | Logarithm with a custom base. |
 | `ylog2(y, x)` | Computes `y * log2(x)`. |
 | `ceil(x)`, `floor(x)`, `round(x)`, `trunc(x)`, `int(x)` | Rounding functions. |
-| `sign(x)` | Returns `-1.0` for negative `x`, `1.0` otherwise. |
+| `sign(x)` | Returns `-1.0` for negative `x`, `0.0` for zero and `1.0` for positive `x`. |
 | `signp(x)` | Returns `1.0` for positive `x`, `0.0` otherwise. |
 | `bnd(x, period)` | Wraps finite `x` to `[0, period)` for a finite positive period. |
 | `bias(x, a)`, `gain(x, a)` | Common tone-mapping curves (for inputs in `[0,1]`). |
