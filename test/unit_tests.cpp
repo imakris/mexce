@@ -389,8 +389,8 @@ void test_signed_zero_semantics(TestSuite& suite)
 
 void test_algebraic_simplification_accuracy(TestSuite& suite)
 {
-    const double large = std::ldexp(1.0, 600);
-    const double small = std::ldexp(1.0, -600);
+    const double large_factor = std::ldexp(1.0, 600);
+    const double small_factor = std::ldexp(1.0, -600);
     struct Range_case {
         const char* expression;
         double input;
@@ -400,10 +400,10 @@ void test_algebraic_simplification_accuracy(TestSuite& suite)
     // coefficient alone is outside double's range.
     const Range_case cases[] = {
         {"x * 1e+308 * 1e+308", 0.0, 0.0},
-        {"x * 4.149515568880993e+180 * 4.149515568880993e+180", small, large},
-        {"x * 2.409919865102884e-181 * 2.409919865102884e-181", large, small},
-        {"x / 4.149515568880993e+180 / 4.149515568880993e+180", large, small},
-        {"x / 2.409919865102884e-181 / 2.409919865102884e-181", small, large},
+        {"x * 4.149515568880993e+180 * 4.149515568880993e+180", small_factor, large_factor},
+        {"x * 2.409919865102884e-181 * 2.409919865102884e-181", large_factor, small_factor},
+        {"x / 4.149515568880993e+180 / 4.149515568880993e+180", large_factor, small_factor},
+        {"x / 2.409919865102884e-181 / 2.409919865102884e-181", small_factor, large_factor},
     };
     for (bool prefer_x87 : {false, true}) {
         for (bool fast_math : {false, true}) {
