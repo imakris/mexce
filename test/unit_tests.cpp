@@ -62,6 +62,7 @@ extern "C" int mexce_test_override_mprotect(void* addr, size_t len, int prot)
 #include <cstdint>
 #include <functional>
 #include <iomanip>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -645,6 +646,47 @@ void test_binding_and_unbinding(TestSuite& suite) {
     suite.expect_throw<std::logic_error>("unbind_unknown_variable", [&]() {
         unbind_eval.unbind("unknown");
     }, "Attempted to unbind an unknown variable");
+}
+
+void test_live_binding_replacement_unbinding(TestSuite& suite)
+{
+    double original_value    = 2.0;
+    double replacement_value = 3.0;
+    double unused_value      = 5.0;
+
+    for (const bool remove_all : {false, true}) {
+        const std::string operation = remove_all ? "unbind_all" : "unbind";
+        mexce::evaluator eval;
+        eval.bind(original_value, "x");
+        eval.set_expression("x + 1");
+        eval.bind(replacement_value, "x");
+        suite.expect_near(operation + "_live_replacement_keeps_compiled_capture", eval.evaluate(), 3.0);
+        if (remove_all) {
+            eval.unbind_all();
+        }
+        else {
+            eval.unbind("x");
+        }
+        suite.expect_near(operation + "_live_replacement_sets_zero", eval.evaluate(), 0.0);
+    }
+
+    mexce::evaluator eval;
+    eval.bind(original_value, "x", unused_value, "unused");
+    eval.set_expression("x + 1");
+    eval.bind(replacement_value, "unused");
+    eval.unbind("unused");
+    suite.expect_near("unused_live_replacement_preserves_expression", eval.evaluate(), 3.0);
+    eval.bind(replacement_value, "x");
+    eval.set_expression("x + 1");
+    suite.expect_near("live_replacement_applies_to_next_compilation", eval.evaluate(), 4.0);
+    eval.unbind("x");
+    suite.expect_near("recompiled_live_replacement_sets_zero", eval.evaluate(), 0.0);
+
+    eval.bind(original_value, "x");
+    eval.set_expression("3.25");
+    eval.bind(replacement_value, "x");
+    eval.unbind_all();
+    suite.expect_near("unused_live_replacement_preserves_constant", eval.evaluate(), 3.25);
 }
 
 void test_single_shot_preserves_binding_references(TestSuite& suite)
@@ -1630,6 +1672,7 @@ int main() {
     test_cse_rewrite_boundaries(suite);
     test_helper_functions_and_element(suite);
     test_binding_and_unbinding(suite);
+    test_live_binding_replacement_unbinding(suite);
     test_single_shot_preserves_binding_references(suite);
     test_binding_name_conflicts(suite);
     test_mexce_parsing_exception_class(suite);
