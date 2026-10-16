@@ -3978,8 +3978,8 @@ inline bool is_sse2_compatible(const impl::elist_const_it_t first, const impl::e
         }
     }
 
-    // If max depth exceeds register limit, use x87 with optimizer instead
-    // The x87 asmd_optimizer can reduce stack depth for chains of operations
+    // Try x87, whose register limit can be higher. Fast-math optimization can
+    // also reduce the stack depth of arithmetic chains.
     if (max_depth > k_sse2_max_registers) {
         return false;
     }
