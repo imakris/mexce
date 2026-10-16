@@ -42,6 +42,9 @@ Executes the expression most recently compiled by `set_expression()`.
 ### `evaluate(const std::string&)`
 
 Compiles and executes an expression for a single use without replacing the default expression.
+It uses the current named bindings and default evaluator options; instance option
+changes apply to `set_expression()`. To evaluate with configured options, call
+`set_expression()` followed by `evaluate()`.
 
 *   **Signature:** `double evaluate(const std::string& expression);`
 
@@ -131,6 +134,13 @@ respectively. These shortcuts preserve the sign of zero: an input of `-0.0`
 produces `-0.0` and negative infinity respectively. A runtime-bound exponent
 uses the general power operation and can differ from these shortcuts.
 
+Nested powers deliberately follow an algebraic convention, including in strict
+mode: `(x^b)^n` can become `x^(b*n)` when both exponents are constants, `n` is an
+integer, `b` is `+0.5`, `-0.5` or an integer with magnitude at most 65,536, and
+the combined exponent is finite. For `x = -4`, `(x^0.5)^2` therefore returns
+`-4`, while `sqrt(x)^2` produces NaN. General fractional inner exponents such
+as `1.5` do not use this rewrite.
+
 ## Backends
 
 `mexce` selects a code generation backend for the target architecture:
@@ -159,9 +169,21 @@ limit of 1,024; that limit does not account for the caller's existing stack use.
 *   Faster on modern CPUs due to better pipelining and avoiding x87 state transitions
 *   Results in XMM0 register (standard x64 ABI return convention)
 
+Rounding on this backend requires SSE4.1; there is no automatic CPU-feature
+check. On CPUs without SSE4.1, select `use_x87_backend()` before
+`set_expression()` and execute with `evaluate()`.
+
 ### x87 Backend (Default on 32-bit x86)
 *   Uses x87 FPU instructions with 80-bit internal precision
 *   Uses native x87 arithmetic, including periodic wrapping, and transcendental instructions
 *   Stack-based architecture can be more compact for certain expression patterns
 *   Supports Common Subexpression Elimination (CSE)
 *   On x86-64, enable with `eval.use_x87_backend();`
+
+On x86, compilation is limited by simultaneously live intermediate values.
+SSE2 uses six operand registers on Windows and eight on Linux/macOS, falling
+back to x87 when needed. x87 has eight stack registers; expressions that exceed
+its capacity throw `std::overflow_error` during compilation. Strict arithmetic
+preserves grouping, so deeply balanced arithmetic trees can reach this limit.
+Fast-math permits regrouping that can reduce the required depth, with the
+floating-point tradeoffs described above.
