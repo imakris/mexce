@@ -1322,6 +1322,8 @@ void test_source_free_fallback_ownership(TestSuite& suite)
     double a = 1.25;
     eval.bind(a, "a");
     eval.use_sse2_backend();
+    // Regrouping this Horner tree is what increases the register pressure.
+    eval.enable_fast_math();
 
     const std::string polynomial =
         "((((((((((2.20*a+1.1)*a+9.9)*a+8.8)*a+7.7)*a+6.6)*a+5.5)*a+4.4)*a+3.3)*a+2.2)*a+1.1)";

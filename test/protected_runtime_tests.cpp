@@ -702,6 +702,8 @@ void test_fallback_and_wipes(Test_suite& suite)
 
     mexce::evaluator clear;
     clear.bind(value, "x");
+    // Regrouping this Horner tree is what increases the register pressure.
+    clear.enable_fast_math();
     clear.set_expression(polynomial);
     const double expected = clear.evaluate();
 
@@ -710,7 +712,7 @@ void test_fallback_and_wipes(Test_suite& suite)
     load(
         evaluator,
         mexce::encode_protected_expression(
-            polynomial, {{"x", 0}}, mexce::Protected_math_mode::STRICT));
+            polynomial, {{"x", 0}}, mexce::Protected_math_mode::FAST));
     suite.expect(evaluator.get_backend() == k_preferred_x87_backend, "protected_polynomial_backend");
     const double result = evaluator.evaluate();
     suite.expect(std::isfinite(result) && result == expected, "protected_fallback_exact_value");
