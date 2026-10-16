@@ -6365,7 +6365,13 @@ void evaluator::bind(T& v, const std::string& s, Args&... args)
     if (built_in_constants_map().find(s) != built_in_constants_map().end()) {
         throw std::logic_error("Attempted to bind a variable, named as an existing constant");
     }
-    m_variables[s] = make_shared<Variable>(m_next_variable_id++, &v, s, get_ndt<T>());
+    const auto binding = m_variables.find(s);
+    auto replacement = make_shared<Variable>(m_next_variable_id++, &v, s, get_ndt<T>());
+    if (binding != m_variables.end()) {
+        // Rebinding preserves the compiled name's dependency for unbinding.
+        replacement->referenced = binding->second->referenced;
+    }
+    m_variables[s] = std::move(replacement);
 
     bind(args...);
 }

@@ -10,6 +10,9 @@ Associates a C++ variable with a symbolic name.
 *   **Supported Types:** `double`, `float`, `int16_t`, `int32_t`, `int64_t`.
 *   **Behavior:**
     *   Bound variables must outlive the `mexce::evaluator` instance.
+    *   Rebinding a name affects subsequent compilations. An existing compiled
+        expression retains its captured binding; unbinding that name still
+        resets the expression to `"0"` when it uses the name.
     *   Throws `std::logic_error` if `name` collides with a built-in function or constant.
 
 ### `unbind() / unbind_all()`
