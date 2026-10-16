@@ -535,17 +535,6 @@ protected:
 };
 
 
-inline
-double evaluator::evaluate(const std::string& expression)
-{
-    evaluator ev;
-    ev.m_variables = m_variables;
-    ev.set_expression(expression);
-    return ev.evaluate();
-}
-
-
-
 namespace impl {
 
 
@@ -6436,6 +6425,12 @@ void evaluator::unbind(const std::string& s, Args&... args)
 inline
 void evaluator::unbind_all()
 {
+    for (const auto& variable : m_variables) {
+        if (variable.second->referenced) {
+            set_expression("0");
+            break;
+        }
+    }
     m_variables.clear();
 }
 
@@ -6467,6 +6462,21 @@ void evaluator::unbind_all_protected()
         reset_compiled_expression();
     }
     m_protected_variables.clear();
+}
+
+
+inline
+double evaluator::evaluate(const std::string& expression)
+{
+    evaluator ev;
+    ev.m_next_variable_id = m_next_variable_id;
+    for (const auto& variable : m_variables) {
+        // A one-shot compilation must not clear the default's reference flags.
+        ev.m_variables.emplace(
+            variable.first, std::make_shared<impl::Variable>(*variable.second));
+    }
+    ev.set_expression(expression);
+    return ev.evaluate();
 }
 
 
