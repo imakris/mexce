@@ -841,7 +841,11 @@ struct Function
     using optimizer_t = void (*)(elist_it_t, evaluator*, elist_t*);
 
     uint64_t            id;
-    size_t              stack_req;
+    // Registers used inside the C library's math routines when a libm variant
+    // is called are not counted. On 64-bit targets that does not matter; on
+    // 32-bit x86 an expression that calls such a function with a nearly full
+    // x87 stack can still overflow it at run time instead of throwing.
+    size_t              stack_req; // Peak additional x87 registers beyond the input arguments.
     string              name;
     size_t              num_args;
 
@@ -1646,7 +1650,7 @@ inline Function Cos(bool use_libm = MEXCE_USE_LIBM_COS != 0)
     if (use_libm) {
         mexce_charstream s;
         emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::cos));
-        return Function(0, "cos", 1, 1, s.buf.size(), s.buf.data());
+        return Function(0, "cos", 1, 0, s.buf.size(), s.buf.data());
     }
 #if MEXCE_TRIG_USE_X87
     uint8_t code[] = { 0xd9, 0xff }; // fcos
@@ -1866,7 +1870,7 @@ inline Function Cos(bool use_libm = MEXCE_USE_LIBM_COS != 0)
     patch_ptr(red_sin_coeff_imm_pos, sin_ptr);
     patch_ptr(red_cos_coeff_imm_pos, cos_ptr);
 
-    return Function(0, "cos", 1, 0, buf.buf.size(), buf.buf.data());
+    return Function(0, "cos", 1, 3, buf.buf.size(), buf.buf.data());
 #else
     auto emit_jb = [&](size_t& rel32_pos) {
         buf < 0x0f < 0x82;                          // jb rel32
@@ -1980,7 +1984,7 @@ inline Function Cos(bool use_libm = MEXCE_USE_LIBM_COS != 0)
     std::memcpy(buf.buf.data() + coeff_imm_pos, &coeff_ptr, sizeof(coeff_ptr));
     std::memcpy(buf.buf.data() + thr_imm_pos, &thr_ptr, sizeof(thr_ptr));
 
-    return Function(0, "cos", 1, 0, buf.buf.size(), buf.buf.data());
+    return Function(0, "cos", 1, 2, buf.buf.size(), buf.buf.data());
 #endif
 #endif
 }
@@ -1992,7 +1996,7 @@ inline Function Sin(bool use_libm = MEXCE_USE_LIBM_SIN != 0)
     if (use_libm) {
         mexce_charstream s;
         emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::sin));
-        return Function(0, "sin", 1, 1, s.buf.size(), s.buf.data());
+        return Function(0, "sin", 1, 0, s.buf.size(), s.buf.data());
     }
 #if MEXCE_TRIG_USE_X87
     uint8_t code[] = { 0xd9, 0xfe }; // fsin
@@ -2213,7 +2217,7 @@ inline Function Sin(bool use_libm = MEXCE_USE_LIBM_SIN != 0)
     patch_ptr(red_sin_coeff_imm_pos, sin_ptr);
     patch_ptr(red_cos_coeff_imm_pos, cos_ptr);
 
-    return Function(0, "sin", 1, 0, buf.buf.size(), buf.buf.data());
+    return Function(0, "sin", 1, 3, buf.buf.size(), buf.buf.data());
 #else
     auto emit_jb = [&](size_t& rel32_pos) {
         buf < 0x0f < 0x82;                          // jb rel32
@@ -2337,7 +2341,7 @@ inline Function Sin(bool use_libm = MEXCE_USE_LIBM_SIN != 0)
     std::memcpy(buf.buf.data() + coeff_imm_pos, &coeff_ptr, sizeof(coeff_ptr));
     std::memcpy(buf.buf.data() + thr_imm_pos, &thr_ptr, sizeof(thr_ptr));
 
-    return Function(0, "sin", 1, 0, buf.buf.size(), buf.buf.data());
+    return Function(0, "sin", 1, 3, buf.buf.size(), buf.buf.data());
 #endif
 #endif
 }
@@ -2348,7 +2352,7 @@ inline Function Tan(bool use_libm = MEXCE_USE_LIBM_TAN != 0)
     if (use_libm) {
         mexce_charstream s;
         emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::tan));
-        return Function(0, "tan", 1, 1, s.buf.size(), s.buf.data());
+        return Function(0, "tan", 1, 0, s.buf.size(), s.buf.data());
     }
 #if MEXCE_TRIG_USE_X87
     uint8_t code[] = {
@@ -2707,7 +2711,7 @@ inline Function Tan(bool use_libm = MEXCE_USE_LIBM_TAN != 0)
     std::memcpy(buf.buf.data() + sin_coeff_imm_pos, &sin_coeff_ptr, sizeof(sin_coeff_ptr));
     std::memcpy(buf.buf.data() + sin_thr_imm_pos, &sin_thr_ptr, sizeof(sin_thr_ptr));
 
-    return Function(0, "tan", 1, 0, buf.buf.size(), buf.buf.data());
+    return Function(0, "tan", 1, 4, buf.buf.size(), buf.buf.data());
 #endif
 }
 
@@ -2758,7 +2762,7 @@ inline Function Sign()
         0xdd, 0xd9,                                 // fstp        st(1)
         0xdd, 0xd9                                  // fstp        st(1)
     };
-    return Function(0, "sign", 1, 1, sizeof(code), code);
+    return Function(0, "sign", 1, 2, sizeof(code), code);
 }
 
 
@@ -2788,17 +2792,17 @@ inline
 pair<elist_it_t, elist_it_t> get_dependent_chunk(elist_it_t it);
 
 inline
-void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last, void** shared_rax_cache = nullptr);
+size_t compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last, void** shared_rax_cache = nullptr);
 
 inline
-void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
+size_t emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
 {
     using namespace impl;
 
     assert(exponent >= 1);
 
     if (exponent == 1) {
-        return;
+        return 0;
     }
 
     // Peel off trailing zeros (squaring the base)
@@ -2810,7 +2814,7 @@ void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
     }
 
     if (exponent == 1) {
-        return;
+        return 0;
     }
 
     // Exponent is odd and > 1.
@@ -2834,6 +2838,7 @@ void emit_integer_power_sequence(impl::mexce_charstream& s, uint32_t exponent)
             break;
         }
     }
+    return 1; // The accumulator temporarily duplicates the base.
 }
 
 inline bool has_cse_effect(elist_const_it_t first, elist_const_it_t last)
@@ -2924,6 +2929,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         double a_d = abs(v_d);
 
         bool matched = true;
+        size_t power_extra = 0;
         mexce_charstream s;
         string optimized_name;
         string debug_desc;
@@ -2942,6 +2948,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
               < 0xd9 < 0xe8                         // fld1
               < 0xde < 0xf1;                        // fdivrp st(1), st
             optimized_name = "inv_sqrt";
+            power_extra = 1;
         }
         else
         if (r_d == v_d && a_d <= 65536.0) {
@@ -2954,11 +2961,12 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                   < 0xd9 < 0xe8;                    // fld1
             }
             else {
-                emit_integer_power_sequence(s, exponent);
+                power_extra = emit_integer_power_sequence(s, exponent);
 
                 if (invert) {
                     s < 0xd9 < 0xe8                 // fld1
                       < 0xde < 0xf1;                // fdivrp st(1), st
+                    power_extra = 1;
                 }
             }
             optimized_name = "pow_int";
@@ -2973,7 +2981,9 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
             base_chunk.splice(base_chunk.end(), *elist, base_chunk_range.first, base_chunk_range.second);
 
             mexce_charstream final_s;
-            compile_elist(final_s, base_chunk.begin(), base_chunk.end());
+            const size_t stack_req = (std::max)(
+                compile_elist(final_s, base_chunk.begin(), base_chunk.end()),
+                size_t(1) + power_extra);
             final_s.write((const char*)s.buf.data(), s.buf.size());
 
             if (!compilation.is_protected()) {
@@ -2996,7 +3006,7 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             uint8_t* cc = push_intermediate_code(ev, final_s.str());
             auto f_opt = make_shared<Function>(
-                compilation.m_next_element_id++, optimized_name, 0, 0,
+                compilation.m_next_element_id++, optimized_name, 0, stack_req,
                 final_s.buf.size(), cc, nullptr);
             f_opt->m_requires_x87_backend = true;
             f_opt->m_has_cse_effect = has_cse_effect(base_chunk.begin(), base_chunk.end());
@@ -3040,7 +3050,8 @@ void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             uint8_t* cc = push_intermediate_code(ev, generic_code.str());
             auto f_opt = make_shared<Function>(
-                compilation.m_next_element_id++, "pow_opt", 2, 0,
+                compilation.m_next_element_id++, "pow_opt", 2,
+                compilation.m_effective_options.use_libm_generic_pow ? 0 : 1,
                 generic_code.buf.size(), cc, nullptr);
             f_opt->m_requires_x87_backend = true;
             f_opt->args[0] = f->args[0];
@@ -3194,7 +3205,7 @@ inline Function Exp(bool use_libm = MEXCE_USE_LIBM_EXP != 0)
     if (use_libm) {
         mexce_charstream s;
         emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::exp));
-        return Function(0, "exp", 1, 1, s.buf.size(), s.buf.data());
+        return Function(0, "exp", 1, 0, s.buf.size(), s.buf.data());
     }
     uint8_t code[] = {
         0xd9, 0xea,                                 // fldl2e
@@ -3207,7 +3218,7 @@ inline Function Exp(bool use_libm = MEXCE_USE_LIBM_EXP != 0)
         0xd9, 0xfd,                                 // fscale
         0xdd, 0xd9,                                 // fstp        st(1)
     };
-    return Function(0, "exp", 1, 1, sizeof(code), code);
+    return Function(0, "exp", 1, 2, sizeof(code), code);
 }
 
 
@@ -3216,7 +3227,7 @@ inline Function Logb(bool use_libm = MEXCE_USE_LIBM_LOGB != 0)
     if (use_libm) {
         mexce_charstream s;
         emit_libm_binary_call(s, (void*)&mexce_libm_logb);
-        return Function(0, "logb", 2, 1, s.buf.size(), s.buf.data());
+        return Function(0, "logb", 2, 0, s.buf.size(), s.buf.data());
     }
     uint8_t code[] = {
         0xd9, 0xe8,                                 // fld1
@@ -3237,7 +3248,7 @@ inline Function Ln(bool use_libm = MEXCE_USE_LIBM_LOG != 0)
     if (use_libm) {
         mexce_charstream s;
         emit_libm_unary_call(s, (void*)static_cast<double(*)(double)>(std::log));
-        return Function(0, "ln", 1, 1, s.buf.size(), s.buf.data());
+        return Function(0, "ln", 1, 0, s.buf.size(), s.buf.data());
     }
     uint8_t code[] = {
         0xd9, 0xe8,                                 // fld1
@@ -3269,7 +3280,7 @@ inline Function Log10(bool use_libm = MEXCE_USE_LIBM_LOG10 != 0)
         0xd9, 0xc9, // fxch
         0xd9, 0xf1  // fyl2x
     };
-    return Function(0, "log10", 1, 0, sizeof(code), code);
+    return Function(0, "log10", 1, 1, sizeof(code), code);
 }
 
 
@@ -3285,7 +3296,7 @@ inline Function Log2(bool use_libm = MEXCE_USE_LIBM_LOG2 != 0)
         0xd9, 0xc9,                                 // fxch        st(1)
         0xd9, 0xf1                                  // fyl2x
     };
-    return Function(0, "log2", 1, 0, sizeof(code), code);
+    return Function(0, "log2", 1, 1, sizeof(code), code);
 }
 
 
@@ -3765,11 +3776,18 @@ void emit_load_constant(evaluator* ev, impl::mexce_charstream& s, double v)
 
 
 inline
-void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last, void** shared_rax_cache)
+size_t compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_it_t first, const impl::elist_const_it_t last, void** shared_rax_cache)
 {
     using namespace impl;
 
     int current_depth = 0;
+    size_t peak_depth = 0;
+    auto require_depth = [&](size_t depth) {
+        if (depth > 8) {
+            throw std::overflow_error("Expression too complex for x87 FPU (stack overflow)");
+        }
+        peak_depth = (std::max)(peak_depth, depth);
+    };
 
 #ifdef MEXCE_64
     // RAX caching: tracks current RAX value to avoid redundant mov instructions.
@@ -3812,9 +3830,7 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
                 }
                 code_buffer < 0xd9 < 0xc0;          // fld st(0)
                 ++current_depth;
-                if (current_depth > 8) {
-                    throw std::overflow_error("Expression too complex for x87 FPU (stack overflow)");
-                }
+                require_depth(static_cast<size_t>(current_depth));
                 continue;
             }
         }
@@ -3883,6 +3899,7 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             }
             case Element_type::CFUNC: {
                 auto tf = it->f;
+                require_depth(static_cast<size_t>(current_depth) + tf->stack_req);
                 code_buffer.write(tf->code.data(), tf->code.size());
                 // Emit CSE store suffix if present (stores result to temp for reuse)
                 if (!tf->cse_store_suffix.empty()) {
@@ -3898,10 +3915,9 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             }
         }
 
-        if (current_depth > 8) {
-            throw std::overflow_error("Expression too complex for x87 FPU (stack overflow)");
-        }
+        require_depth(static_cast<size_t>(current_depth));
     }
+    return peak_depth;
 }
 
 
@@ -5659,6 +5675,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     // === x87 code generation (original path) ===
     mexce_charstream s;
+    size_t stack_req = 1;
     stringstream debug_ss;
     bool debug_first = true;
     const bool build_debug = !compilation.is_protected();
@@ -5710,7 +5727,8 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 ensure_constant();
             }
 
-            compile_elist(s, term.chunk.begin(), term.chunk.end(), &rax_cache);
+            stack_req = (std::max)(stack_req,
+                size_t(have_value) + compile_elist(s, term.chunk.begin(), term.chunk.end(), &rax_cache));
 
             switch (factor) {
                 case  1:  break;
@@ -5786,15 +5804,18 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                 ensure_constant();
             }
 
-            compile_elist(s, term.chunk.begin(), term.chunk.end(), &rax_cache);
+            stack_req = (std::max)(stack_req,
+                size_t(have_value) + compile_elist(s, term.chunk.begin(), term.chunk.end(), &rax_cache));
 
             uint32_t abs_factor = static_cast<uint32_t>(abs(factor));
             if (abs_factor > 1U) {
-                emit_integer_power_sequence(s, abs_factor);
+                stack_req = (std::max)(stack_req,
+                    size_t(have_value) + 1 + emit_integer_power_sequence(s, abs_factor));
             }
 
             if (factor < 0) {
                 if (!have_value) {
+                    stack_req = (std::max)(stack_req, size_t(2));
                     // Load the retained numerator after the denominator, then
                     // divide directly without introducing a reciprocal first.
                     if (retain_constants && ac_final != neutral) {
@@ -5841,7 +5862,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     string new_name = (fclass == 1) ? "add_sub_opt" : "mul_div_opt";
     uint8_t* cc = push_intermediate_code(ev, s.str());
     auto f_opt = make_shared<Function>(
-        compilation.m_next_element_id++, new_name, 0, 0,
+        compilation.m_next_element_id++, new_name, 0, stack_req,
         s.buf.size(), cc, nullptr);
     f_opt->m_requires_x87_backend = true;
     if (build_debug) {
@@ -5937,7 +5958,7 @@ inline Function Gain()
         0xde, 0xf9,                                 // fdivp       st(1),st  ; (x-(2x-1)*(2a-1)/a)/(1-(2x-1)*(2a-1)/a)  [result]
 // gain_exit:
     };
-    return Function(0, "gain", 2, 1, sizeof(code), code);
+    return Function(0, "gain", 2, 2, sizeof(code), code);
 }
 
 

@@ -1388,6 +1388,102 @@ void test_fpu_stack_overflow(TestSuite& suite) {
 #endif
 }
 
+void test_fpu_temporary_register_limits(TestSuite& suite) {
+#ifndef MEXCE_ARM64
+    // A built-in needs its arguments plus the temporaries its own body pushes.
+    // Wrap each one in max(lo, ...) until the expression needs exactly eight x87
+    // registers, which must evaluate to the built-in's own value, and then once
+    // more, which must be rejected at compile time. lo lies far below every
+    // expected value, so a stack fault cannot hide behind the max().
+    struct Case {
+        const char* expression;
+        int peak;                                   // registers the expression needs alone
+        bool libm;
+        std::function<double(double, double)> expected; // (x, a)
+        std::vector<double> xs;
+    };
+    const auto gain = [](double x, double a) {
+        const double k = (1.0 / a) - 2.0;
+        return x < 0.5 ? x / (k * (1.0 - 2.0 * x) + 1.0)
+                       : (k * (1.0 - 2.0 * x) - x) / (k * (1.0 - 2.0 * x) - 1.0);
+    };
+    const auto bias = [](double x, double a) {
+        return x / (((1.0 / a) - 2.0) * (1.0 - x) + 1.0);
+    };
+    const std::vector<Case> cases = {
+        {"gain(x,a)", 4, false, gain, {0.25, 0.75}},
+        {"bias(x,a)", 3, false, bias, {0.25, 0.75}},
+        {"sign(x)", 3, false, [](double x, double) { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); },
+            {0.25, -0.25, 0.0}},
+        {"signp(x)", 3, false, [](double, double) { return 1.0; }, {0.25}},
+        {"sfc(x)", 2, false, [](double, double) { return 1.0; }, {0.25}},
+        {"expn(x)", 2, false, [](double, double) { return -2.0; }, {0.25}},
+        {"bnd(x,a)", 5, false, [](double x, double) { return x; }, {0.25}},
+        {"exp(x)", 3, false, [](double x, double) { return std::exp(x); }, {0.25}},
+        {"ln(x)", 2, false, [](double x, double) { return std::log(x); }, {0.25}},
+        {"log2(x)", 2, false, [](double x, double) { return std::log2(x); }, {0.25}},
+        {"log10(x)", 2, false, [](double x, double) { return std::log10(x); }, {0.25}},
+        {"logb(a,x)", 3, false, [](double x, double a) { return std::log(x) / std::log(a); }, {0.25}},
+        {"ylog2(a,x)", 2, false, [](double x, double a) { return a * std::log2(x); }, {0.25}},
+        {"pow(x,a)", 3, false, [](double x, double a) { return std::pow(x, a); }, {0.25}},
+        {"x^0.3", 3, false, [](double x, double) { return std::pow(x, 0.3); }, {0.25}},
+        {"x^2", 1, false, [](double x, double) { return x * x; }, {0.25}},
+        {"x^3", 2, false, [](double x, double) { return x * x * x; }, {0.25}},
+        {"x^-1", 2, false, [](double x, double) { return 1.0 / x; }, {0.25}},
+        {"gain(x,a)^2", 4, false,
+            [gain](double x, double a) { return gain(x, a) * gain(x, a); }, {0.25}},
+        {"gain(x,a)+bias(x,a)", 4, false,
+            [gain, bias](double x, double a) { return gain(x, a) + bias(x, a); }, {0.25}},
+        {"gain(x,a)*bias(x,a)", 4, false,
+            [gain, bias](double x, double a) { return gain(x, a) * bias(x, a); }, {0.25}},
+#if MEXCE_TRIG_USE_X87
+        {"sin(x)", 1, false, [](double x, double) { return std::sin(x); }, {0.25, 2.0, -100.0}},
+        {"cos(x)", 1, false, [](double x, double) { return std::cos(x); }, {0.25, 2.0, -100.0}},
+        {"tan(x)", 2, false, [](double x, double) { return std::tan(x); }, {0.25, 1.0, -1.0, 2.0}},
+#else
+        {"sin(x)", 4, false, [](double x, double) { return std::sin(x); }, {0.25, 2.0, -100.0}},
+        {"cos(x)", MEXCE_TRIG_USE_PIO2_KERNEL ? 4 : 3, false,
+            [](double x, double) { return std::cos(x); }, {0.25, 2.0, -100.0}},
+        {"tan(x)", 5, false, [](double x, double) { return std::tan(x); }, {0.25, 1.0, -1.0, 2.0}},
+#endif
+        // The libm calls take their operands off the x87 stack before the call and
+        // push only the result, so they need no register beyond their arguments.
+        {"sin(x)", 1, true, [](double x, double) { return std::sin(x); }, {0.25}},
+        {"cos(x)", 1, true, [](double x, double) { return std::cos(x); }, {0.25}},
+        {"tan(x)", 1, true, [](double x, double) { return std::tan(x); }, {0.25}},
+        {"exp(x)", 1, true, [](double x, double) { return std::exp(x); }, {0.25}},
+        {"ln(x)", 1, true, [](double x, double) { return std::log(x); }, {0.25}},
+        {"log2(x)", 1, true, [](double x, double) { return std::log2(x); }, {0.25}},
+        {"log10(x)", 1, true, [](double x, double) { return std::log10(x); }, {0.25}},
+        {"logb(a,x)", 2, true, [](double x, double a) { return std::log(x) / std::log(a); }, {0.25}},
+        {"ylog2(a,x)", 2, true, [](double x, double a) { return a * std::log2(x); }, {0.25}},
+        {"pow(x,a)", 3, true, [](double x, double a) { return std::pow(x, a); }, {0.25}},
+        {"x^0.3", 2, true, [](double x, double) { return std::pow(x, 0.3); }, {0.25}},
+    };
+    for (const auto& test : cases) {
+        const std::string label = std::string(test.libm ? "libm_" : "x87_") + test.expression;
+        mexce::evaluator eval;
+        eval.opts().prefer_x87 = true;
+        eval.opts().set_use_libm(test.libm);
+        double x = 0.25, a = 0.8, lo = -1e300;
+        eval.bind(x, "x", a, "a", lo, "lo");
+        std::string expression = test.expression;
+        for (int n = test.peak; n < 8; ++n) expression = "max(lo," + expression + ")";
+        eval.set_expression(expression);
+        for (const double value : test.xs) {
+            x = value;
+            suite.expect_near(label + "_fits_at_x=" + std::to_string(value),
+                eval.evaluate(), test.expected(x, a));
+        }
+        suite.expect_throw<std::overflow_error>(label + "_overflow",
+            [&] { eval.set_expression("max(lo," + expression + ")"); },
+            "Expression too complex for x87 FPU (stack overflow)");
+    }
+#else
+    (void)suite;
+#endif
+}
+
 // Test SSE4.1 rounding functions with SSE2 backend explicitly enabled
 void test_sse2_rounding_functions(TestSuite& suite) {
 #ifdef MEXCE_64
@@ -1994,6 +2090,7 @@ int main() {
     test_executable_buffer_failure_paths(suite);
 #endif
     test_fpu_stack_overflow(suite);
+    test_fpu_temporary_register_limits(suite);
     test_sse2_rounding_functions(suite);
     test_sse2_expression_simplification(suite);
     test_trunc_function(suite);

@@ -215,3 +215,13 @@ SSE2 uses six operand registers on Windows and eight on Linux/macOS, falling
 back to x87 when needed. x87 has eight stack registers; expressions that exceed
 its capacity after algebraic simplification throw `std::overflow_error` during
 compilation.
+
+The count includes the temporary registers used by the inline x87 code of the
+built-in functions. It does not include the registers used inside the C
+library's math routines when `sin`, `cos`, `tan`, `exp`, `ln`/`log`, `log10`,
+`log2`, `logb`, `ylog2` or the general case of `pow` is compiled as a call to
+the C library. On 64-bit targets those routines work in SSE registers, so this
+has no effect. On 32-bit x86 a routine can use x87 registers while the
+expression's values are still on the x87 stack, so an expression that calls one
+of these functions with a nearly full x87 stack can overflow the x87 stack at
+run time instead of throwing `std::overflow_error`.
