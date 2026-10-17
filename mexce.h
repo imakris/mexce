@@ -841,10 +841,9 @@ struct Function
     using optimizer_t = void (*)(elist_it_t, evaluator*, elist_t*);
 
     uint64_t            id;
-    // Registers used inside the C library's math routines when a libm variant
-    // is called are not counted. On 64-bit targets that does not matter; on
-    // 32-bit x86 an expression that calls such a function with a nearly full
-    // x87 stack can still overflow it at run time instead of throwing.
+    // Counts modeled inline and fused temporaries, not math-library internals.
+    // A library implementation may use x87 on 32-bit or 64-bit x86, so this
+    // metadata provides partial overflow protection rather than a guarantee.
     size_t              stack_req; // Peak additional x87 registers beyond the input arguments.
     string              name;
     size_t              num_args;

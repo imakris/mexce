@@ -212,16 +212,15 @@ check. On CPUs without SSE4.1, select `use_x87_backend()` before
 
 On x86, compilation is limited by simultaneously live intermediate values.
 SSE2 uses six operand registers on Windows and eight on Linux/macOS, falling
-back to x87 when needed. x87 has eight stack registers; expressions that exceed
-its capacity after algebraic simplification throw `std::overflow_error` during
-compilation.
+back to x87 when needed. x87 has eight stack registers; compilation throws
+`std::overflow_error` when the modeled peak depth after algebraic simplification
+exceeds that capacity.
 
-The count includes the temporary registers used by the inline x87 code of the
-built-in functions. It does not include the registers used inside the C
-library's math routines when `sin`, `cos`, `tan`, `exp`, `ln`/`log`, `log10`,
-`log2`, `logb`, `ylog2` or the general case of `pow` is compiled as a call to
-the C library. On 64-bit targets those routines work in SSE registers, so this
-has no effect. On 32-bit x86 a routine can use x87 registers while the
-expression's values are still on the x87 stack, so an expression that calls one
-of these functions with a nearly full x87 stack can overflow the x87 stack at
-run time instead of throwing `std::overflow_error`.
+This static check provides partial protection. It counts the modeled temporary
+registers used by inline x87 built-ins and fused operations, but not stack use
+inside C-library math routines. A runtime-library implementation may use x87
+on either 32-bit or 64-bit x86 while the expression's values remain on the x87
+stack. An accepted expression can therefore still overflow the stack at run
+time instead of throwing `std::overflow_error`; passing the check is not a
+complete overflow guarantee. Passing tests establish the exercised cases and
+implementations, not every possible library implementation.
