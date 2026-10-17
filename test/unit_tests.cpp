@@ -207,6 +207,68 @@ void test_periodic_and_mod(TestSuite& suite) {
     suite.expect_near("mod(negative)", eval.evaluate(), std::fmod(x, period));
 }
 
+void test_mod_complete_reduction(TestSuite& suite) {
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::pair<double, double> cases[] = {
+        {1e20, 3.0}, {1e30, 3.0}, {1e100, 3.0},
+        {-1e30, 3.0}, {1e30, -3.0}, {-1e30, -3.0},
+        {(std::numeric_limits<double>::max)(), 3.0},
+        {1.25, std::ldexp(3.0, -1000)},
+        {-1.25, std::ldexp(3.0, -1000)},
+        {(std::numeric_limits<double>::max)(), std::numeric_limits<double>::denorm_min()},
+        {-0.0, 3.0}, {4.0, -2.0}, {7.5, 2.0}
+    };
+    const std::pair<double, double> invalid_cases[] = {
+        {1.0, 0.0}, {0.0, 0.0}, {inf, 3.0}, {-inf, 3.0},
+        {nan, 3.0}, {1.0, nan}, {inf, inf}, {inf, nan}
+    };
+    for (bool prefer_x87 : {false, true}) {
+        mexce::evaluator eval;
+        eval.opts().prefer_x87 = prefer_x87;
+        double x = 0.0, period = 3.0;
+        eval.bind(x, "x", period, "p");
+        eval.set_expression("mod(x,p)");
+        for (const auto& input : cases) {
+            x = input.first;
+            period = input.second;
+            const double expected = std::fmod(x, period);
+            const double actual = eval.evaluate();
+            suite.expect_equal("mod_complete_reduction", actual, expected);
+            if (expected == 0.0) {
+                suite.expect_true("mod_zero_sign", std::signbit(actual) == std::signbit(expected));
+            }
+        }
+        for (const auto& input : invalid_cases) {
+            x = input.first;
+            period = input.second;
+            suite.expect_true("mod_invalid_operands", std::isnan(eval.evaluate()));
+        }
+        period = inf;
+        for (double value : {1.0, -1.0}) {
+            x = value;
+            suite.expect_equal("mod_infinite_divisor", eval.evaluate(), value);
+        }
+        eval.set_expression("mod(1e+30,3)");
+        suite.expect_equal("mod_constant_complete_reduction", eval.evaluate(), std::fmod(1e30, 3.0));
+
+        // bnd uses the same remainder reduction before adjusting its sign.
+        eval.set_expression("bnd(x,p)");
+        period = 3.0;
+        for (double value : {1e30, -1e30}) {
+            x = value;
+            double expected = std::fmod(x, period);
+            if (expected < 0.0) expected += period;
+            suite.expect_equal("bnd_complete_reduction", eval.evaluate(), expected);
+        }
+        for (const auto& input : invalid_cases) {
+            x = input.first;
+            period = input.second;
+            suite.expect_true("bnd_invalid_operands", std::isnan(eval.evaluate()));
+        }
+    }
+}
+
 void test_sign_and_comparisons(TestSuite& suite) {
     mexce::evaluator eval;
     double v = -3.0;
@@ -1895,6 +1957,7 @@ int main() {
     TestSuite suite;
     test_bias_and_gain(suite);
     test_periodic_and_mod(suite);
+    test_mod_complete_reduction(suite);
     test_sign_and_comparisons(suite);
     test_exponent_and_significand(suite);
     test_logs_and_powers(suite);

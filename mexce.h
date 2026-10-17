@@ -3442,14 +3442,30 @@ inline Function Trunc()
 }
 
 
+inline void emit_complete_fprem(mexce_charstream& code)
+{
+    // FPREM only partially reduces large exponent gaps. Keep both operands
+    // and repeat until C2 clears; the loop needs no additional x87 register.
+    code < 0xd9 < 0xf8                              // fprem
+         < 0xdf < 0xe0                              // fnstsw ax
+         < 0xf6 < 0xc4 < 0x04                       // test ah, 4 (C2)
+         < 0x74 < 0x0c                              // jz complete
+         // C2 is undefined after an invalid operation. Only a finite,
+         // nonzero partial remainder can require another reduction.
+         < 0xd9 < 0xe5                              // fxam
+         < 0xdf < 0xe0                              // fnstsw ax
+         < 0x80 < 0xe4 < 0x05                       // and ah, 5 (C2 | C0)
+         < 0x80 < 0xfc < 0x04                       // cmp ah, 4 (normal or denormal)
+         < 0x74 < 0xeb;                             // je fprem
+}
+
 inline Function Mod()
 {
-    uint8_t code[] = {
-        0xd9, 0xc9,                                 // fxch        st(1)
-        0xd9, 0xf8,                                 // fprem
-        0xdd, 0xd9                                  // fstp        st(1)
-    };
-    return Function(0, "mod", 2, 0, sizeof(code), code);
+    mexce_charstream code;
+    code < 0xd9 < 0xc9;                             // fxch st(1)
+    emit_complete_fprem(code);
+    code < 0xdd < 0xd9;                             // fstp st(1)
+    return Function(0, "mod", 2, 0, code.buf.size(), code.buf.data());
 }
 
 
@@ -3538,9 +3554,9 @@ inline Function Ne()
 inline Function Bnd()
 {
     mexce_charstream code;
-    code < 0xd9 < 0xc9                              // fxch st(1): value, period
-         < 0xd9 < 0xf8                              // fprem
-         < 0xd9 < 0xc1                              // fld st(1): keep original period
+    code < 0xd9 < 0xc9;                             // fxch st(1): value, period
+    emit_complete_fprem(code);
+    code < 0xd9 < 0xc1                              // fld st(1): keep original period
          < 0xd9 < 0xc9                              // fxch st(1)
          < 0xd9 < 0xc0                              // fld st(0)
          < 0xdc < 0xc2                              // fadd st(2), st
