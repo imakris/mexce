@@ -3780,6 +3780,19 @@ void compile_elist(impl::mexce_charstream& code_buffer, const impl::elist_const_
             auto prev = it;
             --prev;
             if (prev->type == it->type && prev->id == it->id) {
+                const auto operation = std::next(it);
+                if (operation != last && operation->type == Element_type::CFUNC &&
+                    operation->f->num_args == 2 &&
+                    (operation->f->name == "sub" || operation->f->name == "div") &&
+                    operation->f->cse_store_suffix.empty() &&
+                    operation->f->cse_store_addr == nullptr)
+                {
+                    // Keep the self-operation's exceptional-value behavior
+                    // without occupying another x87 stack register.
+                    code_buffer < 0xd8 < (operation->f->name == "sub" ? 0xe0 : 0xf0);
+                    it = operation;               // fsub/fdiv st(0), st(0)
+                    continue;
+                }
                 code_buffer < 0xd9 < 0xc0;          // fld st(0)
                 ++current_depth;
                 if (current_depth > 8) {
@@ -5230,13 +5243,50 @@ string elist_to_string(const elist_t& elist)
 }
 
 
+inline int arithmetic_class(const string& name)
+{
+    if (name == "add" || name == "sub") { return 1; }
+    if (name == "mul" || name == "div") { return 2; }
+    return 0;
+}
+
+
+inline double scaled_multiplicative_coefficient(const Function& function)
+{
+    long double mantissa[2] = {1.0L, 1.0L};
+    int64_t exponent[2] = {0, 0};
+    for (int i = 0; i < 2; ++i) {
+        for (const auto& chunk : function.absorbed[i]) {
+            if (chunk.size() != 1 || chunk.front().type != Element_type::CCONST) {
+                continue;
+            }
+            int factor_exponent  = 0;
+            int product_exponent = 0;
+            mantissa[i] *= std::frexp(static_cast<long double>(chunk.front().c->value), &factor_exponent);
+            mantissa[i] = std::frexp(mantissa[i], &product_exponent);
+            exponent[i] += factor_exponent + product_exponent;
+        }
+    }
+    int ratio_exponent = 0;
+    const long double fraction = std::frexp(mantissa[0] / mantissa[1], &ratio_exponent);
+    const int64_t scale         = exponent[0] - exponent[1] + ratio_exponent;
+    if (scale > std::numeric_limits<double>::max_exponent) {
+        return std::copysign(std::numeric_limits<double>::infinity(), static_cast<double>(fraction));
+    }
+    if (scale < std::numeric_limits<double>::min_exponent - std::numeric_limits<double>::digits) {
+        return std::copysign(0.0, static_cast<double>(fraction));
+    }
+    return static_cast<double>(std::ldexp(fraction, static_cast<int>(scale)));
+}
+
+
 inline
 void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 {
     auto& compilation = ev->active_compilation();
     auto f = it->f;
     auto fname = f->name;
-    int fclass = (fname == "add" || fname == "sub") ? 1 : (fname == "mul" || fname == "div") ? 2 : 0;
+    int fclass = arithmetic_class(fname);
     assert(fclass);
 
     double neutral = fclass == 1 ? 0.0 : 1.0;
@@ -5252,24 +5302,10 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         return;
     }
 
-    // Adding a real zero is observable for signed zero. Preserve the direct
-    // operation unless this node has already absorbed another arithmetic node.
-    if (fclass == 1 && !compilation.m_effective_options.fast_math &&
-        f->absorbed[0].empty() && f->absorbed[1].empty())
-    {
-        for (const auto argument : f->args) {
-            if (argument->type == Element_type::CCONST &&
-                !argument->asmd_placeholder && argument->c->value == 0.0)
-            {
-                return;
-            }
-        }
-    }
-
     if (f->parent != elist->end() && f->parent->type == Element_type::CFUNC) {
         shared_ptr<Function> pf = f->parent->f;
         auto pname = pf->name;
-        int pclass = (pname == "add" || pname == "sub") ? 1 : (pname == "mul" || pname == "div") ? 2 : 0;
+        int pclass = arithmetic_class(pname);
         bool parg2_inv = (pname == "sub" || pname == "div");
 
         if (pclass && pclass == fclass && !contains_cse(f->parent)) {
@@ -5316,11 +5352,14 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
     // reduce constants with extended precision
     long double ac[2] = {neutral, neutral};
     bool has_additive_constant[2] = {false, false};
-    bool finite_nonzero_factors = true;
+    bool finite_constants = true;
+    bool nonzero_factors  = true;
+    bool coefficient_lost_range = false;
     for (int i = 0; i < 2; i++) {
         for (auto e = f->absorbed[i].begin(); e != f->absorbed[i].end(); ++e) {
             if (e->size() == 1 && e->front().type == Element_type::CCONST) {
                 auto v = e->front().c;
+                finite_constants = finite_constants && std::isfinite(v->value);
                 if (fclass == 1 && !e->front().asmd_placeholder) {
                     ac[i] = has_additive_constant[i]
                         ? ac[i] + static_cast<long double>(v->value)
@@ -5328,9 +5367,9 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
                     has_additive_constant[i] = true;
                 }
                 else if (fclass == 2) {
-                    finite_nonzero_factors = finite_nonzero_factors &&
-                        std::isfinite(v->value) && v->value != 0.0;
+                    nonzero_factors = nonzero_factors && v->value != 0.0;
                     ac[i] *= static_cast<long double>(v->value);
+                    coefficient_lost_range = coefficient_lost_range || !std::isnormal(ac[i]);
                 }
             }
         }
@@ -5344,31 +5383,53 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
         ac_final_ld = ac[0] / ac[1];
     }
     double ac_final = static_cast<double>(ac_final_ld);
-    // A finite runtime term can balance constants whose combined coefficient
-    // cannot fit in double. Keep those factors instead of replacing them with
-    // zero or infinity before evaluating the runtime terms.
-    const bool retain_multiplicative_factors = fclass == 2 && finite_nonzero_factors &&
-        (!std::isfinite(ac_final) || ac_final == 0.0);
-    if (retain_multiplicative_factors) {
+    if (fclass == 2 && finite_constants && nonzero_factors && coefficient_lost_range) {
+        // A later factor can restore the range without restoring precision lost
+        // by an earlier subnormal product. Recompute only this exceptional path.
+        ac_final = scaled_multiplicative_coefficient(*f);
+    }
+    // Runtime terms can balance constants whose reduced value overflows or
+    // loses multiplicative precision in the subnormal range.
+    const bool retain_constants = finite_constants &&
+        (fclass == 1 ? !std::isfinite(ac_final) : nonzero_factors && !std::isnormal(ac_final));
+    if (retain_constants) {
         ac_final = neutral;
     }
-    const bool retain_additive_constant = ac_final != neutral ||
+    const bool retain_additive_constant = !retain_constants && (ac_final != neutral ||
         ((has_additive_constant[0] || has_additive_constant[1]) &&
-            !compilation.m_effective_options.fast_math);
+            !compilation.m_effective_options.fast_math));
 
     struct absorbed_term {
         elist_t chunk;
         int     factor;
     };
     vector<absorbed_term> terms;
-    vector<absorbed_term> retained_factors;
+    vector<absorbed_term> retained_constants;
     terms.reserve(f->absorbed[0].size() + f->absorbed[1].size());
+    bool have_coefficient_prefix     = false;
+    bool coefficient_prefix_complete = false;
 
     auto drain_terms = [&](int index, int contribution) {
         for (auto &chunk : f->absorbed[index]) {
             if (chunk.size() == 1 && chunk.front().type == Element_type::CCONST) {
-                if (retain_multiplicative_factors && chunk.front().c->value != neutral) {
-                    retained_factors.push_back({std::move(chunk), contribution});
+                if (retain_constants && chunk.front().c->value != neutral) {
+                    if (fclass == 2 && !coefficient_prefix_complete) {
+                        const double value = chunk.front().c->value;
+                        const double combined = index == 0 ? ac_final * value : ac_final / value;
+                        // Keep a representable initial segment of the constants.
+                        // Its first factor is a supplied constant or its reciprocal;
+                        // later folds must retain full normal precision.
+                        if (std::isnormal(combined) ||
+                            (!have_coefficient_prefix && std::isfinite(combined) && combined != 0.0))
+                        {
+                            ac_final = combined;
+                            have_coefficient_prefix = true;
+                            continue;
+                        }
+                        // Later growth must not bypass a deferred factor.
+                        coefficient_prefix_complete = true;
+                    }
+                    retained_constants.push_back({std::move(chunk), contribution});
                 }
             }
             else {
@@ -5388,35 +5449,77 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
     vector<absorbed_term> merged;
     merged.reserve(terms.size());
-    for (auto &term : terms) {
-        if (!merged.empty() && !comp(term.chunk, merged.back().chunk) && !comp(merged.back().chunk, term.chunk)) {
-            // Combining opposite-sign/opposite-exponent copies can erase IEEE-visible
-            // effects: x-x is NaN for x=NaN and x/x is NaN for x=0.  Keep those
-            // cancellations explicit unless the caller opted into fast_math.
-            const bool would_cancel_or_cross_zero =
-                ((merged.back().factor > 0 && term.factor < 0) ||
-                 (merged.back().factor < 0 && term.factor > 0));
-            if (!compilation.m_effective_options.fast_math && would_cancel_or_cross_zero) {
-                if (term.factor != 0) {
-                    merged.push_back({std::move(term.chunk), term.factor});
-                }
+    vector<absorbed_term> cancellations;
+    if (!compilation.m_effective_options.fast_math) {
+        for (size_t first = 0; first < terms.size();) {
+            size_t last = first + 1;
+            int factor = terms[first].factor;
+            while (last < terms.size() &&
+                !comp(terms[first].chunk, terms[last].chunk) &&
+                !comp(terms[last].chunk, terms[first].chunk))
+            {
+                factor += terms[last].factor;
+                ++last;
+            }
+            if (factor != 0) {
+                merged.push_back({std::move(terms[first].chunk), factor});
             }
             else {
+                // Keep complete cancellation separate from the running total.
+                // Both equal chunks are evaluated, preserving exceptional values
+                // without rounding another term through an intermediate sum.
+                elist_t cancellation = std::move(terms[first].chunk);
+                cancellation.splice(cancellation.end(), terms[first + 1].chunk);
+                cancellation.push_back(Element(make_function(ev, fclass == 1 ? "sub" : "div")));
+                link_arguments(cancellation);
+                cancellations.push_back({std::move(cancellation), 1});
+            }
+            first = last;
+        }
+    }
+    else {
+        for (auto &term : terms) {
+            if (!merged.empty() && !comp(term.chunk, merged.back().chunk) && !comp(merged.back().chunk, term.chunk)) {
                 merged.back().factor += term.factor;
                 if (merged.back().factor == 0) {
                     merged.pop_back();
                 }
             }
-        }
-        else
-        if (term.factor != 0) {
-            merged.push_back({std::move(term.chunk), term.factor});
+            else
+            if (term.factor != 0) {
+                merged.push_back({std::move(term.chunk), term.factor});
+            }
         }
     }
 
-    // Apply unrepresentable coefficient factors after the simplified runtime
-    // terms. Merging equal factors into powers would recreate the range loss.
-    for (auto &term : retained_factors) {
+    // Keep the runtime chain ahead of retained constants, except that a leading
+    // denominator needs the prefix as its numerator rather than a reciprocal.
+    if (retain_constants && fclass == 2 && ac_final != neutral) {
+        const bool leading_denominator = !merged.empty() && merged.front().factor < 0;
+        // x87 loads that numerator after evaluating the denominator so the
+        // constant does not consume a register needed by its expression.
+        if (!leading_denominator || compilation.m_semantic_simplify_mode) {
+            absorbed_term prefix{elist_t(), 1};
+            prefix.chunk.push_back(Element(make_intermediate_constant(ev, ac_final)));
+            if (leading_denominator) {
+                merged.insert(merged.begin(), std::move(prefix));
+            }
+            else {
+                merged.push_back(std::move(prefix));
+            }
+            ac_final = neutral;
+        }
+    }
+
+    // Apply remaining range-sensitive constants after the simplified runtime terms.
+    // Merging equal constants into coefficients would recreate the range loss.
+    for (auto &term : retained_constants) {
+        merged.push_back(std::move(term));
+    }
+
+    // Evaluate complete cancellations after the ordinary reduced chain.
+    // Their neutral finite results do not perturb its arithmetic order.
+    for (auto &term : cancellations) {
         merged.push_back(std::move(term));
     }
 
@@ -5676,7 +5779,16 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             if (factor < 0) {
                 if (!have_value) {
-                    s < 0xd9 < 0xe8;                // fld1
+                    // Load the retained numerator after the denominator, then
+                    // divide directly without introducing a reciprocal first.
+                    if (retain_constants && ac_final != neutral) {
+                        emit_load_constant(ev, s, ac_final);
+                        invalidate_rax_cache();
+                        constant_multiplied = true;
+                    }
+                    else {
+                        s < 0xd9 < 0xe8;            // fld1
+                    }
                     s < 0xde < 0xf1;                // fdivrp   st(1), st
                 }
                 else {
@@ -5689,7 +5801,7 @@ void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist)
 
             if (!have_value) {
                 have_value = true;
-                if (ac_final != neutral) {
+                if (!constant_multiplied && ac_final != neutral) {
                     emit_apply_op_with_constant<0x08>(ev, s, ac_final);
                     invalidate_rax_cache();
                     constant_multiplied = true;
@@ -7379,10 +7491,31 @@ compile_candidate:
                     // immediately so repeated foldable subtrees do not leak one
                     // executable page per fold before the final expression compile.
                     candidate->release_executable();
-                    m_elist.erase(first_arg_it, y);
-                    *y = Element(make_intermediate_constant(this, res));
-                    y = y_next;
-                    continue;
+
+                    bool retain_operands = false;
+                    const int fclass = arithmetic_class(f->name);
+                    if (fclass && f->parent != m_elist.end() &&
+                        f->parent->type == Element_type::CFUNC &&
+                        arithmetic_class(f->parent->f->name) == fclass)
+                    {
+                        bool finite_args  = true;
+                        bool nonzero_args = true;
+                        for (const auto argument : f->args) {
+                            const double value = argument->c->value;
+                            finite_args  = finite_args && std::isfinite(value);
+                            nonzero_args = nonzero_args && value != 0.0;
+                        }
+                        // Let the enclosing ASMD chain absorb finite operands
+                        // before a scalar fold destroys their recoverable range.
+                        retain_operands = finite_args &&
+                            (fclass == 1 ? !std::isfinite(res) : nonzero_args && !std::isnormal(res));
+                    }
+                    if (!retain_operands) {
+                        m_elist.erase(first_arg_it, y);
+                        *y = Element(make_intermediate_constant(this, res));
+                        y = y_next;
+                        continue;
+                    }
                 }
             }
 

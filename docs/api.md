@@ -75,15 +75,34 @@ eval.set_expression("x + y");      // Options take effect here
 
 | Method | Description |
 | :--- | :--- |
-| `enable_fast_math()` | Allows additional algebraic simplifications that may change results for special values (NaN, Inf). Examples: `x-x → 0`, `x/x → 1`, `0*x → 0`. |
+| `enable_fast_math()` | Permits removing complete cancellations and zero identities, including `x-x → 0`, `x/x → 1`, `0*x → 0`, and `0/x → 0`. Removed terms no longer propagate their NaN, infinity, or signed-zero values. |
 | `use_x87_backend()` | Selects the x87 FPU backend on x86, with 80-bit internal precision. On Apple Silicon this preference is accepted and the ARM64 backend is used. |
 | `enable_cse()` | Enables Common Subexpression Elimination. Repeated identical subexpressions are computed once and reused. Supported by the x87 and ARM64 backends. |
 
-Algebraic simplification is enabled by default to reduce arithmetic work and
-improve numerical accuracy. Addition, subtraction, multiplication, and division
-can be regrouped and common terms combined; source grouping does not prescribe
-every floating-point intermediate. `fast_math` additionally permits the
-special-value assumptions listed above.
+Both modes use algebraic simplification to reduce arithmetic work. In arithmetic
+chains that can be regrouped, default mode combines like terms with a nonzero
+net coefficient or exponent: `x+x+x-x-x` and `x*x/x` can become `x`. Complete
+cancellations remain grouped as `t-t` or `t/t`, retaining both operands and
+applying their results after the ordinary reduced chain. This avoids rounding
+other terms through the cancelled value. The grouped subtraction returns NaN for an evaluated `t` that is NaN or
+infinite; the grouped division also returns NaN when `t` is zero. Default mode
+retains an explicit additive constant even when its combined value is zero.
+
+These rules do not preserve every source intermediate, domain restriction, or
+signed-zero result. For example, `x*x/x` at `x = 0` can produce zero, and
+`x*x/(x*x)` can produce one for a finite `x` whose square would overflow.
+`fast_math` additionally permits removing the grouped cancellations and the
+zero identities listed above. Either mode can be more accurate for a particular
+expression; fewer operations can improve rounding, but neither mode has a
+universal accuracy advantage. Compare both accuracy and speed for your inputs.
+
+Finite additive constants whose combined value overflows, and finite nonzero
+multiplicative constants whose coefficient loses range or subnormal precision,
+can remain separate so other terms can balance their range. A destructive
+constant-only fold is also deferred within an enclosing chain of the same
+arithmetic family (`+`/`-` or `*`/`/`). These guards do not extend to arbitrary
+function or power folds, or guarantee optimal evaluation order or correct
+rounding for every input.
 
 On Apple Silicon, x86 backend preferences in `options` are compatibility
 no-ops; `get_backend()` reports `backend_type::arm64`. Fast-math and CSE options
@@ -145,8 +164,8 @@ respectively. These shortcuts preserve the sign of zero: an input of `-0.0`
 produces `-0.0` and negative infinity respectively. A runtime-bound exponent
 uses the general power operation and can differ from these shortcuts.
 
-Nested powers deliberately follow an algebraic convention, including in strict
-mode: `(x^b)^n` can become `x^(b*n)` when both exponents are constants, `n` is an
+Nested powers deliberately follow an algebraic convention in both modes:
+`(x^b)^n` can become `x^(b*n)` when both exponents are constants, `n` is an
 integer, `b` is `+0.5`, `-0.5` or an integer with magnitude at most 65,536, and
 the combined exponent is finite. For `x = -4`, `(x^0.5)^2` therefore returns
 `-4`, while `sqrt(x)^2` produces NaN. General fractional inner exponents such

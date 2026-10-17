@@ -119,9 +119,20 @@ including native-compiler and reference comparisons, the complete error
 distribution and its tails, per-expression changes, compilation or evaluation
 failures, exclusions, timings, and backend coverage. Investigate and explain
 regressions; a successful benchmark exit or green CI alone is not numerical
-acceptance. Default algebraic simplification is part of MEXCE's accuracy
-design; `fast_math` adds relaxed special-value assumptions and is not required
-to obtain that simplification.
+acceptance. Both modes simplify algebraically; default mode retains grouped
+complete cancellations, while `fast_math` can remove them and zero identities.
+Neither mode is uniformly more accurate. Assess their numerical and performance
+tradeoffs together rather than treating either mode's name as an accuracy ranking.
+
+The [benchmark](../test/benchmark.cpp) measures numerical accuracy at one fixed
+assignment (`a=1.1`, `b=2.2`, `c=3.3`, `x=4.4`, `y=5.5`, `z=6.6`, `w=7.7`);
+increasing timing iterations does not sample more inputs. Its stored
+[reference results](../test/benchmark_results.h) use SymPy rational arithmetic
+with a NumPy fallback, rather than exact arithmetic over every parsed binary
+input. Native compiler output is another comparator. Comparisons where both
+values have magnitude at most `1e-12` count as exact, and NaN comparisons are
+excluded from ULP totals. Inspect these cases separately; aggregate counts do
+not establish correct rounding or behavior over the full input domain.
 
 Attribute comparisons to their exact source, corpus, harness, compiler, and
 build options. Reuse retained measurements when those inputs are unchanged,

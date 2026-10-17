@@ -337,13 +337,63 @@ void test_options_and_introspection(Test_suite& suite)
     suite.expect_near(x87.evaluate(), 8.0, "prefer_x87_result");
 }
 
+void test_algebraic_cancellation_policy(Test_suite& suite)
+{
+    for (bool prefer_x87 : {false, true}) {
+        for (auto mode : {mexce::Protected_math_mode::STRICT, mexce::Protected_math_mode::FAST}) {
+            mexce::evaluator evaluator;
+            evaluator.opts().prefer_x87 = prefer_x87;
+            double x = std::ldexp(1.0, 53);
+            double y = 1.0;
+            evaluator.bind_protected(x, 0);
+            evaluator.bind_protected(y, 1);
+            load(evaluator, mexce::encode_protected_expression(
+                "-x+y+x", {{"x", 0}, {"y", 1}}, mode));
+            suite.expect(evaluator.evaluate() == y, "protected_grouped_additive_cancellation");
+
+            load(evaluator, mexce::encode_protected_expression(
+                "x*x*x/x/x", {{"x", 0}}, mode));
+            for (double value : {std::ldexp(1.0, 600), std::ldexp(1.0, -600)}) {
+                x = value;
+                suite.expect(evaluator.evaluate() == x, "protected_partial_exponent_cancellation");
+            }
+            load(evaluator, mexce::encode_protected_expression(
+                "x*x/(x*x)", {{"x", 0}}, mode));
+            for (double value : {std::ldexp(1.0, 600), std::ldexp(1.0, -600)}) {
+                x = value;
+                suite.expect(evaluator.evaluate() == 1.0, "protected_grouped_factor_cancellation");
+            }
+            for (double value : {0.0, std::numeric_limits<double>::infinity(),
+                                 std::numeric_limits<double>::quiet_NaN()})
+            {
+                x = value;
+                const double result = evaluator.evaluate();
+                suite.expect(mode == mexce::Protected_math_mode::FAST
+                    ? result == 1.0 : std::isnan(result),
+                    "protected_complete_cancellation_special_value");
+            }
+            x = 2.0;
+            double z = 2.0;
+            evaluator.bind_protected(z, 2);
+            load(evaluator, mexce::encode_protected_expression(
+                "max(x,max(x,max(x,max(x,max(x,max(x,(y+z-z)))))))",
+                {{"x", 0}, {"y", 1}, {"z", 2}}, mode));
+            suite.expect(evaluator.evaluate() == 2.0,
+                "protected_complete_cancellation_at_x87_capacity");
+        }
+    }
+}
+
+
 void test_portable_numeric_boundaries(Test_suite& suite)
 {
     for (bool prefer_x87 : {false, true}) {
         mexce::evaluator evaluator;
         evaluator.opts().prefer_x87 = prefer_x87;
         double x = -2.0;
+        double y = 1e-20;
         evaluator.bind_protected(x, 0);
+        evaluator.bind_protected(y, 1);
         for (const auto mode : {
             mexce::Protected_math_mode::STRICT, mexce::Protected_math_mode::FAST})
         {
@@ -363,6 +413,81 @@ void test_portable_numeric_boundaries(Test_suite& suite)
                 "x * 2.409919865102884e-181 * 2.409919865102884e-181", {{"x", 0}}, mode));
             suite.expect(evaluator.evaluate() == std::ldexp(1.0, -600),
                 "protected_unrepresentable_coefficient_underflow");
+
+            x = std::ldexp(1.0, -600);
+            load(evaluator, mexce::encode_protected_expression(
+                "x * (4.149515568880993e+180 * 4.149515568880993e+180)", {{"x", 0}}, mode));
+            suite.expect(evaluator.evaluate() == std::ldexp(1.0, 600),
+                "protected_grouped_coefficient_overflow");
+
+            x = std::ldexp(1.0, 600);
+            load(evaluator, mexce::encode_protected_expression(
+                "x * (2.409919865102884e-181 * 2.409919865102884e-181)", {{"x", 0}}, mode));
+            suite.expect(evaluator.evaluate() == std::ldexp(1.0, -600),
+                "protected_grouped_coefficient_underflow");
+
+            x = -1e308;
+            load(evaluator, mexce::encode_protected_expression(
+                "x + (1e+308 + 1e+308)", {{"x", 0}}, mode));
+            suite.expect(evaluator.evaluate() == 1e308, "protected_additive_coefficient_overflow");
+
+            x = 1e300;
+            load(evaluator, mexce::encode_protected_expression(
+                "x * (3e-162 * 1e-162)", {{"x", 0}}, mode));
+            const double actual    = evaluator.evaluate();
+            const double tolerance = 4.0 * std::numeric_limits<double>::epsilon() * 3e-24;
+            suite.expect(std::isfinite(actual) && std::abs(actual - 3e-24) <= tolerance,
+                "protected_subnormal_coefficient_precision");
+
+            x = 1e-309;
+            load(evaluator, mexce::encode_protected_expression(
+                "3e-162 * 1e-162 / x", {{"x", 0}}, mode));
+            const double quotient = evaluator.evaluate();
+            constexpr double expected_quotient = 2.9999999999999943e-15;
+            suite.expect(
+                std::isfinite(quotient) &&
+                std::abs(quotient - expected_quotient) <=
+                    4.0 * std::numeric_limits<double>::epsilon() * expected_quotient,
+                "protected_coefficient_before_denominator");
+
+            x = 1.0;
+            load(evaluator, mexce::encode_protected_expression(
+                "x * 3e-162 * 3e-162 * 1e+300", {{"x", 0}}, mode));
+            const double product = evaluator.evaluate();
+            constexpr double expected_product = 9.000000000000001e-24;
+            suite.expect(
+                std::isfinite(product) &&
+                std::abs(product - expected_product) <=
+                    4.0 * std::numeric_limits<double>::epsilon() * expected_product,
+                "protected_intermediate_coefficient_range");
+
+            x = 1e308;
+            load(evaluator, mexce::encode_protected_expression(
+                "x * 1e-200 * 3e-162 * 1e-162 * 1e+208", {{"x", 0}}, mode));
+            const double prefix_product = evaluator.evaluate();
+            suite.expect(
+                std::isfinite(prefix_product) &&
+                std::abs(prefix_product - 3e-08) <=
+                    4.0 * std::numeric_limits<double>::epsilon() * 3e-08,
+                "protected_contiguous_coefficient_prefix");
+
+            load(evaluator, mexce::encode_protected_expression(
+                "x * y * 1e+10 * 5e-324", {{"x", 0}, {"y", 1}}, mode));
+            const double runtime_chain = evaluator.evaluate();
+            constexpr double expected_chain = 4.940656458412465e-26;
+            suite.expect(
+                std::isfinite(runtime_chain) &&
+                std::abs(runtime_chain - expected_chain) <=
+                    4.0 * std::numeric_limits<double>::epsilon() * expected_chain,
+                "protected_retained_coefficient_follows_runtime_chain");
+
+            x = 1.0;
+            // The denominator alone uses all eight x87 registers.
+            load(evaluator, mexce::encode_protected_expression(
+                "3e-162 * 1e-162 / "
+                "max(x,max(x,max(x,max(x,max(x,max(x,max(x,x)))))))", {{"x", 0}}, mode));
+            suite.expect(evaluator.evaluate() == std::numeric_limits<double>::denorm_min(),
+                "protected_retained_coefficient_preserves_denominator_capacity");
         }
         x = -2.0;
         for (const char* expression : {
@@ -841,6 +966,7 @@ int main(int argc, char** argv)
     test_binding_lifecycle(suite);
     test_binding_types_and_missing_binding(suite);
     test_options_and_introspection(suite);
+    test_algebraic_cancellation_policy(suite);
     test_portable_numeric_boundaries(suite);
 #if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
     test_arm64_optimized_expressions(suite);

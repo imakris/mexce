@@ -303,30 +303,88 @@ void test_rounding_functions(TestSuite& suite) {
     suite.expect_near("int", eval.evaluate(), std::nearbyint(value));
 }
 
-void test_ieee_self_cancellation_default_mode(TestSuite& suite) {
-    // Default mode should preserve IEEE-visible self-cancellation effects.
-    // fast_math remains the opt-in path for x-x -> 0 and x/x -> 1.
-    double x = std::numeric_limits<double>::quiet_NaN();
+void test_algebraic_cancellation_policy(TestSuite& suite)
+{
+    const double infinity = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    for (bool prefer_x87 : {false, true}) {
+        for (bool fast_math : {false, true}) {
+            mexce::evaluator eval;
+            eval.opts().prefer_x87 = prefer_x87;
+            eval.opts().fast_math = fast_math;
+            double x = std::nextafter(1.0, infinity);
+            double y = 1.0;
+            eval.bind(x, "x", y, "y");
 
-    mexce::evaluator strict_eval;
-    strict_eval.bind(x, "x");
-    strict_eval.set_expression("x - x");
-    suite.expect_true("default x-x with NaN stays NaN", std::isnan(strict_eval.evaluate()));
+            eval.set_expression("x+x+x-x-x");
+            suite.expect_equal("partial_additive_cancellation", eval.evaluate(), x);
+            eval.set_expression("x-x-x");
+            suite.expect_equal("negative_additive_coefficient", eval.evaluate(), -x);
 
-    x = 0.0;
-    strict_eval.set_expression("x / x");
-    suite.expect_true("default x/x with zero stays NaN", std::isnan(strict_eval.evaluate()));
+            // Cancelling the large term separately must not round away y.
+            x = std::ldexp(1.0, 53);
+            for (const char* expression : {"y+x-x", "-x+y+x"}) {
+                eval.set_expression(expression);
+                suite.expect_equal(std::string("grouped_additive_cancellation_") + expression,
+                    eval.evaluate(), y);
+            }
 
-    mexce::evaluator fast_eval;
-    fast_eval.enable_fast_math();
-    x = std::numeric_limits<double>::quiet_NaN();
-    fast_eval.bind(x, "x");
-    fast_eval.set_expression("x - x");
-    suite.expect_equal("fast_math x-x folds to zero", fast_eval.evaluate(), 0.0);
+            for (double value : {std::ldexp(1.0, 600), -std::ldexp(1.0, 600),
+                                 std::ldexp(1.0, -600), -std::ldexp(1.0, -600)})
+            {
+                x = value;
+                eval.set_expression("x*x*x/x/x");
+                suite.expect_equal("partial_exponent_cancellation", eval.evaluate(), x);
+                eval.set_expression("x/(x*x)");
+                suite.expect_equal("negative_exponent_cancellation", eval.evaluate(), 1.0 / x);
+                eval.set_expression("x*x/(x*x)");
+                suite.expect_equal("grouped_factor_cancellation", eval.evaluate(), 1.0);
+            }
 
-    x = 0.0;
-    fast_eval.set_expression("x / x");
-    suite.expect_equal("fast_math x/x folds to one", fast_eval.evaluate(), 1.0);
+            for (double value : {infinity, -infinity, nan}) {
+                x = value;
+                eval.set_expression("x-x");
+                suite.expect_true("complete_additive_cancellation_special_value",
+                    fast_math ? eval.evaluate() == 0.0 : std::isnan(eval.evaluate()));
+            }
+            for (double value : {0.0, -0.0, infinity, -infinity, nan}) {
+                x = value;
+                for (const char* expression : {"x/x", "x*x/(x*x)"}) {
+                    eval.set_expression(expression);
+                    suite.expect_true(std::string("complete_factor_cancellation_special_value_") + expression,
+                        fast_math ? eval.evaluate() == 1.0 : std::isnan(eval.evaluate()));
+                }
+            }
+            x = 0.0;
+            eval.set_expression("x*x/x");
+            suite.expect_equal("partial_cancellation_zero_convention", eval.evaluate(), 0.0);
+            x = infinity;
+            eval.set_expression("0*x");
+            suite.expect_true("zero_annihilation_remains_fast_math",
+                fast_math ? eval.evaluate() == 0.0 : std::isnan(eval.evaluate()));
+
+            // Exercise repeated non-leaf terms with several live operands,
+            // including native selection/fallback and explicit x87 preference.
+            x = std::ldexp(1.0, 53);
+            std::string term = "x";
+            for (unsigned depth = 1; depth < 5; ++depth) {
+                term = "max(x," + term + ")";
+            }
+            eval.set_expression("y+(" + term + ")-(" + term + ")");
+            suite.expect_equal("repeated_non_leaf_operand_depth", eval.evaluate(), y);
+
+            // Six outer operands plus the ordinary term and cancellation base
+            // fit the x87 stack when the self-operation reuses its register.
+            mexce::evaluator deep;
+            deep.opts().prefer_x87 = prefer_x87;
+            deep.opts().fast_math = fast_math;
+            x = 2.0;
+            double z = 2.0;
+            deep.bind(x, "x", y, "y", z, "z");
+            deep.set_expression("max(x,max(x,max(x,max(x,max(x,max(x,(y+z-z)))))))");
+            suite.expect_equal("complete_cancellation_at_x87_capacity", deep.evaluate(), 2.0);
+        }
+    }
 }
 
 void test_min_max_and_arithmetic(TestSuite& suite) {
@@ -400,10 +458,34 @@ void test_algebraic_simplification_accuracy(TestSuite& suite)
     // coefficient alone is outside double's range.
     const Range_case cases[] = {
         {"x * 1e+308 * 1e+308", 0.0, 0.0},
+        {"1e+308 * 1e+308 * x", 0.0, 0.0},
         {"x * 4.149515568880993e+180 * 4.149515568880993e+180", small_factor, large_factor},
         {"x * 2.409919865102884e-181 * 2.409919865102884e-181", large_factor, small_factor},
         {"x / 4.149515568880993e+180 / 4.149515568880993e+180", large_factor, small_factor},
         {"x / 2.409919865102884e-181 / 2.409919865102884e-181", small_factor, large_factor},
+        {"x * (4.149515568880993e+180 * 4.149515568880993e+180)", small_factor, large_factor},
+        {"x * (2.409919865102884e-181 * 2.409919865102884e-181)", large_factor, small_factor},
+        {"x / (4.149515568880993e+180 * 4.149515568880993e+180)", large_factor, small_factor},
+        {"x / (2.409919865102884e-181 * 2.409919865102884e-181)", small_factor, large_factor},
+        {"x * (2.409919865102884e-181 / 4.149515568880993e+180)", large_factor, small_factor},
+        {"x / (4.149515568880993e+180 / 2.409919865102884e-181)", large_factor, small_factor},
+        {"x + 1e+308 + 1e+308",   -1e308,  1e308},
+        {"x + (1e+308 + 1e+308)", -1e308,  1e308},
+        {"x - 1e+308 - 1e+308",    1e308, -1e308},
+        {"x - (1e+308 + 1e+308)",  1e308, -1e308},
+    };
+    // Exact rational arithmetic on the parsed double inputs rounds to these
+    // decimal values. Retained runtime operations may round more than once.
+    const Range_case decimal_cases[] = {
+        {"x * 3e-162 * 1e-162",                  1e300,  3e-24},
+        {"x * (3e-162 * 1e-162)",                1e300,  3e-24},
+        {"1e+308 * 1e+308 * x",                  1e-308, 1e308},
+        {"1e-308 * 1e-308 * x",                  1e308,  1e-308},
+        {"3e-162 * 1e-162 / x",                  1e-309, 2.9999999999999943e-15},
+        {"1 / (x * 1e+200 * 1e+200)",            1e-309, 9.999999999999981e-92},
+        {"x * 3e-162 * 3e-162 * 1e+300",         1.0,    9.000000000000001e-24},
+        {"x * (3e-162 * 3e-162 * 1e+300)",       1.0,    9.000000000000001e-24},
+        {"x * 1e-200 * 3e-162 * 1e-162 * 1e+208", 1e308,  3e-08},
     };
     for (bool prefer_x87 : {false, true}) {
         for (bool fast_math : {false, true}) {
@@ -420,7 +502,43 @@ void test_algebraic_simplification_accuracy(TestSuite& suite)
                     eval.evaluate(), test.expected);
             }
 
+            for (const auto& test : decimal_cases) {
+                x = test.input;
+                eval.set_expression(test.expression);
+                const double actual    = eval.evaluate();
+                const double tolerance =
+                    4.0 * std::numeric_limits<double>::epsilon() * std::abs(test.expected);
+                suite.expect_true(std::string("algebraic_decimal_range_") + test.expression,
+                    std::isfinite(actual) && std::abs(actual - test.expected) <= tolerance);
+            }
+
+            eval.set_expression("4.149515568880993e+180 * 4.149515568880993e+180");
+            suite.expect_equal("standalone_constant_overflow", eval.evaluate(),
+                std::numeric_limits<double>::infinity());
+            eval.set_expression("2.409919865102884e-181 * 2.409919865102884e-181");
+            suite.expect_equal("standalone_constant_underflow", eval.evaluate(), 0.0);
+            eval.set_expression("3e-162 * 1e-162");
+            suite.expect_equal("standalone_constant_subnormal", eval.evaluate(),
+                std::numeric_limits<double>::denorm_min());
+
+            x = 1e308;
+            y = 1e-20;
+            eval.set_expression("x * y * 1e+10 * 5e-324");
+            const double runtime_chain = eval.evaluate();
+            constexpr double expected_chain = 4.940656458412465e-26;
+            suite.expect_true("retained_coefficient_follows_runtime_chain",
+                std::isfinite(runtime_chain) && std::abs(runtime_chain - expected_chain) <=
+                    4.0 * std::numeric_limits<double>::epsilon() * expected_chain);
+
+            x = 1.0;
+            // The denominator alone uses all eight x87 registers.
+            eval.set_expression("3e-162 * 1e-162 / "
+                "max(x,max(x,max(x,max(x,max(x,max(x,max(x,x)))))))");
+            suite.expect_equal("retained_coefficient_preserves_denominator_capacity",
+                eval.evaluate(), std::numeric_limits<double>::denorm_min());
+
             x = 1e16;
+            y = 1.0;
             eval.set_expression("-(x+y)+x");
             suite.expect_equal("unary_subtraction_retains_algebraic_accuracy", eval.evaluate(), -1.0);
         }
@@ -1720,7 +1838,7 @@ int main() {
     test_exponent_and_significand(suite);
     test_logs_and_powers(suite);
     test_rounding_functions(suite);
-    test_ieee_self_cancellation_default_mode(suite);
+    test_algebraic_cancellation_policy(suite);
     test_min_max_and_arithmetic(suite);
     test_constants_and_single_shot(suite);
     test_signed_zero_semantics(suite);
