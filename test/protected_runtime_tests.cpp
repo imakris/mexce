@@ -198,6 +198,27 @@ void test_operation_parity(Test_suite& suite)
 }
 
 
+void test_folded_nan_constants(Test_suite& suite)
+{
+    double x = 1.0;
+    for (auto mode : {mexce::Protected_math_mode::STRICT, mexce::Protected_math_mode::FAST}) {
+        for (const char* expression : {"sin(x+2)+sqrt(-1)", "sin(x+sqrt(-1))+2"}) {
+            mexce::evaluator evaluator;
+            evaluator.bind_protected(x, 0);
+            // The encoded literals are finite; compilation folds sqrt(-1) to NaN.
+            load(evaluator, mexce::encode_protected_expression(expression, {{"x", 0}}, mode));
+#if defined(MEXCE_64) && !defined(MEXCE_ARM64)
+            suite.expect(evaluator.get_backend() == mexce::backend_type::sse2, "folded_nan_sse2_backend");
+#endif
+            for (double value : {1.0, 4.0}) {
+                x = value;
+                suite.expect(std::isnan(evaluator.evaluate()), std::string("folded_nan_constant_") + expression);
+            }
+        }
+    }
+}
+
+
 void test_binding_lifecycle(Test_suite& suite)
 {
     double first = 3.0;
@@ -963,6 +984,7 @@ int main(int argc, char** argv)
     Test_suite suite;
     test_independent_fixture(suite);
     test_operation_parity(suite);
+    test_folded_nan_constants(suite);
     test_binding_lifecycle(suite);
     test_binding_types_and_missing_binding(suite);
     test_options_and_introspection(suite);

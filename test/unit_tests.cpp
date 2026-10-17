@@ -60,6 +60,7 @@ extern "C" int mexce_test_override_mprotect(void* addr, size_t len, int prot)
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <iomanip>
 #include <initializer_list>
@@ -444,6 +445,66 @@ void test_signed_zero_semantics(TestSuite& suite)
     eval.set_expression("neg(0.0)");
     suite.expect_true("explicit_neg_signed_zero", std::signbit(eval.evaluate()));
 }
+
+void test_folded_nan_constants(TestSuite& suite)
+{
+    double x = 1.0;
+    for (bool fast_math : {false, true}) {
+        mexce::evaluator eval;
+        eval.opts().fast_math = fast_math;
+        eval.bind(x, "x");
+        for (const char* expression : {"sin(x+2)+sqrt(-1)", "sin(x+sqrt(-1))+2"}) {
+            eval.set_expression(expression);
+#if defined(MEXCE_64) && !defined(MEXCE_ARM64)
+            suite.expect_true("folded_nan_sse2_backend", eval.get_backend() == mexce::backend_type::sse2);
+#endif
+            for (double value : {1.0, 4.0}) {
+                x = value;
+                suite.expect_true(std::string("folded_nan_constant_") + expression,
+                    std::isnan(eval.evaluate()));
+            }
+        }
+    }
+}
+
+#if defined(MEXCE_64) && !defined(MEXCE_ARM64)
+void test_rip_constant_representations(TestSuite& suite)
+{
+    // A generated load must retain its constant's exact representation,
+    // including NaN payloads and zero signs, in either insertion order.
+    std::vector<uint64_t> expected = {
+        UINT64_C(0x4000000000000000), UINT64_C(0x7ff8000000000001),
+        UINT64_C(0x0000000000000000), UINT64_C(0x8000000000000000),
+        UINT64_C(0x7ff8000000000002), UINT64_C(0x7ff0000000000000),
+        UINT64_C(0xfff0000000000000), UINT64_C(0x4000000000000000),
+        UINT64_C(0x7ff8000000000001), UINT64_C(0x8000000000000000),
+    };
+    for (bool reverse : {false, true}) {
+        if (reverse) {
+            std::reverse(expected.begin(), expected.end());
+        }
+        mexce::impl::mexce_charstream code;
+        std::vector<mexce::impl::PendingRipConstant> pending;
+        std::vector<size_t> patches;
+        for (uint64_t bits : expected) {
+            double value;
+            std::memcpy(&value, &bits, sizeof(value));
+            const size_t patch = mexce::impl::emit_sse2_load_rip_relative_placeholder(code, 0);
+            patches.push_back(patch);
+            pending.push_back({patch, value});
+        }
+        mexce::impl::finalize_rip_constants(code, pending);
+        for (size_t i = 0; i < patches.size(); ++i) {
+            int32_t displacement;
+            std::memcpy(&displacement, code.buf.data() + patches[i], sizeof(displacement));
+            const size_t offset = patches[i] + sizeof(displacement) + displacement;
+            uint64_t actual;
+            std::memcpy(&actual, code.buf.data() + offset, sizeof(actual));
+            suite.expect_true("rip_constant_representation_" + std::to_string(i), actual == expected[i]);
+        }
+    }
+}
+#endif
 
 void test_algebraic_simplification_accuracy(TestSuite& suite)
 {
@@ -1842,6 +1903,10 @@ int main() {
     test_min_max_and_arithmetic(suite);
     test_constants_and_single_shot(suite);
     test_signed_zero_semantics(suite);
+    test_folded_nan_constants(suite);
+#if defined(MEXCE_64) && !defined(MEXCE_ARM64)
+    test_rip_constant_representations(suite);
+#endif
     test_algebraic_simplification_accuracy(suite);
     test_numeric_literal_validation(suite);
     test_pow_optimizer_special_cases(suite);

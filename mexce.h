@@ -4044,21 +4044,20 @@ inline void finalize_rip_constants(impl::mexce_charstream& s, std::vector<Pendin
         s < 0x90;  // NOP for padding (won't be executed)
     }
 
-    // Build a map of unique constant values to their offsets
-    std::map<double, size_t> const_offsets;
+    // NaNs have no numeric ordering, and signed zeros compare equal.
+    // Only bit-identical constants may share storage.
+    std::map<uint64_t, size_t> const_offsets;
 
-    // First pass: identify unique constants and allocate space
     for (const auto& pc : pending) {
-        if (const_offsets.find(pc.value) == const_offsets.end()) {
-            const_offsets[pc.value] = s.buf.size();
+        uint64_t bits;
+        std::memcpy(&bits, &pc.value, sizeof(bits));
+        const auto entry = const_offsets.emplace(bits, s.buf.size());
+        if (entry.second) {
             // Append the constant value (8 bytes for double)
             s << pc.value;
         }
-    }
 
-    // Second pass: patch all displacements
-    for (const auto& pc : pending) {
-        size_t const_offset = const_offsets[pc.value];
+        const size_t const_offset = entry.first->second;
         // Displacement = target - (rip after instruction)
         // RIP after instruction = patch_offset + 4 (size of disp32)
         int32_t disp = (int32_t)(const_offset - (pc.patch_offset + 4));
