@@ -126,6 +126,7 @@
 #include <exception>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <list>
 #include <locale.h>
 #include <map>
