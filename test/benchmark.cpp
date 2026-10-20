@@ -1670,7 +1670,9 @@ static int run_comprehensive_benchmark(const benchmark_config& config)
     out << "END OF COMPREHENSIVE BENCHMARK REPORT\n";
     out << line << "\n";
 
-    return 0;
+    return std::all_of(results.begin(), results.end(), [](const benchmark_result& result) {
+        return result.compile_fail_count == 0 && result.eval_fail_count == 0;
+    }) ? 0 : 1;
 }
 
 int main(int argc, char* argv[])

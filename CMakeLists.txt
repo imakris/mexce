@@ -261,7 +261,7 @@ if(BUILD_TESTING)
     add_test(NAME benchmark_quick
         COMMAND benchmark 5 ${CMAKE_BINARY_DIR}/benchmark_quick_results.txt)
     add_test(NAME benchmark_output_first
-        COMMAND benchmark ${CMAKE_BINARY_DIR}/benchmark_output_first.txt 5)
+        COMMAND benchmark ${CMAKE_BINARY_DIR}/benchmark_output_first.txt 5 --single)
 
     add_custom_target(run_benchmarks
         COMMAND ${CMAKE_COMMAND} -E echo "Running benchmark with 100 iterations"
