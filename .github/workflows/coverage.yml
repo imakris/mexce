@@ -26,6 +26,8 @@ jobs:
     env:
       BUILD_DIR: build
       CTEST_OUTPUT_ON_FAILURE: 1
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 1G
 
     steps:
       - name: Checkout
@@ -34,6 +36,7 @@ jobs:
       - name: Install toolchain & coverage deps
         run: |
           sudo apt-get update
+          sudo apt-get install -y ccache
           if [ "${{ matrix.compiler }}" = "gcc" ]; then
             sudo apt-get install -y gcc g++ lcov file
           else
@@ -43,6 +46,24 @@ jobs:
           fi
           pip install conan==2.20.1
           sudo locale-gen de_DE.UTF-8
+
+      - name: Identify compiler cache inputs
+        id: compiler-cache
+        run: |
+          echo "CCACHE_DIR=$RUNNER_TEMP/ccache" >> "$GITHUB_ENV"
+          compiler_id="$(${{ matrix.cxx }} --version | sha256sum | cut -d' ' -f1)"
+          echo "id=$compiler_id" >> "$GITHUB_OUTPUT"
+
+      - name: Restore compiled coverage inputs
+        id: coverage-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ env.CCACHE_DIR }}
+            ~/.conan2/p
+          key: coverage-ubuntu24-${{ runner.arch }}-${{ matrix.compiler }}-${{ steps.compiler-cache.outputs.id }}-debug-atomic-v1-${{ hashFiles('CMakeLists.txt', 'cmake/**', '*.h', 'test/**', 'tools/**', '.github/workflows/coverage.yml') }}
+          restore-keys: |
+            coverage-ubuntu24-${{ runner.arch }}-${{ matrix.compiler }}-${{ steps.compiler-cache.outputs.id }}-debug-atomic-v1-
 
       - name: Resolve libsodium 1.0.22
         run: |
@@ -61,12 +82,28 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/deps/conan_toolchain.cmake" \
             -DCMAKE_C_COMPILER=${{ matrix.cc }} \
             -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DENABLE_COVERAGE=ON \
             -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON \
             -DMEXCE_BUILD_ISSUER_TOOLS=ON
 
       - name: Build
-        run: cmake --build "$BUILD_DIR" -j
+        run: |
+          ccache --zero-stats
+          cmake --build "$BUILD_DIR" --parallel 2
+
+      - name: Report compiler cache use
+        if: always()
+        run: ccache --show-stats --verbose
+
+      - name: Save compiled coverage inputs
+        if: steps.coverage-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ env.CCACHE_DIR }}
+            ~/.conan2/p
+          key: ${{ steps.coverage-cache.outputs.cache-primary-key }}
 
       - name: Test (also write JUnit)
         working-directory: ${{ env.BUILD_DIR }}

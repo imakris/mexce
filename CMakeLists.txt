@@ -239,6 +239,13 @@ if(BUILD_TESTING)
         add_test(NAME mexce_mixed_translation_units COMMAND mixed_tu_test)
         add_test(NAME mexce_protected_decoder_fuzz_smoke
             COMMAND protected_decoder_fuzz_smoke)
+        set(mexce_protected_benchmark_timeout_args)
+        if(ENABLE_COVERAGE)
+            # The exact-limit compile runs with -O0 and atomic profile counters.
+            # This is a diagnostic watchdog; Release acceptance limits stay in
+            # the runner and are not enforced by this one-sample CTest.
+            list(APPEND mexce_protected_benchmark_timeout_args --timeout-seconds 600)
+        endif()
         add_test(NAME mexce_protected_benchmark
             COMMAND
                 ${Python3_EXECUTABLE}
@@ -247,7 +254,8 @@ if(BUILD_TESTING)
                 ${CMAKE_CURRENT_BINARY_DIR}/protected_benchmark_ctest.json
                 --repeats 1
                 --resource-repeats 1
-                --diagnostic-only)
+                --diagnostic-only
+                ${mexce_protected_benchmark_timeout_args})
         if(MEXCE_BUILD_ISSUER_TOOLS)
             add_test(NAME mexce_protect_utility COMMAND mexce_protect_tests)
             add_test(NAME mexce_protect_cli
