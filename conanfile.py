@@ -6,7 +6,7 @@ from conan.tools.layout import basic_layout
 
 class MexceConan(ConanFile):
     name = "mexce"
-    version = "1.2.1"
+    version = "1.2.2"
     license = "BSD-2-Clause"
     homepage = "https://github.com/imakris/mexce"
     url = "https://github.com/conan-io/conan-center-index"

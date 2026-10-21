@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.2] - 2026-10-21
+
+### Fixed
+
+- Preserve NaN representations and signed zeros in the SSE constant pool.
+- Complete x87 `mod` and `bnd` remainders for large quotients, including
+  constant-folded expressions.
+- Reject x87 expressions whose modeled peak depth, including inline built-in
+  and fused-operation temporaries, exceeds eight registers. C-library math
+  routines' internal stack use remains outside this check.
+- Preserve complete cancellations in default-mode arithmetic simplification
+  and avoid destructive constant folding that loses coefficient range or
+  subnormal precision.
+- Parse complete numeric literals using the C locale without changing the
+  host process locale; reject malformed literals instead of accepting a prefix.
+- Reject unsupported variable-binding types at compile time.
+- Reset compiled expressions when referenced bindings are removed, including
+  after rebinding, bulk removal or one-shot evaluation.
+
+### Changed
+
+- Clarify binding lifetimes, one-shot option defaults, backend numerical
+  conventions and reliable benchmark comparisons.
+- These fixes can change numerical edge-case results and reject malformed
+  literals, unsupported bindings or over-capacity x87 expressions earlier.
+  The public API and protected-expression format are unchanged.
+
 ## [1.2.1] - 2026-10-11
 
 ### Added
