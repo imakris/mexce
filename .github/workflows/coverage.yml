@@ -36,7 +36,6 @@ jobs:
       - name: Install toolchain & coverage deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y ccache
           if [ "${{ matrix.compiler }}" = "gcc" ]; then
             sudo apt-get install -y gcc g++ lcov file
           else
@@ -46,6 +45,39 @@ jobs:
           fi
           pip install conan==2.20.1
           sudo locale-gen de_DE.UTF-8
+
+      - name: Install coverage-compatible ccache
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import urllib.request
+
+          with urllib.request.urlopen(
+              "https://api.github.com/repos/ccache/ccache/releases/latest",
+              timeout=30,
+          ) as response:
+              release = json.load(response)
+          asset = next(
+              item for item in release["assets"]
+              if item["name"].endswith("-linux-x86_64-glibc.tar.xz")
+          )
+          digest = asset.get("digest", "")
+          if not digest.startswith("sha256:"):
+              raise RuntimeError("Official ccache asset has no SHA-256 digest")
+          with urllib.request.urlopen(asset["browser_download_url"], timeout=60) as response:
+              archive = response.read()
+          if hashlib.sha256(archive).hexdigest() != digest.split(":", 1)[1]:
+              raise RuntimeError("Official ccache archive SHA-256 mismatch")
+          (pathlib.Path(os.environ["RUNNER_TEMP"]) / "ccache.tar.xz").write_bytes(archive)
+          print("Verified {} {}".format(release["tag_name"], digest))
+          PY
+          mkdir -p "$RUNNER_TEMP/ccache-bin"
+          tar -xJf "$RUNNER_TEMP/ccache.tar.xz" --strip-components=1 -C "$RUNNER_TEMP/ccache-bin"
+          echo "$RUNNER_TEMP/ccache-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ccache-bin/ccache" --version
 
       - name: Identify compiler cache inputs
         id: compiler-cache
@@ -94,7 +126,17 @@ jobs:
 
       - name: Report compiler cache use
         if: always()
-        run: ccache --show-stats --verbose
+        run: |
+          ccache --show-stats --verbose
+          ccache --print-stats | awk '
+            $1 ~ /^(cache_miss|direct_cache_hit|preprocessed_cache_hit)$/ { calls += $2 }
+            $1 ~ /^(local_storage_hit|local_storage_write)$/ { storage += $2 }
+            END {
+              if (calls == 0 || storage == 0) {
+                print "Compiler cache produced no reusable coverage results" > "/dev/stderr"
+                exit 1
+              }
+            }'
 
       - name: Save compiled coverage inputs
         if: steps.coverage-cache.outputs.cache-hit != 'true'
