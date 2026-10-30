@@ -14,6 +14,9 @@ on x86-64 can be loaded on Apple Silicon and vice versa. This program portabilit
 does not promise identical evaluation bits: platform math libraries and
 intermediate precision, including `long double`, can differ.
 
+The [protected-expression contract](protected_expression_contract.md) specifies
+the wire format, API, resource limits, and security boundary.
+
 ## Build integration
 
 Enable `MEXCE_ENABLE_PROTECTED_EXPRESSIONS` and link `mexce::protected`.

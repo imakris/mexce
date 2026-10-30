@@ -1,9 +1,7 @@
 # Performance stabilization runbook
 
-This is the active Batch 6 procedure. The earlier speculative benchmark-gate
-proposal remains available in Git history but is not normative: it depended on
-unimplemented benchmark flags, host-specific ledgers, and mechanical review
-rules that did not produce product evidence.
+Use this procedure for matched clear/protected performance measurements and
+release resource checks.
 
 ## Clear baseline and candidate
 

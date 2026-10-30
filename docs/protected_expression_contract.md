@@ -1,8 +1,10 @@
-# Keyed Semantic Expression Protection
+# Protected-expression contract
 
-## Objective
+This reference defines the protected program format, API, ownership, security
+boundary, and issuer publication contract. For usage and build commands, see
+[Protected expressions](protected_expressions.md).
 
-Add an optional protected-expression capability to MEXCE. The runtime receives:
+The protected runtime receives:
 
 - an opaque binary semantic program;
 - a separate 256-bit artifact key; and
@@ -44,10 +46,9 @@ do not appear in the protected artifact.
    hard-fails and leaves the evaluator empty.
 10. Existing set_expression remains the one unprotected source API. The
     protected capability has one encoder API and one runtime load API.
-11. Existing clear-expression behavior remains unchanged except that a failed
-    replacement has a defined empty-state contract instead of stale-result or
-    null-call behavior.
-12. The implementation remains C++11-compatible.
+11. A failed clear or protected replacement leaves the evaluator empty; no
+    previously compiled expression remains callable.
+12. The implementation is C++11-compatible.
 13. Ordinary MEXCE remains header-only and dependency-free. Only protected
     consumers include the protected headers and link libsodium.
 14. The definition and layout of evaluator are identical in every translation
@@ -73,41 +74,6 @@ The capability does not provide:
 The host may bind the artifact key to a licence, device, product version, or
 monotonic policy. MEXCE treats a replayed valid artifact and matching key as a
 valid input.
-
-## Existing architecture constraints
-
-MEXCE is a C++11 single-header JIT. evaluator owns variable bindings, compiler
-state, and executable memory. Clear compilation currently performs lexical
-parsing, postfix conversion, compiler-object construction, optimization,
-fallback selection, and code emission in one set_expression path.
-
-Both the x87 and SSE2 backends consume the same compiler representation.
-Optimizers mutate that representation. Some emitted x87 instructions retain
-addresses into constants and CSE storage owned outside the final visible graph.
-The compilation lifetime owner must therefore include every object whose
-address can be embedded in code, not only the final graph.
-
-The safe shared boundary is a canonical semantic producer feeding one semantic
-validator/compiler:
-
-~~~
-clear source -> lexical parser -> semantic records -> validator/compiler
-
-protected frames ---------------------------> validator/compiler
-~~~
-
-The clear route passes semantic records directly without serializing them. The
-protected route decrypts one wire record and immediately applies it. Both routes
-converge before linking, optimization, backend selection, and code emission.
-
-The cryptographic construction follows the maintained libsodium contracts:
-
-- https://doc.libsodium.org/secret-key_cryptography/secretstream
-- https://doc.libsodium.org/memory_management
-
-The protected dependency is a compatible libsodium release from 1.0.22 onward.
-The repository's Conan recipe and vcpkg manifest declare that minimum; external
-registries may select a concrete compatible version under their own policies.
 
 ## Security model
 
@@ -264,7 +230,7 @@ still uses explicit byte loads rather than pointer casts.
 
 ### Version compatibility
 
-The encoder emits format 1.0. The initial decoder accepts exactly format 1.0.
+The encoder emits format 1.0. The decoder accepts exactly format 1.0.
 
 Within major version 1:
 
@@ -824,7 +790,7 @@ Cross-platform portability means the same artifact, key, bindings, and policy
 are accepted on supported Windows, Linux, and macOS builds. Results follow
 existing backend and libm semantics; bit-identical results across C libraries,
 x87/SSE2/ARM64 backends, or platform `long double` precision are not promised.
-See the [README](../README.md) for macOS signing and memory requirements.
+See [Building](building.md) for macOS signing and memory requirements.
 
 ### Header and ODR boundary
 
@@ -845,7 +811,7 @@ mechanism is required.
 
 ### CMake targets
 
-The final source-build surface is:
+The source-build surface is:
 
 - mexce::mexce: header-only ordinary MEXCE with no cryptographic dependency;
 - mexce::protected: header-only protected surface, transitively linking
@@ -872,25 +838,16 @@ compile definition, symbol, or link item.
 
 ### Conan
 
-Conan adds with_protected, default false. The protected package requires
+The Conan option with_protected defaults to false. The protected package requires
 `libsodium/[>=1.0.22]` and exports mexce::protected. Package identity retains the
 option and dependency; protected and ordinary packages cannot collapse to the
 same ID.
 
-The repository recipe packages exported candidate headers and build metadata,
-not a previously released archive. Its test package builds ordinary and
-protected consumers from that candidate package.
-
 ### vcpkg
 
-The port adds a protected feature depending on libsodium and installs the
+The port provides a protected feature depending on libsodium and installs the
 protected headers and CMake target. Default installation remains
 dependency-free.
-
-Candidate testing uses a transient overlay whose source path is the candidate
-tree rather than the tagged archive. The installed header hashes and target
-files are compared with the candidate. Release packaging separately validates
-the final archive reference and checksum.
 
 ## Issuer utility
 
@@ -944,425 +901,20 @@ content.
 Documentation instructs issuers to import the raw key immediately into the host
 wrapping system and remove the caller-owned final key file.
 
-## Verification contract
-
-### Authorities
-
-Correctness derives from:
-
-- the byte-exact wire contract;
-- libsodium's documented secretstream behavior;
-- existing adopted clear-expression semantics;
-- direct mathematical definitions for semantic operations; and
-- independently authored semantic fixtures.
-
-Encoder/decoder round trips are necessary but not sufficient because both sides
-could share the same wrong ID, arity, operand order, or framing rule.
-
-### Clear semantic refactor
-
-Verify:
-
-- all existing unit tests and expression-corpus results on Windows and Linux;
-- exact backend selection for existing SSE2 and x87 cases;
-- signed-zero behavior for source unary minus and explicit neg;
-- source-free SSE2-to-x87 fallback after an optimizer makes the primary graph
-  incompatible;
-- CSE-enabled fallback using an independent pre-mutation owner;
-- log and ln clear introspection spelling;
-- operation, optimized-expression, and numeric parity with the pre-refactor
-  clear evaluator;
-- failed replacement after a constant expression;
-- failed replacement after a native expression; and
-- empty-state evaluate, backend, binding-reference, executable, constant, and
-  optimizer invariants.
-
-Machine-code byte snapshots are not an oracle because addresses and platform
-code generation are unstable.
-
-### Independent format fixtures
-
-A test-only reference producer:
-
-- defines wire constants independently from production headers;
-- accepts hand-authored semantic records;
-- uses libsodium directly;
-- emits fixed-key binary fixtures and a human-readable manifest; and
-- is not linked into production.
-
-Production tests consume checked-in fixtures. Regeneration is explicit.
-Duplicated constants are confined to this independent boundary.
-
-### Cryptographic and format checks
-
-Verify:
-
-- known fixture and matching key succeed;
-- wrong key rejects;
-- public structural-field mutations map to their exact format category;
-- secretstream-header mutation with real libsodium fails authentication;
-- injected init_pull failure reports no index;
-- every ciphertext and tag byte mutation rejects;
-- frame swap, substitution, and reordering reject at pull;
-- insertion, removal, truncation, and trailing bytes reject exact framing;
-- compensated framing changes that reach pull fail authentication;
-- final-tag and END mismatches reject;
-- every reserved or unused byte is enforced; and
-- the transferred runtime key is empty after successful and failing calls.
-
-### Semantic checks
-
-Cover:
-
-- every operation ID, arity, alias, and operand order;
-- finite literal boundary values and signed zero;
-- every supported bound type;
-- repeated, missing, extra, and multiple slots;
-- strict and fast-math policy;
-- protected CSE rejection;
-- prefer_x87 and libm option preservation;
-- constant-only programs;
-- SSE2 and x87 results;
-- source-free post-optimization fallback;
-- protected compilation with caller buffers destroyed afterward; and
-- Windows-produced artifacts on Linux and Linux-produced artifacts on Windows.
-
-Hand-authored records exercise semantic failures without using the production
-encoder.
-
-### Failure and resource checks
-
-Table-drive every error-mapping row, including:
-
-- empty and short input;
-- record, source, schema, name, slot, and semantic-depth limits;
-- malformed public fields and zero program ID;
-- misplaced MANIFEST or END;
-- unknown records and operations;
-- non-zero reserved and unused fields;
-- invalid policy and non-finite literal;
-- stack underflow and invalid terminal depth;
-- missing runtime bindings;
-- allocation and executable-finalization failures;
-- failed replacement from constant and native states;
-- guarded allocation and explicit mlock failure; and
-- absent record_index behavior.
-
-sodium_init injected failure runs in an isolated process because initialization
-state is process-wide and cached.
-
-### Lifetime and erasure checks
-
-A narrow test-only wipe observer verifies wipe requests for key, stream, record,
-protected scalar, constant-only result, optimizer, fallback, replacement, and
-destruction paths.
-
-Tests also verify:
-
-- one-shot key consumption, move ownership, callback exception unwinding,
-  recursive consumption rejection, and moved-from rejection;
-- code-addressed constants and CSE storage remain alive while code is callable;
-- code becomes uncallable before protected storage is wiped;
-- protected introspection rejects without constructing protected debug text;
-- runtime errors contain no decoded content;
-- the protected path never calls the lexical parser; and
-- writable-executable memory never exists.
-
-### Fuzzing
-
-One bounded decoder fuzz target uses arbitrary bytes and a fixed non-secret key.
-A structured mutator independently re-encrypts altered semantic records so
-semantic validation is reachable instead of stopping every case at
-authentication.
-
-The invariant is no crash, hang, out-of-bounds access, undefined behavior, or
-acceptance without a complete valid authenticated stream. Fuzzing runs under
-Clang sanitizers in a dedicated job.
-
-### ODR and dependency isolation
-
-Build:
-
-- one translation unit including only mexce.h;
-- one translation unit including mexce_protected.h;
-- an evaluator created on one side and destroyed or used on the other; and
-- an ordinary installed consumer in an environment where sodium is not linked.
-
-Inspect the ordinary consumer's link interface and binary symbols to confirm no
-sodium dependency. Build a protected installed consumer and verify the
-normalized transitive dependency.
-
-### Performance and resource behavior
-
-Release baseline and candidate builds use the existing corpus, identical
-compiler flags, discarded warm-ups, alternating run order, and enough repeated
-runs to distinguish persistent movement from system noise. Reports retain the
-per-run values, medians, dispersion, backend selection, and correctness counts.
-During functional implementation these measurements are diagnostic: batches
-1 through 5 record changes and suspected causes but do not use fixed percentage
-limits as closure gates.
-
-Protected benchmarks run clear and protected compilation in isolated processes
-with matched formulas, bindings, and options. They report per-expression
-compile ratio, evaluate timing, and peak working set as structured output.
-Maximum-size valid and late-invalid artifacts also report elapsed time and peak
-working set from an isolated process. Resource failures remain subject to the
-specified bounded-input and cleanup behavior even while timing and memory
-measurements are diagnostic.
-
-No native code-size measurement is required unless a harness that measures it
-is explicitly added.
-
-## Implementation batches
-
-### Batch 1: shared semantic compilation and lifecycle
-
-Outcome:
-
-- one canonical semantic producer/consumer boundary;
-- clear compilation routed through that boundary;
-- one complete per-compilation lifetime owner;
-- source-free primary/fallback ownership;
-- per-compilation effective options; and
-- defined empty-state behavior after failed replacement.
-
-Primary write scope:
-
-- mexce.h
-- test/unit_tests.cpp
-
-Deletion points:
-
-- direct Token-to-Element construction inside set_expression;
-- m_last_expression and recursive source reparse;
-- any plaintext set_protected_expression surface or scaffolding present in the
-  implementation base;
-- compiler decisions that depend on debug-string presence; and
-- newly orphaned source-name conversion or fallback helpers.
-
-Gates:
-
-- clear semantic-refactor checks;
-- failed-replacement and empty-state checks;
-- primary/fallback independence and complete lifetime ownership checks;
-- Windows and Linux unit/corpus runs; and
-- clear performance diagnostics with backend and correctness counts.
-
-Owned risks:
-
-- CSE mutation leaking between primary and fallback owners;
-- code-addressed constants or CSE storage outliving the wrong owner;
-- clear optimized-expression spelling drift; and
-- backend selection drift after removing debug-string signals.
-
-### Batch 2: protected key and wire codec
-
-Dependency: shared semantic compilation and lifecycle.
-
-Outcome:
-
-- protected key ownership and secure allocation;
-- byte-exact format 1.0 encoder and bounded decoder;
-- protected errors and complete category/index mapping;
-- final protected CMake build option for codec tests; and
-- independent format fixtures.
-
-Affected surfaces:
-
-- protected public headers;
-- protected CMake test targets;
-- key, codec, and fixture tests; and
-- independent reference fixtures.
-
-The decoder produces validated semantic records for an internal sink but does
-not publish executable evaluator state.
-
-Gates:
-
-- independent fixture checks;
-- cryptographic and format mutation matrix;
-- key move, consume, mlock, initialization, and erasure checks;
-- encoder resource and schema limits;
-- error category/index matrix; and
-- Windows MSVC plus Linux GCC/Clang codec builds against libsodium 1.0.22.
-
-Owned risks:
-
-- secretstream init versus pull error classification;
-- unauthenticated allocation or semantic interpretation;
-- accidental key reuse or retained key copies;
-- immutable storage containing protected literal bits; and
-- production and reference codecs sharing constants or helpers.
-
-### Batch 3: protected evaluator integration
-
-Dependency: protected key and wire codec.
-
-Outcome:
-
-- canonical runtime binding and load APIs;
-- source-free streaming compilation;
-- authenticated option precedence;
-- protected introspection behavior;
-- complete protected lifecycle and wipe behavior; and
-- cross-platform artifact portability.
-
-Affected surfaces:
-
-- mexce.h sodium-free protected declarations/state;
-- mexce_protected.h runtime definitions;
-- protected runtime tests;
-- protected benchmark; and
-- decoder fuzz target.
-
-Gates:
-
-- semantic, failure, lifetime, erasure, and introspection checks;
-- mixed-translation-unit ODR test;
-- ordinary no-sodium link and symbol check;
-- ASan/UBSan protected tests on Linux;
-- focused Windows heap diagnostics;
-- structured decoder fuzz smoke;
-- Windows/Linux cross-produced artifacts; and
-- protected compile, evaluate, and isolated-resource diagnostics.
-
-Owned risks:
-
-- macro-conditioned evaluator layout;
-- sodium symbols leaking into ordinary consumers;
-- incomplete compilation-state ownership;
-- protected debug-string construction;
-- stored options being mutated during protected compilation; and
-- failure publishing partial code or leaving stale callable state.
-
-### Batch 4: install and package integration
-
-Dependency: protected evaluator integration.
-
-Outcome:
-
-- installed mexce::mexce and mexce::protected targets;
-- final libsodium dependency normalization;
-- Conan ordinary and protected packages with distinct identities; and
-- vcpkg default and protected feature packages.
-
-Affected surfaces:
-
-- CMake install/export configuration;
-- Conan recipe and test package;
-- vcpkg port metadata and feature definition; and
-- installed-consumer tests.
-
-Gates:
-
-- dependency-free default configure, build, install, and consumer;
-- protected configure, build, install, and consumer on every release compiler;
-- Conan candidate-source ordinary and protected consumers;
-- vcpkg candidate-source ordinary and protected consumers;
-- installed file/hash provenance from candidate source;
-- missing-libsodium hard failure for protected consumers; and
-- licence and third-party notice checks.
-
-Owned risks:
-
-- candidate package tests resolving an older release archive;
-- protected and ordinary Conan package IDs collapsing;
-- source-tree include fallback hiding broken install exports; and
-- provider-specific sodium target names leaking into the public MEXCE target.
-
-### Batch 5: issuer utility, documentation, and continuous gates
-
-Dependency: install and package integration.
-
-Outcome:
-
-- mexce_protect with safe no-overwrite publication;
-- public protected usage and threat-model documentation;
-- protected example;
-- release-platform CI; and
-- scheduled sanitizer/fuzz coverage.
-
-Affected surfaces:
-
-- issuer utility and utility tests;
-- README, example, changelog, and notices;
-- Windows/Linux workflows; and
-- protected fuzz workflow.
-
-Gates:
-
-- issuer input and publication invariants on Windows and Linux;
-- output permissions and partial-publication recovery;
-- end-to-end utility output consumed through the installed protected target;
-- documented commands executed in a clean consumer;
-- default and protected release matrices; and
-- scheduled extended fuzz run; and
-- complete-system clear and protected performance diagnostics on release
-  configurations.
-
-Owned risks:
-
-- overwriting or following attacker-controlled paths;
-- publishing a program without its key;
-- leaving raw key files with broad permissions;
-- documentation overstating local-process secrecy; and
-- CI exercising source-tree headers instead of installed packages.
-
-### Batch 6: performance stabilization and release acceptance
-
-Dependency: issuer utility, documentation, and continuous gates.
-
-Outcome:
-
-- release performance characterized from the complete implementation;
-- causal regressions identified with profiles rather than timing deltas alone;
-- targeted optimizations applied without weakening semantic, cryptographic,
-  lifecycle, packaging, or portability guarantees; and
-- release acceptance based on finished-system workload evidence.
-
-Affected surfaces:
-
-- clear and protected benchmark harnesses and structured reports;
-- implementation paths demonstrated by profiles to cause material regressions;
-  and
-- release performance documentation and continuous performance jobs.
-
-Gates:
-
-- matched baseline and candidate measurements across supported release
-  configurations, with warm-up, alternating order, per-run results, medians,
-  and dispersion retained;
-- clear compile and evaluate profiles, protected encode/load profiles, and
-  maximum-size valid and late-invalid resource profiles;
-- causal explanation for every optimization and before/after evidence on the
-  workload that exposed it;
-- all functional, security, lifecycle, portability, and packaging gates affected
-  by an optimization rerun after the change; and
-- release acceptance limits selected from complete-system distributions,
-  workload requirements, platform noise, and resource-safety evidence rather
-  than preassigned percentages.
-
-Owned risks:
-
-- optimizing an intermediate architecture that later batches replace;
-- treating measurement noise as a product regression;
-- improving aggregate timing while worsening tail or maximum-size behavior;
-- duplicating clear and protected compiler paths for speed; and
-- trading away cleanup, authentication, ownership, or portability guarantees.
-
-## Completion criteria
-
-The protected capability is complete when:
-
-- format 1.0 bytes, semantic IDs, APIs, ownership, errors, limits, and security
-  claims are implemented as specified;
-- normal MEXCE remains dependency-free and ODR-safe;
-- clear compilation retains adopted behavior;
-- protected compilation passes format, semantic, mutation, lifetime, erasure,
-  fuzz, portability, and resource gates;
-- installed CMake, Conan, and vcpkg consumers use candidate artifacts;
-- the issuer utility satisfies publication and permission invariants; and
-- the complete implementation satisfies Batch 6 release performance and
-  resource acceptance; and
-- no plaintext protected overload, duplicate compiler path, temporary build
-  switch, source-reparse fallback, or process-only artifact remains.
+## Verification authorities
+
+Correctness follows the byte-exact wire contract, libsodium secretstream
+semantics, the adopted clear-expression semantics, mathematical operation
+definitions, and independently authored format fixtures. Encoder/decoder round
+trips alone cannot establish correctness because both sides could share an
+incorrect ID, arity, operand order, or framing rule.
+
+The test-only reference producer defines its wire constants independently from
+production headers, accepts hand-authored semantic records, and uses libsodium
+directly. Production tests consume the checked-in fixtures; fixture regeneration
+is explicit. Machine-code byte snapshots are not an oracle because addresses
+and platform code generation vary.
+
+Performance comparisons and resource acceptance follow the
+[measurement procedure](../analysis/optimization_runbook.md) and its
+[attributed acceptance evidence](../analysis/performance_acceptance.md).
