@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
 
+env:
+  CONAN_HOME: ${{ github.workspace }}/.conan2
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_COMPILERCHECK: content
+  CCACHE_MAXSIZE: 2GiB
+
 jobs:
   fuzz:
     runs-on: ubuntu-24.04
@@ -20,26 +27,37 @@ jobs:
       - name: Install compiler and dependency tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libomp-dev
+          sudo apt-get install -y clang libomp-dev ccache ninja-build
           pip install conan==2.20.1
+
+      - name: Restore dependency and compiler caches
+        id: build-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            .conan2
+            .ccache
+          key: linux-mexce-fuzz-${{ hashFiles('.github/workflows/protected-fuzz.yml') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: linux-mexce-fuzz-${{ hashFiles('.github/workflows/protected-fuzz.yml') }}-
 
       - name: Resolve libsodium 1.0.22
         run: |
           conan profile detect --force
           conan install --requires=libsodium/1.0.22 --output-folder=deps \
             --generator=CMakeDeps --generator=CMakeToolchain \
-            --settings=build_type=RelWithDebInfo --build=missing
+            --settings=build_type=RelWithDebInfo --conf=tools.build:jobs=2 --build=missing
 
       - name: Configure sanitizer build
         run: >-
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=RelWithDebInfo
           -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/deps/conan_toolchain.cmake
           -DMEXCE_ENABLE_PROTECTED_EXPRESSIONS=ON
 
       - name: Build fuzz target
-        run: cmake --build build --target protected_decoder_fuzz --parallel
+        run: cmake --build build --target protected_decoder_fuzz --parallel 2
 
       - name: Seed authenticated format corpus
         run: |
@@ -56,6 +74,19 @@ jobs:
             -max_total_time=900 \
             -timeout=10 \
             -artifact_prefix=fuzz-artifacts/
+
+      - name: Compiler cache statistics
+        if: always() && steps.build-cache.outcome == 'success'
+        run: ccache --show-stats
+
+      - name: Save dependency and compiler caches
+        if: always() && steps.build-cache.outcome == 'success'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            .conan2
+            .ccache
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
 
       - name: Upload crashing inputs
         if: failure()
