@@ -6856,6 +6856,8 @@ impl::Semantic_program impl::Clear_semantic_producer::produce(
         return false;
     };
 
+    const auto is_whitespace = [](char c) { return c == ' ' || (c >= '\t' && c <= '\r'); };
+
     for (; i < e.length(); i++) {
         char infix_op;
         size_t infix_op_len;
@@ -6876,8 +6878,9 @@ impl::Semantic_program impl::Clear_semantic_producer::produce(
                 }
                 /* FALLTHROUGH */
             case 4: //just read an infix operator
-                if (e[i] == ' ')
+                if (is_whitespace(e[i])) {
                     break;
+                }
                 if (is_numeric(e[i])) {
                     temp = Token(NUMERIC_LITERAL, i, e[i]);
                     state = 1;
@@ -6919,7 +6922,7 @@ impl::Semantic_program impl::Clear_semantic_producer::produce(
                     temp.content += e[i];
                     break;
                 }
-                if (e[i] == ' ') {
+                if (is_whitespace(e[i])) {
                     tokens.push_back(temp);
                     state = 5;
                     break;
@@ -6967,7 +6970,7 @@ impl::Semantic_program impl::Clear_semantic_producer::produce(
                     temp.content += e[i];
                     break;
                 }
-                if (e[i] == ' ') {
+                if (is_whitespace(e[i])) {
                     if (owner.m_variables.find(temp.content) != owner.m_variables.end()) {
                         temp.type = VARIABLE_NAME;
                         tokens.push_back(temp);
@@ -7036,8 +7039,9 @@ impl::Semantic_program impl::Clear_semantic_producer::produce(
                 }
                 throw (mpe((string("\"")+e[i])+"\" not expected", i));
             case 5: //just read an expression (constant/variable/right parenthesis)
-                if (e[i] == ' ')
+                if (is_whitespace(e[i])) {
                     break;
+                }
                 if (parse_infix_op(i, infix_op, infix_op_len)) {
                     tokens.push_back(Token(get_infix_rank(infix_op), i, infix_op));
                     state = 4;
@@ -7055,6 +7059,9 @@ impl::Semantic_program impl::Clear_semantic_producer::produce(
                 }
                 throw (mpe((string("\"")+e[i])+"\" not expected", i));
             case 6: //just read a function name
+                if (is_whitespace(e[i])) {
+                    break;
+                }
                 if (e[i] == '(') {
                     state = 0;
                     break;

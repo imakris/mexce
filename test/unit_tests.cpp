@@ -59,6 +59,7 @@ extern "C" int mexce_test_override_mprotect(void* addr, size_t len, int prot)
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -665,6 +666,48 @@ void test_algebraic_simplification_accuracy(TestSuite& suite)
             eval.set_expression("-(x+y)+x");
             suite.expect_equal("unary_subtraction_retains_algebraic_accuracy", eval.evaluate(), -1.0);
         }
+    }
+}
+
+void test_expression_whitespace(TestSuite& suite)
+{
+    class Parsing_error_position : public mexce::mexce_parsing_exception
+    {
+    public:
+        explicit Parsing_error_position(const mexce::mexce_parsing_exception& error)
+        :
+            mexce::mexce_parsing_exception(error)
+        {}
+
+        std::size_t position() const { return m_position; }
+    };
+
+    double x = 2.5;
+    mexce::evaluator eval;
+    eval.bind(x, "x");
+    for (const char whitespace : {' ', '\t', '\n', '\r', '\v', '\f'}) {
+        const std::string gap(3, whitespace);
+        const std::string expression = gap + "max" + gap + "(" + gap + "x" + gap + "," + gap +
+            "1" + gap + ")" + gap + "+" + gap + "sin" + gap + "(" + gap + "0" + gap + ")" + gap;
+        eval.set_expression(expression);
+        suite.expect_equal("lexical_whitespace_" + std::to_string(whitespace), eval.evaluate(), x);
+    }
+    eval.set_expression("\r\n1\t+\n2\r\n");
+    suite.expect_equal("mixed_lexical_whitespace", eval.evaluate(), 3.0);
+
+    for (const char* expression : {"1 2", "1\t2", "x\nx", "si\rn(0)", "1e+ 2", "2 * * 3"}) {
+        suite.expect_throw<mexce::mexce_parsing_exception>(
+            std::string("whitespace_preserves_token_boundaries_") + expression,
+            [&] { eval.set_expression(expression); });
+    }
+
+    const std::string invalid = "sin  \t(0) +\r\n @";
+    try {
+        eval.set_expression(invalid);
+        suite.expect_true("whitespace_error_position_throws", false);
+    }
+    catch (const mexce::mexce_parsing_exception& error) {
+        suite.expect_true("whitespace_error_position", Parsing_error_position(error).position() == invalid.find('@'));
     }
 }
 
@@ -2067,6 +2110,7 @@ int main() {
     test_rip_constant_representations(suite);
 #endif
     test_algebraic_simplification_accuracy(suite);
+    test_expression_whitespace(suite);
     test_numeric_literal_validation(suite);
     test_pow_optimizer_special_cases(suite);
     test_nested_pow_folding_sympy_semantics(suite);
