@@ -377,7 +377,7 @@ namespace impl {
     using elist_const_it_t  = elist_t::const_iterator;
 
     shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v);
-    uint8_t* push_intermediate_code(evaluator* ev, const std::string& s);
+    uint8_t* push_intermediate_code(evaluator* ev, std::string s);
     shared_ptr<Function> make_function(evaluator* ev, const string& name);
     void asmd_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
     void pow_optimizer(elist_it_t it, evaluator* ev, elist_t* elist);
@@ -512,7 +512,7 @@ private:
     friend std::shared_ptr<impl::Function> impl::make_function(evaluator* ev, const std::string& name);
     friend void impl::asmd_optimizer(impl::elist_it_t it, evaluator* ev, impl::elist_t* elist);
     friend void impl::pow_optimizer(impl::elist_it_t it, evaluator* ev, impl::elist_t* elist);
-    friend uint8_t* impl::push_intermediate_code(evaluator* ev, const std::string& s);
+    friend uint8_t* impl::push_intermediate_code(evaluator* ev, std::string s);
     friend void impl::run_cse(evaluator* ev, impl::elist_t& elist);
     friend class impl::Semantic_compiler;
     friend class impl::Clear_semantic_producer;
@@ -804,7 +804,7 @@ struct Constant
     Numeric_data_type numeric_data_type;
 
     Constant(uint64_t i, double v, string n):
-        id(i), name(n), value(v),
+        id(i), name(std::move(n)), value(v),
         address((void*)&this->value), numeric_data_type(M64FP)
     {}
 
@@ -831,7 +831,7 @@ struct Variable
     Numeric_data_type numeric_data_type;
 
     Variable(uint64_t i, volatile void* addr, string n, Numeric_data_type ndt):
-        id(i), name(n), referenced(false), address(addr), numeric_data_type(ndt)
+        id(i), name(std::move(n)), referenced(false), address(addr), numeric_data_type(ndt)
     {}
 };
 
@@ -1312,11 +1312,10 @@ shared_ptr<Constant> make_intermediate_constant(evaluator* ev, double v)
 
 
 inline
-uint8_t* push_intermediate_code(evaluator* ev, const string& s)
+uint8_t* push_intermediate_code(evaluator* ev, string s)
 {
     auto& compilation = ev->active_compilation();
-    compilation.m_intermediate_code.push_back(string());
-    compilation.m_intermediate_code.back() = s;
+    compilation.m_intermediate_code.push_back(std::move(s));
     return (uint8_t*)&compilation.m_intermediate_code.back()[0];
 }
 
@@ -5261,15 +5260,15 @@ string elist_to_string(const elist_t& elist)
             }
 
             if (st.size()!=1) {
-                string tmp = lrs;
+                string tmp = std::move(lrs);
                 st.pop_back();
-                get<2>(st.back()).push_back(tmp);
+                get<2>(st.back()).push_back(std::move(tmp));
             }
         }
     }
 
     assert(st.size() == 1);
-    string ret = get<0>(st.back());
+    const string& ret = get<0>(st.back());
     return ret.substr(1, ret.size()-2);
 }
 
